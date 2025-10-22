@@ -1,0 +1,2 @@
+2025-10-18 16:35:48.653 WAT [7385] FATAL:  lock file "postmaster.pid" already exists
+2025-10-18 16:35:48.653 WAT [7385] HINT:  Is another postmaster (PID 29384) running in data directory "/data/data/com.termux/files/home/pgdata"?

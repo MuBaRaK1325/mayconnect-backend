@@ -1,0 +1,39 @@
+async function fetchPlans() {
+  try {
+    const plansResponse = await fetch('http://localhost:3000/data/plans');
+    const plans = await plansResponse.json();
+
+    const historyResponse = await fetch(`http://localhost:3000/data/purchases/${currentUser}`);
+    const purchases = await historyResponse.json();
+    const purchasedPlanIds = purchases.map(p => p.plan_id);
+
+    const container = document.getElementById('plans');
+    container.innerHTML = '';
+
+    plans.forEach(plan => {
+      const div = document.createElement('div');
+      div.className = 'plan';
+      
+      // Highlight purchased plans
+      if (purchasedPlanIds.includes(plan.id)) {
+        div.style.backgroundColor = '#ffeeba'; // light yellow
+      }
+
+      div.innerHTML = `
+        <h2>${plan.name}</h2>
+        <p><strong>Network:</strong> ${plan.network}</p>
+        <p><strong>Size:</strong> ${plan.size}</p>
+        <p><strong>Price:</strong> ₦${plan.price}</p>
+        <p><strong>Created At:</strong> ${new Date(plan.created_at).toLocaleString()}</p>
+        <button class="buy-btn" onclick="buyPlan(${plan.id}, '${plan.name}')" ${purchasedPlanIds.includes(plan.id) ? 'disabled' : ''}>
+          ${purchasedPlanIds.includes(plan.id) ? 'Purchased' : 'Buy Plan'}
+        </button>
+      `;
+      container.appendChild(div);
+    });
+
+  } catch (err) {
+    console.error('Error fetching plans:', err);
+    document.getElementById('plans').innerText = 'Failed to load plans.';
+  }
+}
