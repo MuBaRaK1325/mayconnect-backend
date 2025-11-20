@@ -1,61 +1,56 @@
-import express from "express";
-import pkg from "pg";
+// backend/Auth.js
+import fs from "fs";
+import path from "path";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import dotenv from "dotenv";
 
-dotenv.config();
-const router = express.Router();
-const { Pool } = pkg;
+const usersFilePath = path.resolve("users.json");
+const SECRET_KEY = process.env.SECRET_KEY || "mayconnect_secret_key";
 
-// Connect to Neon Database (or your Postgres)
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// ✅ Helper function: read users from file
+function readUsers() {
+  if (!fs.existsSync(usersFilePath)) return [];
+  const data = fs.readFileSync(usersFilePath, "utf8");
+  return JSON.parse(data || "[]");
+}
 
-// ✅ REGISTER endpoint
-router.post("/register", async (req, res) => {
-  const { name, email, password } = req.body;
-  try {
-    const existingUser = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    if (existingUser.rows.length > 0) {
-      return res.status(400).json({ error: "Email already registered" });
-    }
+// ✅ Helper function: save users to file
+function saveUsers(users) {
+  fs.writeFileSync(usersFilePath, JSON.stringify(users, null, 2));
+}
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const result = await pool.query(
-      "INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id",
-      [name, email, hashedPassword]
-    );
-    const token = jwt.sign({ id: result.rows[0].id }, process.env.JWT_SECRET, { expiresIn: "1d" });
-    res.status(201).json({ message: "✅ Registered successfully", token });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// ✅ LOGIN endpoint
-router.post("/login", async (req, res) => {
+// 🧩 Signup function
+export function signup(req, res) {
   const { email, password } = req.body;
-  try {
-    const user = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
-    if (user.rows.length === 0) {
-      return res.status(400).json({ error: "User not found" });
-    }
+  const users = readUsers();
 
-    const valid = await bcrypt.compare(password, user.rows[0].password);
-    if (!valid) {
-      return res.status(400).json({ error: "Invalid password" });
-    }
-
-    const token = jwt.sign({ id: user.rows[0].id }, process.env.JWT_SECRET, { expiresIn: "1d" });
-    res.json({ message: "✅ Login successful", token });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Server error" });
+  if (users.find((user) => user.email === email)) {
+    return res.status(400).json({ message: "User already exists" });
   }
-});
 
-export default router;
+  const hashedPassword = bcrypt.hashSync(password, 10);
+  const newUser = { email, password: hashedPassword };
+  users.push(newUser);
+  saveUsers(users);
+
+  res.json({ message: "Signup successful" });
+}
+
+// 🧩 Login function
+export function login(req, res) {
+  const { email, password } = req.body;
+  const users = readUsers();
+
+  const user = users.find((u) => u.email === email);
+  if (!user) {
+    return res.status(404).json({ message: "User not found" });
+  }
+
+  const validPassword = bcrypt.compareSync(password, user.password);
+  if (!validPassword) {
+    return res.status(401).json({ message: "Incorrect password" });
+  }
+
+  const token = jwt.sign({ email }, SECRET_KEY, { expiresIn: "1h" });
+  res.json({ message: "Login successful", token });
+}
