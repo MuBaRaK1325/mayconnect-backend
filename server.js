@@ -7,72 +7,62 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const SECRET = "mayconnect_secret_key";
 
+// Allow frontend
 app.use(cors());
 app.use(express.json());
 
-// Temporary users storage
-const users = [];
+// Temporary in-memory database
+let users = [];
 
-// SAMPLE DATA PLANS
+// Data plans
 const plans = [
   { name: "MTN Daily 100MB", price: 100, network: "MTN", type: "Daily" },
-  { name: "Airtel Monthly 6GB", price: 2500, network: "Airtel", type: "Monthly" },
-  { name: "Glo Daily 500MB", price: 200, network: "Glo", type: "Daily" },
-  { name: "9mobile Weekly 750MB", price: 500, network: "9mobile", type: "Weekly" }
+  { name: "MTN Weekly 1.5GB", price: 1000, network: "MTN", type: "Weekly" },
+  { name: "Airtel Daily 100MB", price: 100, network: "Airtel", type: "Daily" },
+  { name: "Glo Monthly 4.5GB", price: 1500, network: "Glo", type: "Monthly" },
 ];
 
-// SIGNUP
+// ======================== SIGNUP ========================
 app.post("/api/signup", async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password)
-    return res.status(400).json({ message: "All fields required" });
+    return res.status(400).json({ error: "Email & password required" });
 
-  const exist = users.find(u => u.email === email);
-  if (exist)
-    return res.status(400).json({ message: "User already exists" });
+  const exists = users.find(u => u.email === email);
+  if (exists)
+    return res.status(400).json({ error: "User already exists" });
 
   const hashed = await bcrypt.hash(password, 10);
+
   users.push({ email, password: hashed });
 
   res.json({ message: "Signup successful" });
 });
 
-// LOGIN
+// ======================== LOGIN ========================
 app.post("/api/login", async (req, res) => {
   const { email, password } = req.body;
 
   const user = users.find(u => u.email === email);
   if (!user)
-    return res.status(400).json({ message: "User not found" });
+    return res.status(400).json({ error: "User not found" });
 
   const ok = await bcrypt.compare(password, user.password);
   if (!ok)
-    return res.status(400).json({ message: "Incorrect password" });
+    return res.status(400).json({ error: "Incorrect password" });
 
-  const token = jwt.sign({ email }, SECRET, { expiresIn: "1h" });
+  const token = jwt.sign({ email }, SECRET, { expiresIn: "2h" });
 
-  res.json({
-    message: "Login successful",
-    token
-  });
+  res.json({ message: "Login successful", token });
 });
 
-// GET PLANS (protected)
+// ======================== PLANS ========================
 app.get("/api/plans", (req, res) => {
-  const auth = req.headers.authorization;
-  if (!auth)
-    return res.status(401).json({ message: "Missing token" });
-
-  try {
-    const token = auth.split(" ")[1];
-    jwt.verify(token, SECRET);
-    res.json(plans);
-  } catch (err) {
-    res.status(401).json({ message: "Invalid token" });
-  }
+  res.json(plans);
 });
 
+// Start Server
 app.listen(PORT, () => {
-  console.log(`Backend running on port ${PORT}`);
+  console.log("Backend running on port " + PORT);
 });
