@@ -2,49 +2,65 @@ const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const SECRET = "mayconnect_secret_key";
+const SECRET = process.env.JWT_SECRET || "mayconnect_secret_key";
 
-// Allow frontend
 app.use(cors());
 app.use(express.json());
 
-// Temporary in-memory database
-let users = [];
+// ======== Load Database ========
+let db = { users: [] };
 
-// Data plans
+if (fs.existsSync("db.json")) {
+  db = JSON.parse(fs.readFileSync("db.json"));
+}
+
+// Save DB helper
+function saveDB() {
+  fs.writeFileSync("db.json", JSON.stringify(db, null, 2));
+}
+
+// ======== DATA PLANS ========
 const plans = [
-  { name: "MTN Daily 100MB", price: 100, network: "MTN", type: "Daily" },
-  { name: "MTN Weekly 1.5GB", price: 1000, network: "MTN", type: "Weekly" },
-  { name: "Airtel Daily 100MB", price: 100, network: "Airtel", type: "Daily" },
-  { name: "Glo Monthly 4.5GB", price: 1500, network: "Glo", type: "Monthly" },
+  { name: "MTN 100MB Daily", price: 100, network: "MTN", type: "Daily" },
+  { name: "MTN 1.5GB Weekly", price: 1000, network: "MTN", type: "Weekly" },
+  { name: "Airtel 100MB Daily", price: 100, network: "Airtel", type: "Daily" },
+  { name: "Glo 4.5GB Monthly", price: 1500, network: "Glo", type: "Monthly" },
 ];
 
-// ======================== SIGNUP ========================
+// ======== SIGNUP ========
 app.post("/api/signup", async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, username } = req.body;
 
-  if (!email || !password)
-    return res.status(400).json({ error: "Email & password required" });
+  if (!email || !password || !username)
+    return res.status(400).json({ error: "All fields are required" });
 
-  const exists = users.find(u => u.email === email);
+  const exists = db.users.find(u => u.email === email);
   if (exists)
     return res.status(400).json({ error: "User already exists" });
 
   const hashed = await bcrypt.hash(password, 10);
 
-  users.push({ email, password: hashed });
+  db.users.push({
+    email,
+    username,
+    password: hashed,
+    wallet: 0
+  });
+
+  saveDB();
 
   res.json({ message: "Signup successful" });
 });
 
-// ======================== LOGIN ========================
+// ======== LOGIN ========
 app.post("/api/login", async (req, res) => {
   const { email, password } = req.body;
 
-  const user = users.find(u => u.email === email);
+  const user = db.users.find(u => u.email === email);
   if (!user)
     return res.status(400).json({ error: "User not found" });
 
@@ -52,17 +68,44 @@ app.post("/api/login", async (req, res) => {
   if (!ok)
     return res.status(400).json({ error: "Incorrect password" });
 
-  const token = jwt.sign({ email }, SECRET, { expiresIn: "2h" });
+  const token = jwt.sign(
+    { email: user.email },
+    SECRET,
+    { expiresIn: "2h" }
+  );
 
-  res.json({ message: "Login successful", token });
+  res.json({
+    message: "Login successful",
+    token,
+    username: user.username,
+    wallet: user.wallet
+  });
 });
 
-// ======================== PLANS ========================
+// ======== GET PLANS ========
 app.get("/api/plans", (req, res) => {
   res.json(plans);
 });
 
-// Start Server
+// ======== GET USER DETAILS (for showing name at top) ========
+app.get("/api/me", (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    const decoded = jwt.verify(token, SECRET);
+
+    const user = db.users.find(u => u.email === decoded.email);
+
+    res.json({
+      email: user.email,
+      username: user.username,
+      wallet: user.wallet
+    });
+  } catch {
+    res.status(401).json({ error: "Invalid token" });
+  }
+});
+
+// Start
 app.listen(PORT, () => {
   console.log("Backend running on port " + PORT);
 });
