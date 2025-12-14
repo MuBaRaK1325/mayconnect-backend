@@ -28,13 +28,10 @@ app.get("/", (req, res) => {
   res.json({ status: "MayConnect Backend is running" });
 });
 
-// SIGNUP
 app.post("/api/signup", async (req, res) => {
-  console.log("Signup body:", req.body);
+  const { name, email, password } = req.body;
 
-  const { email, password } = req.body;
-
-  if (!email || !password) {
+  if (!name || !email || !password) {
     return res.status(400).json({ error: "All fields are required" });
   }
 
@@ -44,7 +41,15 @@ app.post("/api/signup", async (req, res) => {
   }
 
   const hashed = await bcrypt.hash(password, 10);
-  users.push({ email, password: hashed });
+
+  const newUser = {
+    name,
+    email,
+    password: hashed,
+    wallet: 0
+  };
+
+  users.push(newUser);
 
   res.json({ message: "Signup successful" });
 });
@@ -69,7 +74,14 @@ app.post("/api/login", async (req, res) => {
 
   const token = jwt.sign({ email }, SECRET, { expiresIn: "2h" });
 
-  res.json({ message: "Login successful", token, name: email.split("@")[0] });
+  res.json({
+  message: "Login successful",
+  token,
+  user: {
+    name: user.name,
+    email: user.email,
+    wallet: user.wallet
+  }
 });
 
 // PLANS
