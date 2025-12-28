@@ -1,128 +1,305 @@
-const express = require("express");
-const cors = require("cors");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const fs = require("fs");
-const path = require("path");
+const {
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} = require('@simplewebauthn/server');
+const base64url = require('base64url');
+require('dotenv').config();
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { Pool } = require('pg');
+const fetch = require('node-fetch');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const SECRET = "mayconnect_secret_key";
+app.use(express.json());
 
-// Middleware
-app.use(cors());
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true }));
-
-// Persistent database files
-const usersFile = path.join(__dirname, "users.json");
-const transactionsFile = path.join(__dirname, "transactions.json");
-
-// Load or create database
-let users = fs.existsSync(usersFile) ? JSON.parse(fs.readFileSync(usersFile)) : [];
-let transactions = fs.existsSync(transactionsFile) ? JSON.parse(fs.readFileSync(transactionsFile)) : [];
-
-// Data plans
-const plans = [
-  { id: 1, name: "MTN Daily 100MB", price: 100, network: "MTN", type: "Data" },
-  { id: 2, name: "MTN Weekly 1.5GB", price: 1000, network: "MTN", type: "Data" },
-  { id: 3, name: "Airtel Daily 100MB", price: 100, network: "Airtel", type: "Data" },
-  { id: 4, name: "Glo Monthly 4.5GB", price: 1500, network: "Glo", type: "Data" },
-  { id: 5, name: "MTN 100 Naira Airtime", price: 100, network: "MTN", type: "Airtime" },
-  { id: 6, name: "Airtel 100 Naira Airtime", price: 100, network: "Airtel", type: "Airtime" },
-];
-
-// ======================== SIGNUP ========================
-app.post("/api/signup", async (req, res) => {
-  const { fullName, email, password } = req.body;
-  if (!fullName || !email || !password) return res.status(400).json({ error: "All fields are required" });
-
-  const exists = users.find(u => u.email === email);
-  if (exists) return res.status(400).json({ error: "User already exists" });
-
-  const hashed = await bcrypt.hash(password, 10);
-  const newUser = { fullName, email, password: hashed, wallet: 0 };
-  users.push(newUser);
-
-  fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
-
-  res.json({ message: "Signup successful" });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
 });
 
-// ======================== LOGIN ========================
+// ===== Middleware: Authenticate JWT =====
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403);
+    req.user = user;
+    next();
+  });
+}
+
+// ===== Middleware: Admin Check =====
+function isAdmin(req, res, next) {
+  if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
+  next();
+}
+
+// ===== USER ENDPOINTS =====
+// Register
+app.post("/api/register", async (req, res) => {
+  const { name, email, password } = req.body;
+  if (!name || !email || !password) return res.status(400).json({ error: "All fields required" });
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+  try {
+    const result = await pool.query(
+      "INSERT INTO users (name,email,password) VALUES ($1,$2,$3) RETURNING id,email",
+      [name, email, hashedPassword]
+    );
+    res.json({ message: "User registered", user: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Registration failed" });
+  }
+});
+
+// Login (supports PIN & optional biometric key)
 app.post("/api/login", async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: "All fields are required" });
+  const { email, password, biometric_key } = req.body;
+  try {
+    const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
+    const user = result.rows[0];
+    if (!user) return res.status(400).json({ error: "Invalid credentials" });
 
-  const user = users.find(u => u.email === email);
-  if (!user) return res.status(400).json({ error: "User not found" });
+    if (biometric_key) {
+      if (biometric_key !== user.biometric_key)
+        return res.status(400).json({ error: "Invalid biometric key" });
+    } else {
+      const valid = await bcrypt.compare(password, user.password);
+      if (!valid) return res.status(400).json({ error: "Invalid credentials" });
+    }
 
-  const ok = await bcrypt.compare(password, user.password);
-  if (!ok) return res.status(400).json({ error: "Incorrect password" });
-
-  const token = jwt.sign({ email }, SECRET, { expiresIn: "2h" });
-  res.json({ message: "Login successful", token, fullName: user.fullName });
+    const token = jwt.sign({ id: user.id, email: user.email, is_admin: user.is_admin }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.json({ message: "Login successful", token });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Login failed" });
+  }
 });
 
-// ======================== GET PLANS ========================
-app.get("/api/plans", (req, res) => {
-  res.json(plans);
+// Set Transfer PIN
+app.post("/api/wallet/set-pin", authenticateToken, async (req, res) => {
+  const { pin } = req.body;
+  if (!pin) return res.status(400).json({ error: "PIN required" });
+  const hashedPin = await bcrypt.hash(pin, 10);
+
+  try {
+    await pool.query("UPDATE users SET pin=$1,pin_attempts=0,locked=false WHERE id=$2", [hashedPin, req.user.id]);
+    res.json({ message: "PIN set successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to set PIN" });
+  }
+});
+// ===== BIOMETRIC CHALLENGE =====
+app.get('/api/auth/biometric-challenge', authenticateToken, async (req, res) => {
+  try {
+    const userResult = await pool.query("SELECT id, biometric_key FROM users WHERE id=$1", [req.user.id]);
+    if (!userResult.rows[0] || !userResult.rows[0].biometric_key) {
+      return res.status(400).json({ error: "No biometric key registered" });
+    }
+
+    const challengeOptions = generateAuthenticationOptions({
+      allowCredentials: [{
+        id: base64url.toBuffer(userResult.rows[0].biometric_key),
+        type: 'public-key',
+      }],
+      userVerification: 'preferred',
+    });
+
+    // Save challenge temporarily in memory or DB for verification
+    await pool.query("UPDATE users SET temp_challenge=$1 WHERE id=$2", [challengeOptions.challenge, req.user.id]);
+
+    res.json(challengeOptions);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error generating biometric challenge" });
+  }
 });
 
-// ======================== WALLET ========================
-app.get("/api/wallet/:email", (req, res) => {
-  const { email } = req.params;
-  const user = users.find(u => u.email === email);
-  if (!user) return res.status(404).json({ error: "User not found" });
-  res.json({ wallet: user.wallet });
+// ===== VERIFY BIOMETRIC =====
+app.post('/api/auth/verify-biometric', authenticateToken, async (req, res) => {
+  const { id, rawId, response, type } = req.body;
+
+  try {
+    const userResult = await pool.query(
+      "SELECT id, biometric_key, temp_challenge FROM users WHERE id=$1",
+      [req.user.id]
+    );
+
+    const user = userResult.rows[0];
+    if (!user || !user.biometric_key || !user.temp_challenge)
+      return res.status(400).json({ error: "No biometric registration found" });
+
+    const verification = await verifyAuthenticationResponse({
+      credential: req.body,
+      expectedChallenge: user.temp_challenge,
+      expectedOrigin: "https://your-frontend-domain.com", // replace with your frontend URL
+      expectedRPID: "localhost", // or your domain if deployed
+      authenticator: {
+        credentialID: base64url.toBuffer(user.biometric_key),
+        counter: 0, // store this in DB for increment checks
+      },
+    });
+
+    if (verification.verified) {
+      // Clear temporary challenge
+      await pool.query("UPDATE users SET temp_challenge=NULL WHERE id=$1", [user.id]);
+      res.json({ verified: true });
+    } else {
+      res.status(401).json({ verified: false, error: "Biometric verification failed" });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error verifying biometric" });
+  }
+});
+// ===== WALLET ENDPOINTS =====
+// Get Balance
+app.get("/api/wallet", authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query("SELECT wallet_balance FROM users WHERE id=$1", [req.user.id]);
+    res.json({ balance: result.rows[0].wallet_balance });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch balance" });
+  }
 });
 
-app.post("/api/wallet/fund", (req, res) => {
-  const { email, amount } = req.body;
-  const user = users.find(u => u.email === email);
-  if (!user) return res.status(404).json({ error: "User not found" });
-  user.wallet += Number(amount);
-  fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
-  res.json({ message: "Wallet funded", wallet: user.wallet });
+// Fund Wallet (internal / payment gateways handled separately)
+app.post("/api/wallet/fund", authenticateToken, async (req, res) => {
+  const { amount, pin } = req.body;
+  if (!amount || !pin) return res.status(400).json({ error: "Amount and PIN required" });
+
+  try {
+    const userResult = await pool.query("SELECT pin, pin_attempts, locked, wallet_balance FROM users WHERE id=$1", [req.user.id]);
+    const user = userResult.rows[0];
+
+    if (user.locked) return res.status(403).json({ error: "Wallet locked due to multiple incorrect PIN attempts" });
+
+    const validPin = await bcrypt.compare(pin, user.pin);
+    if (!validPin) {
+      let attempts = user.pin_attempts + 1;
+      let locked = attempts >= 3;
+      await pool.query("UPDATE users SET pin_attempts=$1, locked=$2 WHERE id=$3", [attempts, locked, req.user.id]);
+      return res.status(400).json({ error: "Incorrect PIN" });
+    }
+
+    const reference = `MC-${uuidv4()}`;
+    const newBalance = parseFloat(user.wallet_balance) + parseFloat(amount);
+    await pool.query("UPDATE users SET wallet_balance=$1,pin_attempts=0 WHERE id=$2", [newBalance, req.user.id]);
+    await pool.query(
+      "INSERT INTO transactions (user_id,type,amount,description,reference,status,details) VALUES ($1,'fund',$2,'Wallet funded',$3,'success',$4)",
+      [req.user.id, amount, reference, { method: "wallet" }]
+    );
+
+    res.json({ message: "Wallet funded successfully", reference, balance: newBalance });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Funding failed" });
+  }
 });
 
-// ======================== PURCHASE ========================
-app.post("/api/purchase", (req, res) => {
-  const { email, planId } = req.body;
-  const user = users.find(u => u.email === email);
-  if (!user) return res.status(404).json({ error: "User not found" });
+// Purchase Airtime/Data
+app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
+  const { type, amount, details, pin } = req.body;
+  if (!type || !amount || !pin) return res.status(400).json({ error: "Type, amount and PIN required" });
 
-  const plan = plans.find(p => p.id === planId);
-  if (!plan) return res.status(404).json({ error: "Plan not found" });
+  try {
+    const userResult = await pool.query("SELECT wallet_balance,pin,pin_attempts,locked FROM users WHERE id=$1", [req.user.id]);
+    const user = userResult.rows[0];
 
-  if (user.wallet < plan.price) return res.status(400).json({ error: "Insufficient wallet balance" });
+    if (user.locked) return res.status(403).json({ error: "Wallet locked due to multiple incorrect PIN attempts" });
+    const validPin = await bcrypt.compare(pin, user.pin);
+    if (!validPin) {
+      let attempts = user.pin_attempts + 1;
+      let locked = attempts >= 3;
+      await pool.query("UPDATE users SET pin_attempts=$1, locked=$2 WHERE id=$3", [attempts, locked, req.user.id]);
+      return res.status(400).json({ error: "Incorrect PIN" });
+    }
 
-  user.wallet -= plan.price;
+    if (user.wallet_balance < amount) return res.status(400).json({ error: "Insufficient balance" });
 
-  const transaction = {
-    id: transactions.length + 1,
-    email,
-    planName: plan.name,
-    price: plan.price,
-    type: plan.type,
-    date: new Date().toISOString()
-  };
-  transactions.push(transaction);
+    const reference = `MC-${uuidv4()}`;
+    const newBalance = user.wallet_balance - amount;
 
-  fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
-  fs.writeFileSync(transactionsFile, JSON.stringify(transactions, null, 2));
+    await pool.query("UPDATE users SET wallet_balance=$1,pin_attempts=0 WHERE id=$2", [newBalance, req.user.id]);
+    await pool.query(
+      "INSERT INTO transactions (user_id,type,amount,description,reference,status,details) VALUES ($1,$2,$3,$4,$5,'success',$6)",
+      [req.user.id, type, amount, type === 'airtime' ? 'Airtime purchase' : 'Data purchase', reference, details || null]
+    );
 
-  res.json({ message: "Purchase successful", wallet: user.wallet, transaction });
+    res.json({
+      message: "Purchase successful",
+      receipt: { reference, status: "success", type, amount, details, date: new Date() },
+      balance: newBalance
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Purchase failed" });
+  }
 });
 
-// ======================== GET TRANSACTIONS ========================
-app.get("/api/transactions/:email", (req, res) => {
-  const { email } = req.params;
-  const userTransactions = transactions.filter(t => t.email === email);
-  res.json(userTransactions);
+// ===== TRANSACTION HISTORY =====
+app.get("/api/wallet/transactions", authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM transactions WHERE user_id=$1 ORDER BY created_at DESC", [req.user.id]);
+    res.json({ transactions: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch transactions" });
+  }
 });
 
-// ======================== START SERVER ========================
-app.listen(PORT, () => {
-  console.log("Backend running on port " + PORT);
+// ===== TRANSACTION REVERSAL =====
+app.post("/api/wallet/transactions/reverse", authenticateToken, async (req, res) => {
+  const { reference } = req.body;
+  if (!reference) return res.status(400).json({ error: "Reference required" });
+
+  try {
+    const txnResult = await pool.query("SELECT * FROM transactions WHERE reference=$1 AND user_id=$2", [reference, req.user.id]);
+    const txn = txnResult.rows[0];
+    if (!txn) return res.status(404).json({ error: "Transaction not found" });
+    if (txn.type === 'fund') return res.status(400).json({ error: "Cannot reverse funding transactions" });
+
+    const newBalance = parseFloat(txn.amount) + parseFloat((await pool.query("SELECT wallet_balance FROM users WHERE id=$1", [req.user.id])).rows[0].wallet_balance);
+    await pool.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, req.user.id]);
+    await pool.query("UPDATE transactions SET status='reversed' WHERE reference=$1", [reference]);
+
+    res.json({ message: "Transaction reversed", balance: newBalance });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Reversal failed" });
+  }
 });
+
+// ===== PAYMENT GATEWAYS (Paystack & Flutterwave) =====
+// Paste the Paystack and Flutterwave routes we discussed earlier here
+
+// ===== ADMIN DASHBOARD =====
+app.get("/api/admin/users", authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const result = await pool.query("SELECT id,name,email,wallet_balance,created_at FROM users ORDER BY created_at DESC");
+    res.json({ users: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch users" });
+  }
+});
+
+app.get("/api/admin/transactions", authenticateToken, isAdmin, async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM transactions ORDER BY created_at DESC");
+    res.json({ transactions: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch transactions" });
+  }
+});
+
+// ===== START SERVER =====
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
