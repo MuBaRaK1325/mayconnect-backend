@@ -2,45 +2,49 @@ const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SECRET = "mayconnect_secret_key";
 
-// Parse JSON
-app.use(express.json());
+// Middleware
 app.use(cors());
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
 
-// Temporary in-memory database
-let users = [];
+// Persistent database files
+const usersFile = path.join(__dirname, "users.json");
+const transactionsFile = path.join(__dirname, "transactions.json");
 
-// ======================== DATA PLANS ========================
-const dataPlans = [
-  { name: "MTN 100MB Daily", price: 100, network: "MTN", type: "Data" },
-  { name: "MTN 1.5GB Weekly", price: 1000, network: "MTN", type: "Data" },
-  { name: "Airtel 100MB Daily", price: 100, network: "Airtel", type: "Data" },
-  { name: "Glo 4.5GB Monthly", price: 1500, network: "Glo", type: "Data" },
-];
+// Load or create database
+let users = fs.existsSync(usersFile) ? JSON.parse(fs.readFileSync(usersFile)) : [];
+let transactions = fs.existsSync(transactionsFile) ? JSON.parse(fs.readFileSync(transactionsFile)) : [];
 
-const airtimePlans = [
-  { name: "MTN ₦100 Airtime", price: 100, network: "MTN", type: "Airtime" },
-  { name: "Airtel ₦200 Airtime", price: 200, network: "Airtel", type: "Airtime" },
-  { name: "Glo ₦500 Airtime", price: 500, network: "Glo", type: "Airtime" },
+// Data plans
+const plans = [
+  { id: 1, name: "MTN Daily 100MB", price: 100, network: "MTN", type: "Data" },
+  { id: 2, name: "MTN Weekly 1.5GB", price: 1000, network: "MTN", type: "Data" },
+  { id: 3, name: "Airtel Daily 100MB", price: 100, network: "Airtel", type: "Data" },
+  { id: 4, name: "Glo Monthly 4.5GB", price: 1500, network: "Glo", type: "Data" },
+  { id: 5, name: "MTN 100 Naira Airtime", price: 100, network: "MTN", type: "Airtime" },
+  { id: 6, name: "Airtel 100 Naira Airtime", price: 100, network: "Airtel", type: "Airtime" },
 ];
 
 // ======================== SIGNUP ========================
 app.post("/api/signup", async (req, res) => {
-  const { email, password, name } = req.body;
-
-  if (!email || !password || !name)
-    return res.status(400).json({ error: "All fields are required" });
+  const { fullName, email, password } = req.body;
+  if (!fullName || !email || !password) return res.status(400).json({ error: "All fields are required" });
 
   const exists = users.find(u => u.email === email);
-  if (exists)
-    return res.status(400).json({ error: "User already exists" });
+  if (exists) return res.status(400).json({ error: "User already exists" });
 
   const hashed = await bcrypt.hash(password, 10);
-  users.push({ email, password: hashed, name, wallet: 0 });
+  const newUser = { fullName, email, password: hashed, wallet: 0 };
+  users.push(newUser);
+
+  fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
 
   res.json({ message: "Signup successful" });
 });
@@ -48,73 +52,77 @@ app.post("/api/signup", async (req, res) => {
 // ======================== LOGIN ========================
 app.post("/api/login", async (req, res) => {
   const { email, password } = req.body;
-
-  if (!email || !password)
-    return res.status(400).json({ error: "All fields are required" });
+  if (!email || !password) return res.status(400).json({ error: "All fields are required" });
 
   const user = users.find(u => u.email === email);
-  if (!user)
-    return res.status(400).json({ error: "User not found" });
+  if (!user) return res.status(400).json({ error: "User not found" });
 
   const ok = await bcrypt.compare(password, user.password);
-  if (!ok)
-    return res.status(400).json({ error: "Incorrect password" });
+  if (!ok) return res.status(400).json({ error: "Incorrect password" });
 
   const token = jwt.sign({ email }, SECRET, { expiresIn: "2h" });
+  res.json({ message: "Login successful", token, fullName: user.fullName });
+});
 
-  res.json({ message: "Login successful", token, name: user.name });
+// ======================== GET PLANS ========================
+app.get("/api/plans", (req, res) => {
+  res.json(plans);
 });
 
 // ======================== WALLET ========================
-
-// Get wallet balance
-app.get("/api/wallet", (req, res) => {
-  const email = req.query.email;
+app.get("/api/wallet/:email", (req, res) => {
+  const { email } = req.params;
   const user = users.find(u => u.email === email);
   if (!user) return res.status(404).json({ error: "User not found" });
-
   res.json({ wallet: user.wallet });
 });
 
-// Fund wallet
 app.post("/api/wallet/fund", (req, res) => {
   const { email, amount } = req.body;
   const user = users.find(u => u.email === email);
   if (!user) return res.status(404).json({ error: "User not found" });
-  if (amount <= 0) return res.status(400).json({ error: "Invalid amount" });
-
-  user.wallet += amount;
-  res.json({ message: "Wallet funded successfully", wallet: user.wallet });
+  user.wallet += Number(amount);
+  fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
+  res.json({ message: "Wallet funded", wallet: user.wallet });
 });
 
-// ======================== PLANS ========================
-
-// Get all plans
-app.get("/api/plans", (req, res) => {
-  res.json({ dataPlans, airtimePlans });
-});
-
-// ======================== TRANSACTIONS ========================
-
-// Buy a plan (deduct from wallet)
-app.post("/api/buy", (req, res) => {
-  const { email, type, name } = req.body;
+// ======================== PURCHASE ========================
+app.post("/api/purchase", (req, res) => {
+  const { email, planId } = req.body;
   const user = users.find(u => u.email === email);
   if (!user) return res.status(404).json({ error: "User not found" });
 
-  let plan;
-  if (type === "Data") plan = dataPlans.find(p => p.name === name);
-  else if (type === "Airtime") plan = airtimePlans.find(p => p.name === name);
-
+  const plan = plans.find(p => p.id === planId);
   if (!plan) return res.status(404).json({ error: "Plan not found" });
-  if (user.wallet < plan.price)
-    return res.status(400).json({ error: "Insufficient wallet balance" });
+
+  if (user.wallet < plan.price) return res.status(400).json({ error: "Insufficient wallet balance" });
 
   user.wallet -= plan.price;
-  res.json({ message: `${type} purchase successful`, wallet: user.wallet });
+
+  const transaction = {
+    id: transactions.length + 1,
+    email,
+    planName: plan.name,
+    price: plan.price,
+    type: plan.type,
+    date: new Date().toISOString()
+  };
+  transactions.push(transaction);
+
+  fs.writeFileSync(usersFile, JSON.stringify(users, null, 2));
+  fs.writeFileSync(transactionsFile, JSON.stringify(transactions, null, 2));
+
+  res.json({ message: "Purchase successful", wallet: user.wallet, transaction });
+});
+
+// ======================== GET TRANSACTIONS ========================
+app.get("/api/transactions/:email", (req, res) => {
+  const { email } = req.params;
+  const userTransactions = transactions.filter(t => t.email === email);
+  res.json(userTransactions);
 });
 
 // ======================== START SERVER ========================
 app.listen(PORT, () => {
-  console.log(`MayConnect Backend running on port ${PORT}`);
+  console.log("Backend running on port " + PORT);
 });
