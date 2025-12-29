@@ -1,3 +1,21 @@
+const express = require("express");
+const cors = require("cors");
+
+const app = express();
+
+/* ✅ CORS FIX */
+app.use(cors({
+  origin: [
+    "https://mayconnect-frontend.onrender.com",
+    "http://localhost:3000",
+    "http://127.0.0.1:5500"
+  ],
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+app.use(express.json());
+
 const {
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
