@@ -7,7 +7,6 @@ const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 const { v4: uuidv4 } = require("uuid");
 const base64url = require("base64url");
-
 const {
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
@@ -35,7 +34,7 @@ app.use(express.json());
 /* ===================== DATABASE ===================== */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // REQUIRED FOR RENDER
+  ssl: { rejectUnauthorized: false },
 });
 
 /* ===================== AUTH MIDDLEWARE ===================== */
@@ -52,8 +51,9 @@ function authenticateToken(req, res, next) {
 }
 
 function isAdmin(req, res, next) {
-  if (!req.user.is_admin)
+  if (!req.user.is_admin) {
     return res.status(403).json({ error: "Admin only" });
+  }
   next();
 }
 
@@ -66,20 +66,14 @@ app.post("/api/signup", async (req, res) => {
     return res.status(400).json({ error: "All fields required" });
 
   try {
-    const hashed = await bcrypt.hash(password, 10);
+    const hash = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      `INSERT INTO users (name,email,password)
-       VALUES ($1,$2,$3)
-       RETURNING id,email,is_admin`,
-      [name, email, hashed]
+      "INSERT INTO users (name,email,password) VALUES ($1,$2,$3) RETURNING id,email,is_admin",
+      [name, email, hash]
     );
 
     const token = jwt.sign(
-      {
-        id: result.rows[0].id,
-        email,
-        is_admin: result.rows[0].is_admin,
-      },
+      { id: result.rows[0].id, email, is_admin: result.rows[0].is_admin },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
@@ -125,92 +119,84 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-/* ===================== PIN ===================== */
-
-app.post("/api/wallet/set-pin", authenticateToken, async (req, res) => {
-  const { pin } = req.body;
-  if (!pin) return res.status(400).json({ error: "PIN required" });
-
-  const hashedPin = await bcrypt.hash(pin, 10);
-
-  await pool.query(
-    "UPDATE users SET pin=$1,pin_attempts=0,locked=false WHERE id=$2",
-    [hashedPin, req.user.id]
-  );
-
-  res.json({ message: "PIN set successfully" });
-});
-
-app.post("/api/wallet/verify-pin", authenticateToken, async (req, res) => {
-  const { pin } = req.body;
-
-  const result = await pool.query(
-    "SELECT pin FROM users WHERE id=$1",
-    [req.user.id]
-  );
-
-  const valid = await bcrypt.compare(pin, result.rows[0].pin);
-  if (!valid) return res.status(400).json({ error: "Incorrect PIN" });
-
-  res.json({ verified: true });
-});
-
 /* ===================== BIOMETRIC ===================== */
 
-app.get("/api/auth/biometric-challenge", authenticateToken, async (req, res) => {
-  const result = await pool.query(
-    "SELECT biometric_key FROM users WHERE id=$1",
-    [req.user.id]
-  );
+app.get(
+  "/api/auth/biometric-challenge",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const userRes = await pool.query(
+        "SELECT biometric_key FROM users WHERE id=$1",
+        [req.user.id]
+      );
 
-  if (!result.rows[0]?.biometric_key)
-    return res.status(400).json({ error: "No biometric key" });
+      if (!userRes.rows[0]?.biometric_key)
+        return res.status(400).json({ error: "No biometric registered" });
 
-  const options = generateAuthenticationOptions({
-    allowCredentials: [
-      {
-        id: base64url.toBuffer(result.rows[0].biometric_key),
-        type: "public-key",
-      },
-    ],
-    userVerification: "preferred",
-  });
+      const options = generateAuthenticationOptions({
+        allowCredentials: [
+          {
+            id: base64url.toBuffer(userRes.rows[0].biometric_key),
+            type: "public-key",
+          },
+        ],
+        userVerification: "preferred",
+      });
 
-  await pool.query(
-    "UPDATE users SET temp_challenge=$1 WHERE id=$2",
-    [options.challenge, req.user.id]
-  );
+      await pool.query(
+        "UPDATE users SET temp_challenge=$1 WHERE id=$2",
+        [options.challenge, req.user.id]
+      );
 
-  res.json(options);
-});
+      res.json(options);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Biometric challenge failed" });
+    }
+  }
+);
 
-app.post("/api/auth/verify-biometric", authenticateToken, async (req, res) => {
-  const userRes = await pool.query(
-    "SELECT biometric_key,temp_challenge FROM users WHERE id=$1",
-    [req.user.id]
-  );
+app.post(
+  "/api/auth/verify-biometric",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const userRes = await pool.query(
+        "SELECT biometric_key,temp_challenge FROM users WHERE id=$1",
+        [req.user.id]
+      );
 
-  const verification = await verifyAuthenticationResponse({
-    credential: req.body,
-    expectedChallenge: userRes.rows[0].temp_challenge,
-    expectedOrigin: "https://mayconnect-frontend.onrender.com",
-    expectedRPID: "mayconnect-frontend.onrender.com",
-    authenticator: {
-      credentialID: base64url.toBuffer(userRes.rows[0].biometric_key),
-      counter: 0,
-    },
-  });
+      const user = userRes.rows[0];
+      if (!user)
+        return res.status(400).json({ error: "User not found" });
 
-  if (!verification.verified)
-    return res.status(401).json({ error: "Biometric failed" });
+      const verification = await verifyAuthenticationResponse({
+        credential: req.body,
+        expectedChallenge: user.temp_challenge,
+        expectedOrigin: "https://mayconnect-frontend.onrender.com",
+        expectedRPID: "mayconnect-frontend.onrender.com",
+        authenticator: {
+          credentialID: base64url.toBuffer(user.biometric_key),
+          counter: 0,
+        },
+      });
 
-  await pool.query(
-    "UPDATE users SET temp_challenge=NULL WHERE id=$1",
-    [req.user.id]
-  );
+      if (!verification.verified)
+        return res.status(401).json({ error: "Biometric failed" });
 
-  res.json({ verified: true });
-});
+      await pool.query(
+        "UPDATE users SET temp_challenge=NULL WHERE id=$1",
+        [req.user.id]
+      );
+
+      res.json({ verified: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Biometric verification failed" });
+    }
+  }
+);
 
 /* ===================== WALLET ===================== */
 
@@ -250,9 +236,7 @@ app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
   );
 
   await pool.query(
-    `INSERT INTO transactions
-     (user_id,type,amount,reference,status,details)
-     VALUES ($1,$2,$3,$4,'success',$5)`,
+    "INSERT INTO transactions (user_id,type,amount,reference,status,details) VALUES ($1,$2,$3,$4,'success',$5)",
     [req.user.id, type, amount, reference, details || null]
   );
 
@@ -263,38 +247,42 @@ app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
 });
 
 /* ===================== TRANSACTION REVERSAL ===================== */
-app.post("/api/wallet/transactions/reverse", authenticateToken, async (req, res) => {
-  const { reference } = req.body;
 
-  const txnRes = await pool.query(
-    "SELECT * FROM transactions WHERE reference=$1 AND user_id=$2",
-    [reference, req.user.id]
-  );
+app.post(
+  "/api/wallet/transactions/reverse",
+  authenticateToken,
+  async (req, res) => {
+    const { reference } = req.body;
+    if (!reference)
+      return res.status(400).json({ error: "Reference required" });
 
-  const txn = txnRes.rows[0];
-  if (!txn) return res.status(404).json({ error: "Transaction not found" });
-  if (txn.type === "fund")
-    return res.status(400).json({ error: "Cannot reverse funding" });
+    const txnRes = await pool.query(
+      "SELECT * FROM transactions WHERE reference=$1 AND user_id=$2",
+      [reference, req.user.id]
+    );
 
-  const balRes = await pool.query(
-    "SELECT wallet_balance FROM users WHERE id=$1",
-    [req.user.id]
-  );
+    const txn = txnRes.rows[0];
+    if (!txn) return res.status(404).json({ error: "Transaction not found" });
 
-  const newBalance = Number(balRes.rows[0].wallet_balance) + Number(txn.amount);
+    const balRes = await pool.query(
+      "SELECT wallet_balance FROM users WHERE id=$1",
+      [req.user.id]
+    );
 
-  await pool.query(
-    "UPDATE users SET wallet_balance=$1 WHERE id=$2",
-    [newBalance, req.user.id]
-  );
+    const newBalance = balRes.rows[0].wallet_balance + txn.amount;
 
-  await pool.query(
-    "UPDATE transactions SET status='reversed' WHERE reference=$1",
-    [reference]
-  );
+    await pool.query(
+      "UPDATE users SET wallet_balance=$1 WHERE id=$2",
+      [newBalance, req.user.id]
+    );
+    await pool.query(
+      "UPDATE transactions SET status='reversed' WHERE reference=$1",
+      [reference]
+    );
 
-  res.json({ message: "Transaction reversed", balance: newBalance });
-});
+    res.json({ message: "Reversed", balance: newBalance });
+  }
+);
 
 /* ===================== ADMIN ===================== */
 
@@ -305,14 +293,19 @@ app.get("/api/admin/users", authenticateToken, isAdmin, async (req, res) => {
   res.json({ users: result.rows });
 });
 
-app.get("/api/admin/transactions", authenticateToken, isAdmin, async (req, res) => {
-  const result = await pool.query(
-    "SELECT * FROM transactions ORDER BY created_at DESC"
-  );
-  res.json({ transactions: result.rows });
-});
+app.get(
+  "/api/admin/transactions",
+  authenticateToken,
+  isAdmin,
+  async (req, res) => {
+    const result = await pool.query(
+      "SELECT * FROM transactions ORDER BY created_at DESC"
+    );
+    res.json({ transactions: result.rows });
+  }
+);
 
-/* ===================== START ===================== */
+/* ===================== START SERVER ===================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
   console.log(`✅ MAY-Connect backend running on port ${PORT}`)
