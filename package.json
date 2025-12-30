@@ -1,24 +1,29 @@
 {
   "name": "mayconnect-backend",
   "version": "1.0.0",
-  "type": "commonjs",
+  "description": "Backend for MayConnect",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": "18.x"
+    "node": "18.x",
+    "npm": "8.x"
   },
   "dependencies": {
     "@simplewebauthn/server": "^13.2.2",
     "base64url": "^3.0.1",
     "bcryptjs": "^3.0.3",
+    "body-parser": "^2.2.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.19.2",
+    "fs-extra": "^11.3.3",
     "jsonwebtoken": "^9.0.3",
+    "lowdb": "^7.0.1",
+    "mongoose": "^9.0.2",
     "node-fetch": "^3.3.2",
     "pg": "^8.16.3",
-    "uuid": "^9.0.1"
+    "uuid": "^13.0.0"
   }
 }
