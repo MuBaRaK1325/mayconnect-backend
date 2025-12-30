@@ -1,13 +1,13 @@
 {
   "name": "mayconnect-backend",
   "version": "1.0.0",
-  "main": "server.js",
   "type": "commonjs",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "18.x"
   },
   "dependencies": {
     "@simplewebauthn/server": "^13.2.2",
