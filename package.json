@@ -1,7 +1,7 @@
 {
   "name": "mayconnect-backend",
   "version": "1.0.0",
-  "description": "Backend for MayConnect",
+  "description": "MAY-Connect backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -24,6 +24,6 @@
     "mongoose": "^9.0.2",
     "node-fetch": "^3.3.2",
     "pg": "^8.16.3",
-    "uuid": "^13.0.0"
+    "uuid": "^9.0.0"
   }
 }
