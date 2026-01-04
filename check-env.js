@@ -1,7 +1,3 @@
-require('dotenv').config();
-
-console.log("PORT:", process.env.PORT);
-console.log("DATABASE_URL:", process.env.DATABASE_URL);
-console.log("JWT_SECRET:", process.env.JWT_SECRET);
-console.log("PAYSTACK_SECRET_KEY:", process.env.PAYSTACK_SECRET_KEY);
-console.log("FLUTTERWAVE_SECRET_KEY:", process.env.FLUTTERWAVE_SECRET_KEY);
+DATABASE_URL=postgresql://neondb_owner:npg_ce1mAN5aEtRP@ep-dawn-haze-adafaz06-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+PORT=3000
+JWT_SECRET=mayconnect_secret_2025
