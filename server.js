@@ -64,6 +64,24 @@ const DATA_PLANS = {
     type: "data"
   }
 };
+/* ===================== DATA PLANS (PUBLIC) ===================== */
+
+const DATA_PLANS = {
+  MTN_5GB_SME: {
+    id: "MTN_5GB_SME",
+    network: "MTN",
+    maitama_network: 1,
+    plan_id: 158,
+    name: "MTN 5GB SME (Monthly)",
+    price: 1500, // frontend price (1400–1600 range)
+    validity: "30 Days",
+    type: "SME"
+  }
+};
+
+app.get("/api/data/plans", (req, res) => {
+  res.json(Object.values(DATA_PLANS));
+});
 
 /* ===================== FETCH DATA PLANS ===================== */
 app.get("/api/data/plans", (req, res) => {
