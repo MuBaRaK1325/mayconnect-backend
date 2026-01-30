@@ -188,25 +188,96 @@ app.get("/api/wallet", authenticateToken, async (req,res)=>{
 });
 
 /* ===================== WALLET PURCHASE ===================== */
-app.post("/api/wallet/purchase", authenticateToken, async (req,res)=>{
+app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
   const { type, pin, details } = req.body;
-  try{
-    const userRes = await pool.query("SELECT wallet_balance,pin,pin_attempts,locked FROM users WHERE id=$1",[req.user.id]);
+
+  try {
+    const userRes = await pool.query(
+      "SELECT wallet_balance, pin, pin_attempts, locked FROM users WHERE id=$1",
+      [req.user.id]
+    );
     const user = userRes.rows[0];
 
-    if(user.locked) return res.status(403).json({ error:"Wallet locked due to multiple incorrect PIN attempts" });
+    if (!user || !user.pin)
+      return res.status(400).json({ error: "PIN not set" });
 
-    const validPin = await bcrypt.compare(pin,user.pin);
-    if(!validPin){
-      let attempts = user.pin_attempts + 1;
-      let locked = attempts >= 3;
-      await pool.query("UPDATE users SET pin_attempts=$1, locked=$2 WHERE id=$3",[attempts,locked,req.user.id]);
-      return res.status(400).json({ error:"Incorrect PIN" });
+    if (user.locked)
+      return res.status(403).json({ error: "Wallet locked due to multiple incorrect PIN attempts" });
+
+    const validPin = await bcrypt.compare(pin, user.pin);
+    if (!validPin) {
+      const attempts = (user.pin_attempts || 0) + 1;
+      const locked = attempts >= 3;
+      await pool.query(
+        "UPDATE users SET pin_attempts=$1, locked=$2 WHERE id=$3",
+        [attempts, locked, req.user.id]
+      );
+      return res.status(400).json({ error: "Incorrect PIN" });
     }
 
-    let amount = 0;
-    if(type==="data"){
-      amount = DATA_PLANS.MTN_5GB_SME.price;
+    if (type !== "data")
+      return res.status(400).json({ error: "Unsupported purchase type" });
+
+    const plan = DATA_PLANS.MTN_5GB_SME;
+    const amount = plan.price;
+
+    if (user.wallet_balance < amount)
+      return res.status(400).json({ error: "Insufficient balance" });
+
+    /* === Call Maitama API === */
+    const maitamaRes = await fetch("https://app.maitamadatahub.com/api/data", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.MAITAMA_API_TOKEN}`,
+        Accept: "application/json"
+      },
+      body: JSON.stringify({
+        mobile_number: details.mobile_number,
+        plan: plan.plan_id,
+        network: plan.network
+      })
+    });
+
+    const apiResponse = await maitamaRes.json();
+    if (!maitamaRes.ok || apiResponse.status !== "success") {
+      return res.status(400).json({
+        error: apiResponse.api_response || "Maitama purchase failed"
+      });
+    }
+
+    const reference = `MC-${uuidv4()}`;
+    const newBalance = user.wallet_balance - amount;
+
+    await pool.query(
+      "UPDATE users SET wallet_balance=$1, pin_attempts=0 WHERE id=$2",
+      [newBalance, req.user.id]
+    );
+
+    await pool.query(
+      `INSERT INTO transactions 
+       (user_id, type, amount, description, reference, status, details)
+       VALUES ($1,$2,$3,$4,$5,'success',$6)`,
+      [req.user.id, type, amount, "Data purchase", reference, details]
+    );
+
+    res.json({
+      message: "Purchase successful",
+      receipt: {
+        reference,
+        type,
+        amount,
+        status: "success",
+        date: new Date()
+      },
+      balance: newBalance
+    });
+
+  } catch (err) {
+    console.error("Purchase error:", err);
+    res.status(500).json({ error: "Purchase failed", details: err.message });
+  }
+});
 
       // Call Maitama API
       const maitamaRes = await fetch("https://app.maitamadatahub.com/api/data",{
