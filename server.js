@@ -1,12 +1,12 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const bcrypt = require("bcryptjs");       // Use only one bcrypt
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 const { v4: uuidv4 } = require("uuid");
 const fetch = require("node-fetch");
-const nodemailer = require("nodemailer"); // Forgot PIN emails
+const nodemailer = require("nodemailer");
 const {
   generateAuthenticationOptions,
   verifyAuthenticationResponse
@@ -67,7 +67,6 @@ const DATA_PLANS = {
 };
 
 /* ===================== AUTH ROUTES ===================== */
-// SIGN UP
 app.post("/api/signup", async (req,res)=>{
   const { name,email,password } = req.body;
   if(!name||!email||!password) return res.status(400).json({ error: "All fields required" });
@@ -92,7 +91,6 @@ app.post("/api/signup", async (req,res)=>{
   }
 });
 
-// LOGIN
 app.post("/api/login", async (req,res)=>{
   const { email,password,biometric_key } = req.body;
   try{
@@ -146,12 +144,9 @@ app.post("/api/forgot-pin", async (req,res)=>{
     const user = result.rows[0];
     if(!user) return res.status(400).json({ error:"No user with this email" });
 
-    // Generate temporary PIN reset token
     const token = uuidv4();
-
     await pool.query("UPDATE users SET pin_reset_token=$1 WHERE id=$2",[token,user.id]);
 
-    // Send email (nodemailer)
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: process.env.SMTP_PORT,
@@ -180,7 +175,7 @@ app.post("/api/forgot-pin", async (req,res)=>{
 app.get("/api/wallet", authenticateToken, async (req,res)=>{
   try{
     const result = await pool.query("SELECT wallet_balance FROM users WHERE id=$1",[req.user.id]);
-    res.json({ balance: result.rows[0].wallet_balance });
+    res.json({ balance: result.rows[0]?.wallet_balance || 0 });
   } catch(err){
     console.error(err);
     res.status(500).json({ error:"Failed to fetch balance", details: err.message });
@@ -188,49 +183,41 @@ app.get("/api/wallet", authenticateToken, async (req,res)=>{
 });
 
 /* ===================== WALLET PURCHASE ===================== */
-app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
+app.post("/api/wallet/purchase", authenticateToken, async (req,res)=>{
   const { type, pin, details } = req.body;
 
-  try {
+  try{
     const userRes = await pool.query(
       "SELECT wallet_balance, pin, pin_attempts, locked FROM users WHERE id=$1",
       [req.user.id]
     );
     const user = userRes.rows[0];
 
-    if (!user || !user.pin)
-      return res.status(400).json({ error: "PIN not set" });
+    if(!user?.pin) return res.status(400).json({ error:"PIN not set" });
+    if(user.locked) return res.status(403).json({ error:"Wallet locked due to multiple incorrect PIN attempts" });
 
-    if (user.locked)
-      return res.status(403).json({ error: "Wallet locked due to multiple incorrect PIN attempts" });
-
-    const validPin = await bcrypt.compare(pin, user.pin);
-    if (!validPin) {
+    const validPin = await bcrypt.compare(pin,user.pin);
+    if(!validPin){
       const attempts = (user.pin_attempts || 0) + 1;
       const locked = attempts >= 3;
-      await pool.query(
-        "UPDATE users SET pin_attempts=$1, locked=$2 WHERE id=$3",
-        [attempts, locked, req.user.id]
-      );
-      return res.status(400).json({ error: "Incorrect PIN" });
+      await pool.query("UPDATE users SET pin_attempts=$1, locked=$2 WHERE id=$3",[attempts,locked,req.user.id]);
+      return res.status(400).json({ error:"Incorrect PIN" });
     }
 
-    if (type !== "data")
-      return res.status(400).json({ error: "Unsupported purchase type" });
+    if(type !== "data") return res.status(400).json({ error:"Unsupported purchase type" });
 
     const plan = DATA_PLANS.MTN_5GB_SME;
     const amount = plan.price;
 
-    if (user.wallet_balance < amount)
-      return res.status(400).json({ error: "Insufficient balance" });
+    if(user.wallet_balance < amount) return res.status(400).json({ error:"Insufficient balance" });
 
-    /* === Call Maitama API === */
-    const maitamaRes = await fetch("https://app.maitamadatahub.com/api/data", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.MAITAMA_API_TOKEN}`,
-        Accept: "application/json"
+    // === Call Maitama API ===
+    const maitamaRes = await fetch("https://app.maitamadatahub.com/api/data",{
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        Authorization:`Bearer ${process.env.MAITAMA_API_TOKEN}`,
+        Accept:"application/json"
       },
       body: JSON.stringify({
         mobile_number: details.mobile_number,
@@ -240,80 +227,24 @@ app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
     });
 
     const apiResponse = await maitamaRes.json();
-    if (!maitamaRes.ok || apiResponse.status !== "success") {
-      return res.status(400).json({
-        error: apiResponse.api_response || "Maitama purchase failed"
-      });
+    if(!maitamaRes.ok || apiResponse.status !== "success") {
+      return res.status(400).json({ error: apiResponse.api_response || "Maitama purchase failed" });
     }
-
-    const reference = `MC-${uuidv4()}`;
-    const newBalance = user.wallet_balance - amount;
-
-    await pool.query(
-      "UPDATE users SET wallet_balance=$1, pin_attempts=0 WHERE id=$2",
-      [newBalance, req.user.id]
-    );
-
-    await pool.query(
-      `INSERT INTO transactions 
-       (user_id, type, amount, description, reference, status, details)
-       VALUES ($1,$2,$3,$4,$5,'success',$6)`,
-      [req.user.id, type, amount, "Data purchase", reference, details]
-    );
-
-    res.json({
-      message: "Purchase successful",
-      receipt: {
-        reference,
-        type,
-        amount,
-        status: "success",
-        date: new Date()
-      },
-      balance: newBalance
-    });
-
-  } catch (err) {
-    console.error("Purchase error:", err);
-    res.status(500).json({ error: "Purchase failed", details: err.message });
-  }
-});
-
-      // Call Maitama API
-      const maitamaRes = await fetch("https://app.maitamadatahub.com/api/data",{
-        method:"POST",
-        headers:{
-          "Content-Type":"application/json",
-          Authorization:`Bearer ${process.env.MAITAMA_API_TOKEN}`,
-          Accept:"application/json"
-        },
-        body: JSON.stringify({
-          mobile_number: details.mobile_number,
-          plan: DATA_PLANS.MTN_5GB_SME.plan_id,
-          network: DATA_PLANS.MTN_5GB_SME.network
-        })
-      });
-
-      const apiResponse = await maitamaRes.json();
-      if(!maitamaRes.ok || apiResponse.status !== "success"){
-        return res.status(400).json({ error: apiResponse.api_response || "Maitama purchase failed" });
-      }
-    }
-
-    if(user.wallet_balance < amount) return res.status(400).json({ error:"Insufficient balance" });
 
     const reference = `MC-${uuidv4()}`;
     const newBalance = user.wallet_balance - amount;
 
     await pool.query("UPDATE users SET wallet_balance=$1,pin_attempts=0 WHERE id=$2",[newBalance,req.user.id]);
     await pool.query(
-      "INSERT INTO transactions (user_id,type,amount,description,reference,status,details) VALUES ($1,$2,$3,$4,$5,'success',$6)",
-      [req.user.id,type,amount,"Data purchase",reference,details]
+      `INSERT INTO transactions
+       (user_id,type,amount,description,reference,status,details)
+       VALUES ($1,$2,$3,$4,$5,'success',$6)`,
+       [req.user.id,type,amount,"Data purchase",reference,details]
     );
 
     res.json({
       message:"Purchase successful",
-      receipt:{ reference,type,amount,status:"success",details,date:new Date() },
+      receipt:{ reference,type,amount,status:"success",date:new Date() },
       balance:newBalance
     });
 
@@ -323,7 +254,7 @@ app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
   }
 });
 
-/* ===================== BIOMETRIC PLACEHOLDERS ===================== */
+/* ===================== BIOMETRIC ===================== */
 app.get("/api/biometric/challenge", authenticateToken, async (req,res)=>{
   try{
     const options = generateAuthenticationOptions({
