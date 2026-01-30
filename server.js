@@ -53,15 +53,6 @@ function isAdmin(req, res, next) {
   next();
 }
 
-/* ===================== DATA PLANS (MAITAMA) ===================== */
-
-const DATA_PLANS = {
-  MTN_5GB_SME: {
-    network: 1,          // Maitama MTN code
-    plan_id: 158,        // CONFIRMED Maitama plan ID
-    name: "MTN 5GB SME",
-    price: 1500,         // FINAL user price (auto-calculated)
-    type: "data"
   }
 };
 /* ===================== DATA PLANS (PUBLIC) ===================== */
