@@ -1,7 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const bcrypt = require("bcryptjs");
+const bcrypt = require("bcryptjs"); // single bcrypt import
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
 const { v4: uuidv4 } = require("uuid");
@@ -51,25 +51,27 @@ function isAdmin(req, res, next) {
   next();
 }
 
-/* ===================== DATA PLANS ===================== */
+/* ===================== DATA PLAN ===================== */
 const DATA_PLANS = {
   MTN_5GB_SME: {
     network: 1,        // Maitama MTN code
     plan_id: 158,      // Maitama plan ID
     name: "MTN 5GB SME",
-    price: 1500,       // what user pays
+    price: 1600,       // what user pays
     cost: 1400,        // what Maitama charges
-    profit: 100,
+    profit: 200,
     type: "SME",
     validity: "30 Days"
   }
 };
 
 /* ===================== AUTH ROUTES ===================== */
-// SIGN UP
+
+// SIGNUP
 app.post("/api/signup", async (req, res) => {
   const { name, email, password } = req.body;
-  if (!name || !email || !password) return res.status(400).json({ error: "All fields required" });
+  if (!name || !email || !password)
+    return res.status(400).json({ error: "All fields required" });
 
   try {
     const hash = await bcrypt.hash(password, 10);
@@ -120,8 +122,76 @@ app.post("/api/login", async (req, res) => {
     res.status(500).json({ error: "Login failed", details: err.message });
   }
 });
+const nodemailer = require("nodemailer"); // Make sure to npm install nodemailer
 
-/* ===================== WALLET / PURCHASE ===================== */
+app.post("/api/forgot-pin", async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: "Email is required" });
+
+  try {
+    // Check if user exists
+    const result = await pool.query("SELECT id, name FROM users WHERE email=$1", [email]);
+    const user = result.rows[0];
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // Generate temporary reset token (expires in 15 min)
+    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: "15m" });
+
+    // Save token in DB (optional)
+    await pool.query("UPDATE users SET reset_token=$1 WHERE id=$2", [token, user.id]);
+
+    // Send email with reset instructions
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT,
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      }
+    });
+
+    const resetLink = `https://mayconnect-frontend.onrender.com/reset-pin.html?token=${token}`;
+
+    await transporter.sendMail({
+      from: `"MAY Connect" <${process.env.SMTP_USER}>`,
+      to: email,
+      subject: "Reset Your Transaction PIN",
+      html: `
+        <p>Hello ${user.name},</p>
+        <p>You requested to reset your transaction PIN. Click the link below to set a new PIN:</p>
+        <a href="${resetLink}">Reset PIN</a>
+        <p>This link expires in 15 minutes.</p>
+      `
+    });
+
+    res.json({ success: true, message: "Reset instructions sent to your email" });
+
+  } catch (err) {
+    console.error("Forgot PIN error:", err);
+    res.status(500).json({ error: "Failed to send reset instructions" });
+  }
+});
+
+/* ===================== SET PIN ===================== */
+app.post("/api/set-pin", authenticateToken, async (req, res) => {
+  try {
+    const { pin } = req.body;
+    if (!pin || pin.length !== 4 || !/^\d{4}$/.test(pin))
+      return res.status(400).json({ success: false, message: "PIN must be 4 digits" });
+
+    const hashedPin = await bcrypt.hash(pin, 10);
+
+    await pool.query("UPDATE users SET pin=$1 WHERE id=$2", [hashedPin, req.user.id]);
+
+    res.json({ success: true, message: "PIN set successfully" });
+  } catch (err) {
+    console.error("Set PIN error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+/* ===================== WALLET & PURCHASE ===================== */
 app.get("/api/wallet", authenticateToken, async (req, res) => {
   try {
     const result = await pool.query("SELECT wallet_balance FROM users WHERE id=$1", [req.user.id]);
@@ -136,10 +206,14 @@ app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
   const { type, pin, details } = req.body;
 
   try {
-    const userRes = await pool.query("SELECT wallet_balance, pin, pin_attempts, locked FROM users WHERE id=$1", [req.user.id]);
+    const userRes = await pool.query(
+      "SELECT wallet_balance, pin, pin_attempts, locked FROM users WHERE id=$1",
+      [req.user.id]
+    );
     const user = userRes.rows[0];
 
-    if (user.locked) return res.status(403).json({ error: "Wallet locked due to multiple incorrect PIN attempts" });
+    if (user.locked)
+      return res.status(403).json({ error: "Wallet locked due to multiple incorrect PIN attempts" });
 
     const validPin = await bcrypt.compare(pin, user.pin);
     if (!validPin) {
@@ -151,10 +225,9 @@ app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
 
     let amount = 0;
     if (type === "data") {
-      // Only one plan (MTN 5GB SME) supported
       amount = DATA_PLANS.MTN_5GB_SME.price;
 
-      // Call Maitama API
+      // Maitama API call
       const maitamaRes = await fetch("https://app.maitamadatahub.com/api/data", {
         method: "POST",
         headers: {
@@ -175,7 +248,8 @@ app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
       }
     }
 
-    if (user.wallet_balance < amount) return res.status(400).json({ error: "Insufficient balance" });
+    if (user.wallet_balance < amount)
+      return res.status(400).json({ error: "Insufficient balance" });
 
     const reference = `MC-${uuidv4()}`;
     const newBalance = user.wallet_balance - amount;
@@ -198,7 +272,7 @@ app.post("/api/wallet/purchase", authenticateToken, async (req, res) => {
   }
 });
 
-/* ===================== BIOMETRIC ROUTES ===================== */
+/* ===================== BIOMETRICS ===================== */
 app.get("/api/biometric/challenge", authenticateToken, async (req, res) => {
   try {
     const options = generateAuthenticationOptions({
@@ -239,10 +313,12 @@ app.post("/api/biometric/verify", authenticateToken, async (req, res) => {
   }
 });
 
-/* ===================== ADMIN ROUTES ===================== */
+/* ===================== ADMIN ===================== */
 app.get("/api/admin/users", authenticateToken, isAdmin, async (req, res) => {
   try {
-    const result = await pool.query("SELECT id,name,email,wallet_balance,created_at FROM users ORDER BY created_at DESC");
+    const result = await pool.query(
+      "SELECT id,name,email,wallet_balance,created_at FROM users ORDER BY created_at DESC"
+    );
     res.json({ users: result.rows });
   } catch (err) {
     console.error(err);
