@@ -1,3 +1,4 @@
+
 // server.js
 require("dotenv").config();
 
@@ -9,31 +10,38 @@ const { Pool } = require("pg");
 const path = require("path");
 
 // -------------------------
-// CONFIG
+// IMPORT ROUTER
 // -------------------------
+const router = require("./router"); // ensure router.js is in the same folder
+
+const app = express();
+
+/* ================= CONFIG ================= */
 const ADMIN_EMAIL = "abubakarmubarak3456@gmail.com";
 
-// -------------------------
-// DATABASE POOL
-// -------------------------
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
-
-// Export pool so router.js can use it
-module.exports.pool = pool;
-
-// -------------------------
-// EXPRESS SETUP
-// -------------------------
-const app = express();
+/* ================= MIDDLEWARE ================= */
 app.use(express.json());
 app.use(cors({ origin: "*" }));
 
-// -------------------------
-// AUTO CREATE TABLES & ADMIN
-// -------------------------
+/* ================= DATABASE ================= */
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || "postgres://user:password@localhost:5432/dbname",
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+});
+
+// Make pool accessible to router.js if needed
+app.locals.pool = pool;
+
+// Test DB connection
+pool.connect((err, client, release) => {
+  if (err) console.error("Database connection error:", err.stack);
+  else {
+    console.log("Database connected successfully");
+    release();
+  }
+});
+
+/* ================= AUTO CREATE TABLES ================= */
 (async () => {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users(
@@ -57,40 +65,29 @@ app.use(cors({ origin: "*" }));
   `);
 
   const hash = await bcrypt.hash("admin123", 10);
-
-  await pool.query(
-    `INSERT INTO users(name,email,password,wallet_balance)
-     VALUES('ADMIN',$1,$2,0)
-     ON CONFLICT(email) DO NOTHING`,
-    [ADMIN_EMAIL, hash]
-  );
+  await pool.query(`
+    INSERT INTO users(name,email,password,wallet_balance)
+    VALUES('ADMIN',$1,$2,0)
+    ON CONFLICT(email) DO NOTHING
+  `, [ADMIN_EMAIL, hash]);
 
   console.log("ADMIN READY");
 })();
 
-// -------------------------
-// ROUTER (API)
-// -------------------------
-const router = require("./router");
+/* ================= USE ROUTER ================= */
 app.use("/api", router);
 
-// -------------------------
-// HEALTH CHECK
-// -------------------------
+/* ================= CRON JOB ================= */
+cron.schedule("0 0 * * *", async () => {
+  await pool.query("DELETE FROM transactions WHERE created_at < NOW() - INTERVAL '30 days'");
+  console.log("DAILY CLEANUP DONE");
+});
+
+/* ================= HEALTH CHECK ================= */
 app.get("/", (req, res) => {
   res.send("MAY CONNECT BACKEND RUNNING 🚀");
 });
 
-// -------------------------
-// CRON JOBS
-// -------------------------
-cron.schedule("0 0 * * *", async () => {
-  await pool.query("DELETE FROM transactions WHERE created_at < NOW() - INTERVAL '30 days'");
-  console.log("DAILY CLEANUP");
-});
-
-// -------------------------
-// START SERVER
-// -------------------------
+/* ================= START SERVER ================= */
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log("🚀 MAY CONNECT LIVE", PORT));
+app.listen(PORT, () => console.log(`🚀 MAY CONNECT LIVE ${PORT}`));
