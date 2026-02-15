@@ -11,7 +11,7 @@ const { Pool } = require("pg");
 // ROUTER
 // -------------------------
 // Use absolute path so Node always finds router.js
-const router = require(path.join(__dirname, "router"));
+const router = require("./router.js");
 
 const app = express();
 
