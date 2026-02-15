@@ -6,9 +6,9 @@ const { v4: uuidv4 } = require("uuid");
 const router = express.Router();
 
 // -------------------------
-// DATABASE POOL (from global)
+// DATABASE POOL
 // -------------------------
-const pool = global.pool; // <-- pool from server.js
+const pool = global.pool;
 
 // -------------------------
 // JWT HELPERS
@@ -21,9 +21,9 @@ function auth(req, res, next) {
   const h = req.headers.authorization;
   if (!h) return res.status(401).json({ error: "Missing token" });
 
-  jwt.verify(h.split(" ")[1], process.env.JWT_SECRET || "secret", (e, u) => {
-    if (e) return res.status(403).json({ error: "Bad token" });
-    req.user = u;
+  jwt.verify(h.split(" ")[1], process.env.JWT_SECRET || "secret", (err, user) => {
+    if (err) return res.status(403).json({ error: "Bad token" });
+    req.user = user;
     next();
   });
 }
@@ -48,7 +48,6 @@ const DATA_PLANS = [
   { plan_id: 52, network: "AIRTEL", type: "Cheap data hub", price_range: "₦1570-1650", size: "5 GB", duration: "7 Days" }
 ];
 
-// Expose plans via API
 router.get("/plans", (req, res) => res.json(DATA_PLANS));
 
 // -------------------------
@@ -91,9 +90,9 @@ router.post("/login", async (req, res) => {
   const { email, password } = req.body;
   const r = await pool.query("SELECT id,name,password FROM users WHERE email=$1", [email]);
 
-  if (!r.rows.length) return res.status(401).json({ error: "Invalid credentials" });
-  if (!(await bcrypt.compare(password, r.rows[0].password)))
+  if (!r.rows.length || !(await bcrypt.compare(password, r.rows[0].password))) {
     return res.status(401).json({ error: "Invalid credentials" });
+  }
 
   res.json({ token: token(r.rows[0].id), name: r.rows[0].name });
 });
@@ -122,15 +121,15 @@ router.post("/wallet/purchase", auth, async (req, res) => {
   const { pin, plan } = req.body;
   const u = await pool.query("SELECT wallet_balance,pin FROM users WHERE id=$1", [req.user.id]);
 
-  if (!await bcrypt.compare(pin, u.rows[0].pin))
+  if (!await bcrypt.compare(pin, u.rows[0].pin)) {
     return res.status(400).json({ error: "Wrong PIN" });
+  }
 
   const p = DATA_PLANS.find(x => x.plan_id == plan);
   if (!p) return res.status(400).json({ error: "Plan missing" });
 
   const amount = parseInt(p.price_range.split("-")[0].replace(/[₦,]/g, ""));
-  if (u.rows[0].wallet_balance < amount)
-    return res.status(400).json({ error: "Insufficient funds" });
+  if (u.rows[0].wallet_balance < amount) return res.status(400).json({ error: "Insufficient funds" });
 
   const ref = "MC-" + uuidv4();
   await pool.query("UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2", [amount, req.user.id]);
