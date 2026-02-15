@@ -1,7 +1,4 @@
-node_modules/
+
+node_modules
 .env
 *.log
-node_modules/
-.env
-*.log
-.env
