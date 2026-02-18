@@ -34,7 +34,7 @@ const auth = (req, res, next) => {
 
 // ================= DATA PLANS =================
 const DATA_PLANS = [
-  { plan_id: 153, network: "MTN", type: "MAITAMA", price: 1400, size: "5 GB", duration: "1 month", profit: 50 },
+  { plan_id: 165, network: "MTN", type: "MAITAMA", price: 1400, size: "5 GB", duration: "1 month", profit: 50 },
   { plan_id: 415, network: "AIRTEL", type: "GIFTING", price: 999, size: "3.2 GB", duration: "1 month", profit: 50 },
   { plan_id: 414, network: "MTN", type: "GIFTING", price: 540, size: "2.5 GB", duration: "1 month", profit: 50 },
   { plan_id: 413, network: "MTN", type: "GIFTING", price: 240, size: "1 GB", duration: "1 month", profit: 50 },
