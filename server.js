@@ -4,317 +4,431 @@ const express = require("express")
 const cors = require("cors")
 const bcrypt = require("bcryptjs")
 const jwt = require("jsonwebtoken")
+const axios = require("axios")
 const { Pool } = require("pg")
-const { v4: uuidv4 } = require("uuid")
 
 const app = express()
 
 app.use(cors())
 app.use(express.json())
+app.use(express.static("public"))
 
-/* ================= DATABASE ================= */
+/* =========================
+DATABASE
+========================= */
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+connectionString: process.env.DATABASE_URL,
+ssl: { rejectUnauthorized:false }
 })
 
-/* ================= JWT ================= */
+/* =========================
+AUTH MIDDLEWARE
+========================= */
 
-function createToken(id) {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: "7d"
-  })
+function auth(req,res,next){
+
+const header = req.headers.authorization
+
+if(!header) return res.status(401).json({message:"No token"})
+
+const token = header.split(" ")[1]
+
+try{
+
+const decoded = jwt.verify(token,process.env.JWT_SECRET)
+
+req.user = decoded
+
+next()
+
+}catch(err){
+
+return res.status(401).json({message:"Invalid token"})
+
 }
 
-/* ================= AUTH ================= */
-
-function auth(req, res, next) {
-
-  const header = req.headers.authorization
-
-  if (!header) return res.status(401).json({ error: "No token" })
-
-  const token = header.split(" ")[1]
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-
-    if (err) return res.status(403).json({ error: "Invalid token" })
-
-    req.user = user
-
-    next()
-  })
 }
 
-/* ================= HEALTH ================= */
+/* =========================
+SIGNUP
+========================= */
 
-app.get("/", (req, res) => {
-  res.send("MAYCONNECT API LIVE")
+app.post("/api/signup", async(req,res)=>{
+
+try{
+
+const {username,email,password} = req.body
+
+const hash = await bcrypt.hash(password,10)
+
+const user = await pool.query(
+
+`INSERT INTO users(username,email,password)
+VALUES($1,$2,$3)
+RETURNING id,username,is_admin`,
+
+[username,email,hash]
+)
+
+const token = jwt.sign(user.rows[0],process.env.JWT_SECRET)
+
+res.json({
+token,
+user:user.rows[0]
 })
 
-/* ================= SIGNUP ================= */
+}catch(err){
 
-app.post("/api/signup", async (req, res) => {
+console.log(err)
+res.status(500).json({message:"Signup failed"})
 
-  try {
-
-    const { username, email, password } = req.body
-
-    if (!username || !password)
-      return res.status(400).json({ error: "Missing fields" })
-
-    const hash = await bcrypt.hash(password, 10)
-
-    const user = await pool.query(
-      `INSERT INTO users (name,email,password)
-       VALUES ($1,$2,$3)
-       RETURNING id,name`,
-      [username, email || null, hash]
-    )
-
-    res.json({
-      token: createToken(user.rows[0].id),
-      name: user.rows[0].name
-    })
-
-  } catch (err) {
-
-    console.log(err)
-
-    res.status(500).json({ error: "Signup failed" })
-
-  }
+}
 
 })
 
-/* ================= LOGIN ================= */
+/* =========================
+LOGIN
+========================= */
 
-app.post("/api/login", async (req, res) => {
+app.post("/api/login", async(req,res)=>{
 
-  try {
+try{
 
-    const { username, password } = req.body
+const {username,password} = req.body
 
-    const result = await pool.query(
-      "SELECT * FROM users WHERE name=$1",
-      [username]
-    )
+const user = await pool.query(
+"SELECT * FROM users WHERE username=$1",
+[username]
+)
 
-    if (!result.rows.length)
-      return res.status(401).json({ error: "Invalid login" })
+if(user.rows.length===0){
+return res.status(400).json({message:"User not found"})
+}
 
-    const user = result.rows[0]
+const valid = await bcrypt.compare(password,user.rows[0].password)
 
-    const valid = await bcrypt.compare(password, user.password)
+if(!valid){
+return res.status(400).json({message:"Wrong password"})
+}
 
-    if (!valid)
-      return res.status(401).json({ error: "Invalid login" })
+const token = jwt.sign({
 
-    res.json({
-      token: createToken(user.id),
-      name: user.name
-    })
+id:user.rows[0].id,
+username:user.rows[0].username,
+is_admin:user.rows[0].is_admin
 
-  } catch (err) {
+},process.env.JWT_SECRET)
 
-    console.log(err)
+res.json({
+token,
+username:user.rows[0].username,
+is_admin:user.rows[0].is_admin
+})
 
-    res.status(500).json({ error: "Login failed" })
+}catch(err){
 
-  }
+console.log(err)
+res.status(500).json({message:"Login failed"})
+
+}
 
 })
 
-/* ================= WALLET ================= */
+/* =========================
+USER PROFILE
+========================= */
 
-app.get("/api/wallet", auth, async (req, res) => {
+app.get("/api/me",auth,async(req,res)=>{
 
-  const result = await pool.query(
-    `SELECT wallet_balance,admin_wallet,is_admin,name
-     FROM users WHERE id=$1`,
-    [req.user.id]
-  )
+const user = await pool.query(
+"SELECT id,username,wallet_balance,is_admin FROM users WHERE id=$1",
+[req.user.id]
+)
 
-  res.json(result.rows[0])
-
-})
-
-/* ================= PLANS ================= */
-
-app.get("/api/plans", auth, async (req, res) => {
-
-  const plans = await pool.query("SELECT * FROM plans ORDER BY network")
-
-  res.json(plans.rows)
+res.json(user.rows[0])
 
 })
 
-/* ================= SET PIN ================= */
+/* =========================
+SET PIN
+========================= */
 
-app.post("/api/set-pin", auth, async (req, res) => {
+app.post("/api/set-pin",auth,async(req,res)=>{
 
-  const { pin } = req.body
+const {pin} = req.body
 
-  const hash = await bcrypt.hash(pin, 10)
+const hash = await bcrypt.hash(pin,10)
 
-  await pool.query(
-    "UPDATE users SET pin=$1 WHERE id=$2",
-    [hash, req.user.id]
-  )
+await pool.query(
+"UPDATE users SET pin=$1 WHERE id=$2",
+[hash,req.user.id]
+)
 
-  res.json({ success: true })
-
-})
-
-/* ================= VERIFY PIN ================= */
-
-app.post("/api/verify-pin", auth, async (req, res) => {
-
-  const { pin } = req.body
-
-  const result = await pool.query(
-    "SELECT pin FROM users WHERE id=$1",
-    [req.user.id]
-  )
-
-  const valid = await bcrypt.compare(pin, result.rows[0].pin)
-
-  if (!valid) return res.status(401).json({ error: "Wrong PIN" })
-
-  res.json({ success: true })
+res.json({message:"Pin set successfully"})
 
 })
 
-/* ================= PURCHASE ================= */
+/* =========================
+VERIFY PIN
+========================= */
 
-app.post("/api/purchase", auth, async (req, res) => {
+async function verifyPin(userId,pin){
 
-  try {
+const user = await pool.query(
+"SELECT pin FROM users WHERE id=$1",
+[userId]
+)
 
-    const { plan } = req.body
+if(!user.rows[0].pin) return false
 
-    const planRes = await pool.query(
-      "SELECT * FROM plans WHERE plan_id=$1",
-      [plan]
-    )
+return await bcrypt.compare(pin,user.rows[0].pin)
 
-    if (!planRes.rows.length)
-      return res.status(400).json({ error: "Invalid plan" })
+}
 
-    const planData = planRes.rows[0]
+/* =========================
+GET PLANS
+========================= */
 
-    const userRes = await pool.query(
-      "SELECT * FROM users WHERE id=$1",
-      [req.user.id]
-    )
+app.get("/api/plans",async(req,res)=>{
 
-    const user = userRes.rows[0]
+const plans = await pool.query(
+"SELECT * FROM plans ORDER BY price ASC"
+)
 
-    const amount = user.is_admin
-      ? planData.cost
-      : planData.price
-
-    if (user.wallet_balance < amount)
-      return res.status(400).json({ error: "Insufficient funds" })
-
-    const profit = user.is_admin
-      ? 0
-      : planData.price - planData.cost
-
-    await pool.query("BEGIN")
-
-    await pool.query(
-      "UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
-      [amount, user.id]
-    )
-
-    if (!user.is_admin) {
-
-      await pool.query(
-        "UPDATE users SET admin_wallet=admin_wallet+$1 WHERE is_admin=true",
-        [profit]
-      )
-
-    }
-
-    await pool.query(
-      `INSERT INTO transactions
-      (user_id,type,amount,profit,reference)
-      VALUES ($1,$2,$3,$4,$5)`,
-      [user.id, "data", amount, profit, uuidv4()]
-    )
-
-    await pool.query("COMMIT")
-
-    res.json({ success: true })
-
-  } catch (err) {
-
-    await pool.query("ROLLBACK")
-
-    console.log(err)
-
-    res.status(500).json({ error: "Purchase failed" })
-
-  }
+res.json(plans.rows)
 
 })
 
-/* ================= ADMIN WITHDRAW ================= */
+/* =========================
+BUY DATA
+========================= */
 
-app.post("/api/admin/withdraw", auth, async (req, res) => {
+app.post("/api/buy-data",auth,async(req,res)=>{
 
-  const { amount, bank, account } = req.body
+try{
 
-  const admin = await pool.query(
-    "SELECT * FROM users WHERE id=$1",
-    [req.user.id]
-  )
+const {plan_id,phone,pin} = req.body
 
-  if (!admin.rows[0].is_admin)
-    return res.status(403).json({ error: "Admin only" })
+const plan = await pool.query(
+"SELECT * FROM plans WHERE plan_id=$1",
+[plan_id]
+)
 
-  if (admin.rows[0].admin_wallet < amount)
-    return res.status(400).json({ error: "Not enough profit" })
+if(plan.rows.length===0){
+return res.status(400).json({message:"Plan not found"})
+}
 
-  await pool.query(
-    "UPDATE users SET admin_wallet=admin_wallet-$1 WHERE id=$2",
-    [amount, req.user.id]
-  )
+const price = plan.rows[0].price
+const cost = plan.rows[0].cost
 
-  res.json({
-    success: true,
-    message: "Withdrawal requested"
-  })
+const validPin = await verifyPin(req.user.id,pin)
+
+if(!validPin){
+return res.status(400).json({message:"Invalid pin"})
+}
+
+const user = await pool.query(
+"SELECT wallet_balance FROM users WHERE id=$1",
+[req.user.id]
+)
+
+if(user.rows[0].wallet_balance < price){
+return res.status(400).json({message:"Insufficient balance"})
+}
+
+/* API CALL */
+
+await axios.post(process.env.DATA_API,{
+
+plan:plan_id,
+phone
+
+},{
+headers:{
+Authorization:`Bearer ${process.env.DATA_TOKEN}`
+}
+})
+
+const profit = price - cost
+
+await pool.query(
+"UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
+[price,req.user.id]
+)
+
+await pool.query(
+"UPDATE users SET admin_wallet=admin_wallet+$1 WHERE is_admin=true",
+[profit]
+)
+
+await pool.query(
+`INSERT INTO transactions(user_id,type,amount,profit)
+VALUES($1,$2,$3,$4)`,
+
+[req.user.id,"data",price,profit]
+)
+
+res.json({message:"Data purchase successful"})
+
+}catch(err){
+
+console.log(err)
+res.status(500).json({message:"Transaction failed"})
+
+}
 
 })
 
-/* ================= TRANSACTIONS ================= */
+/* =========================
+BUY AIRTIME
+========================= */
 
-app.get("/api/transactions", auth, async (req, res) => {
+app.post("/api/buy-airtime",auth,async(req,res)=>{
 
-  const tx = await pool.query(
-    "SELECT * FROM transactions WHERE user_id=$1 ORDER BY id DESC",
-    [req.user.id]
-  )
+try{
 
-  res.json(tx.rows)
+const {network,phone,amount,pin} = req.body
+
+const validPin = await verifyPin(req.user.id,pin)
+
+if(!validPin){
+return res.status(400).json({message:"Invalid pin"})
+}
+
+const user = await pool.query(
+"SELECT wallet_balance FROM users WHERE id=$1",
+[req.user.id]
+)
+
+if(user.rows[0].wallet_balance < amount){
+return res.status(400).json({message:"Insufficient balance"})
+}
+
+await axios.post(`${process.env.CHEAPDATA_URL}/airtime`,{
+
+network,
+phone,
+amount
+
+},{
+headers:{
+Authorization:`Bearer ${process.env.CHEAPDATA_KEY}`
+}
+})
+
+const profit = amount * 0.03
+
+await pool.query(
+"UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
+[amount,req.user.id]
+)
+
+await pool.query(
+"UPDATE users SET admin_wallet=admin_wallet+$1 WHERE is_admin=true",
+[profit]
+)
+
+await pool.query(
+`INSERT INTO transactions(user_id,type,amount,profit)
+VALUES($1,$2,$3,$4)`,
+
+[req.user.id,"airtime",amount,profit]
+)
+
+res.json({message:"Airtime successful"})
+
+}catch(err){
+
+console.log(err)
+res.status(500).json({message:"Airtime failed"})
+
+}
 
 })
 
-/* ================= CRON JOB ================= */
+/* =========================
+TRANSACTIONS
+========================= */
 
-setInterval(async () => {
+app.get("/api/transactions",auth,async(req,res)=>{
 
-  console.log("Cron running")
+const tx = await pool.query(
 
-}, 1000 * 60 * 10)
+"SELECT * FROM transactions WHERE user_id=$1 ORDER BY created_at DESC",
 
-/* ================= START ================= */
+[req.user.id]
+)
+
+res.json(tx.rows)
+
+})
+
+/* =========================
+ADMIN PROFIT
+========================= */
+
+app.get("/api/admin/profit",auth,async(req,res)=>{
+
+if(!req.user.is_admin){
+return res.status(403).json({message:"Forbidden"})
+}
+
+const admin = await pool.query(
+"SELECT admin_wallet FROM users WHERE id=$1",
+[req.user.id]
+)
+
+res.json(admin.rows[0])
+
+})
+
+/* =========================
+ADMIN WITHDRAW
+========================= */
+
+app.post("/api/admin/withdraw",auth,async(req,res)=>{
+
+try{
+
+if(!req.user.is_admin){
+return res.status(403).json({message:"Forbidden"})
+}
+
+const {amount,bank,account_number,account_name} = req.body
+
+await pool.query(
+
+`INSERT INTO withdrawals(amount,bank,account_number,account_name)
+VALUES($1,$2,$3,$4)`,
+
+[amount,bank,account_number,account_name]
+)
+
+await pool.query(
+"UPDATE users SET admin_wallet=admin_wallet-$1 WHERE id=$2",
+[amount,req.user.id]
+)
+
+res.json({message:"Withdrawal recorded"})
+
+}catch(err){
+
+console.log(err)
+res.status(500).json({message:"Withdraw failed"})
+
+}
+
+})
+
+/* =========================
+SERVER
+========================= */
 
 const PORT = process.env.PORT || 5000
 
-app.listen(PORT, () => {
-  console.log("Server running")
+app.listen(PORT,()=>{
+
+console.log("Server running on port "+PORT)
+
 })
