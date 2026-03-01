@@ -12,17 +12,7 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 app.use(express.static("public"))
-app.get("/force-admin", async (req,res)=>{
-const bcrypt = require("bcryptjs");
-const hash = await bcrypt.hash("MAYADMIN",10);
 
-await pool.query(
-"UPDATE users SET password=$1 WHERE username='Admin'",
-[hash]
-);
-
-res.send("Admin password reset");
-});
 /* =========================
 DATABASE
 ========================= */
