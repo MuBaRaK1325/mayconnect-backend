@@ -4,8 +4,6 @@ const express = require("express")
 const cors = require("cors")
 const bcrypt = require("bcryptjs")
 const jwt = require("jsonwebtoken")
-const axios = require("axios")
-const crypto = require("crypto")
 const { Pool } = require("pg")
 const http = require("http")
 const WebSocket = require("ws")
@@ -34,7 +32,8 @@ const clients = new Map()
 
 wss.on("connection",(ws,req)=>{
 
-const token = req.url.split("token=")[1]
+const url = new URL(req.url,"http://localhost")
+const token = url.searchParams.get("token")
 
 if(!token) return ws.close()
 
@@ -213,6 +212,8 @@ app.post("/api/set-pin",auth,async(req,res)=>{
 
 const {pin}=req.body
 
+if(!pin) return res.status(400).json({message:"PIN required"})
+
 const hash=await bcrypt.hash(pin,10)
 
 await pool.query(
@@ -231,7 +232,7 @@ const user=await pool.query(
 [userId]
 )
 
-if(!user.rows[0].pin) return false
+if(!user.rows[0] || !user.rows[0].pin) return false
 
 return await bcrypt.compare(pin,user.rows[0].pin)
 
@@ -295,7 +296,7 @@ if(!validPin)
 return res.status(400).json({message:"Invalid PIN"})
 
 const plan=await pool.query(
-"SELECT * FROM plans WHERE plan_id=$1",
+"SELECT * FROM plans WHERE plan_id=$1 OR id=$1",
 [plan_id]
 )
 
@@ -310,7 +311,7 @@ const user=await pool.query(
 [req.user.id]
 )
 
-if(user.rows[0].wallet_balance < price)
+if(Number(user.rows[0].wallet_balance) < price)
 return res.status(400).json({message:"Insufficient balance"})
 
 const profit=price-cost
@@ -364,7 +365,7 @@ const user=await pool.query(
 [req.user.id]
 )
 
-if(user.rows[0].wallet_balance < amount)
+if(Number(user.rows[0].wallet_balance) < Number(amount))
 return res.status(400).json({message:"Insufficient balance"})
 
 await pool.query(
@@ -443,7 +444,7 @@ const admin=await pool.query(
 [req.user.id]
 )
 
-if(admin.rows[0].admin_wallet < amount)
+if(Number(admin.rows[0].admin_wallet) < Number(amount))
 return res.status(400).json({message:"Insufficient admin balance"})
 
 await pool.query(
