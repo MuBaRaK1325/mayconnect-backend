@@ -1,211 +1,325 @@
-require("dotenv").config()
+require("dotenv").config();
 
-const express=require("express")
-const cors=require("cors")
-const bcrypt=require("bcryptjs")
-const jwt=require("jsonwebtoken")
-const {Pool}=require("pg")
-const http=require("http")
-const WebSocket=require("ws")
+const express = require("express");
+const cors = require("cors");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { Pool } = require("pg");
+const http = require("http");
+const WebSocket = require("ws");
 
-const app=express()
-const server=http.createServer(app)
-const wss=new WebSocket.Server({server})
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
-app.use(cors())
-app.use(express.json())
+app.use(cors());
+app.use(express.json());
 
-const pool=new Pool({
-connectionString:process.env.DATABASE_URL,
-ssl:{rejectUnauthorized:false}
-})
+/* =========================
+DATABASE
+========================= */
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
-/* AUTH */
+/* =========================
+WEBSOCKET SYSTEM
+========================= */
+const clients = new Map();
 
-function auth(req,res,next){
+wss.on("connection", (ws, req) => {
+  const url = new URL(req.url, "http://localhost");
+  const token = url.searchParams.get("token");
+  if (!token) return ws.close();
 
-const header=req.headers.authorization
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    clients.set(decoded.id, ws);
 
-if(!header) return res.status(401).json({status:false,message:"No token"})
+    ws.on("close", () => clients.delete(decoded.id));
+  } catch {
+    ws.close();
+  }
+});
 
-try{
-
-const token=header.split(" ")[1]
-
-const decoded=jwt.verify(token,process.env.JWT_SECRET)
-
-req.user=decoded
-
-next()
-
-}catch{
-
-res.status(401).json({status:false,message:"Invalid token"})
-
+function sendWalletUpdate(userId, balance) {
+  const ws = clients.get(userId);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "wallet_update", balance }));
+  }
 }
 
+/* =========================
+HEALTH CHECK
+========================= */
+app.get("/", (req, res) => {
+  res.json({ status: "MAY CONNECT API RUNNING" });
+});
+
+/* =========================
+AUTH MIDDLEWARE
+========================= */
+function auth(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header) return res.status(401).json({ message: "No token provided" });
+
+  try {
+    const token = header.split(" ")[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ message: "Invalid token" });
+  }
 }
 
-/* HEALTH */
+/* =========================
+SIGNUP
+========================= */
+app.post("/api/signup", async (req, res) => {
+  try {
+    const { username, email, password } = req.body;
 
-app.get("/",(req,res)=>{
-res.json({status:true,message:"MAY CONNECT API RUNNING"})
-})
+    const exists = await pool.query("SELECT id FROM users WHERE username=$1", [username]);
+    if (exists.rows.length > 0) return res.status(400).json({ message: "Username exists" });
 
-/* PROFILE */
+    const hash = await bcrypt.hash(password, 10);
+    const user = await pool.query(
+      `INSERT INTO users(username,email,password)
+       VALUES($1,$2,$3) RETURNING id,username,is_admin`,
+      [username, email, hash]
+    );
 
-app.get("/api/me",auth,async(req,res)=>{
+    const token = jwt.sign(user.rows[0], process.env.JWT_SECRET);
+    res.json({ token, user: user.rows[0] });
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: "Signup failed" });
+  }
+});
 
-const user=await pool.query(
-`SELECT id,username,wallet_balance,admin_wallet,is_admin
-FROM users WHERE id=$1`,
-[req.user.id]
-)
+/* =========================
+LOGIN
+========================= */
+app.post("/api/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const user = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
+    if (user.rows.length === 0) return res.status(400).json({ message: "User not found" });
 
-res.json({status:true,user:user.rows[0]})
+    const valid = await bcrypt.compare(password, user.rows[0].password);
+    if (!valid) return res.status(400).json({ message: "Wrong password" });
 
-})
+    const token = jwt.sign({
+      id: user.rows[0].id,
+      username: user.rows[0].username,
+      is_admin: user.rows[0].is_admin
+    }, process.env.JWT_SECRET);
 
-/* SET PIN */
+    res.json({ token, username: user.rows[0].username, is_admin: user.rows[0].is_admin });
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: "Login failed" });
+  }
+});
 
-app.post("/api/set-pin",auth,async(req,res)=>{
+/* =========================
+PROFILE
+========================= */
+app.get("/api/me", auth, async (req, res) => {
+  try {
+    const user = await pool.query(
+      "SELECT id,username,wallet_balance,admin_wallet,is_admin FROM users WHERE id=$1",
+      [req.user.id]
+    );
+    res.json(user.rows[0]);
+  } catch {
+    res.status(500).json({ message: "Profile fetch failed" });
+  }
+});
 
-const {pin}=req.body
+/* =========================
+SET PIN
+========================= */
+app.post("/api/set-pin", auth, async (req, res) => {
+  try {
+    const { pin } = req.body;
+    if (!pin) return res.status(400).json({ message: "PIN required" });
+    const hash = await bcrypt.hash(pin, 10);
+    await pool.query("UPDATE users SET pin=$1 WHERE id=$2", [hash, req.user.id]);
+    res.json({ message: "PIN set successfully" });
+  } catch {
+    res.status(500).json({ message: "Failed to set PIN" });
+  }
+});
 
-if(!pin) return res.json({status:false,message:"PIN required"})
-
-const hash=await bcrypt.hash(pin,10)
-
-await pool.query(
-"UPDATE users SET pin=$1 WHERE id=$2",
-[hash,req.user.id]
-)
-
-res.json({status:true,message:"PIN saved successfully"})
-
-})
-
-async function verifyPin(userId,pin){
-
-const user=await pool.query(
-"SELECT pin FROM users WHERE id=$1",
-[userId]
-)
-
-if(!user.rows[0] || !user.rows[0].pin) return false
-
-return await bcrypt.compare(pin,user.rows[0].pin)
-
+async function verifyPin(userId, pin) {
+  const user = await pool.query("SELECT pin FROM users WHERE id=$1", [userId]);
+  if (!user.rows[0] || !user.rows[0].pin) return false;
+  return await bcrypt.compare(pin, user.rows[0].pin);
 }
 
-/* DATA PLANS */
+/* =========================
+TRANSACTIONS
+========================= */
+app.get("/api/transactions", auth, async (req, res) => {
+  try {
+    const tx = await pool.query(
+      "SELECT id,type,amount,profit,phone,status,created_at FROM transactions WHERE user_id=$1 ORDER BY created_at DESC",
+      [req.user.id]
+    );
+    res.json(tx.rows);
+  } catch {
+    res.status(500).json({ message: "Failed to fetch transactions" });
+  }
+});
 
-app.get("/api/plans",auth,async(req,res)=>{
+/* =========================
+DATA PLANS
+========================= */
+app.get("/api/plans", auth, async (req, res) => {
+  try {
+    const { network } = req.query;
+    let query = "SELECT * FROM plans";
+    const values = [];
+    if (network) { query += " WHERE network=$1"; values.push(network); }
+    query += " ORDER BY price ASC";
+    const plans = await pool.query(query, values);
+    res.json(plans.rows);
+  } catch {
+    res.status(500).json({ message: "Failed to fetch plans" });
+  }
+});
 
-const plans=await pool.query(
-"SELECT * FROM plans ORDER BY price ASC"
-)
+/* =========================
+BUY DATA
+========================= */
+app.post("/api/buy-data", auth, async (req, res) => {
+  try {
+    const { plan_id, phone, pin } = req.body;
+    const validPin = await verifyPin(req.user.id, pin);
+    if (!validPin) return res.status(400).json({ message: "Invalid PIN" });
 
-res.json(plans.rows)
+    const plan = await pool.query("SELECT * FROM plans WHERE plan_id=$1 OR id=$1", [plan_id]);
+    if (plan.rows.length === 0) return res.status(400).json({ message: "Plan not found" });
 
-})
+    const price = Number(plan.rows[0].price);
+    const cost = Number(plan.rows[0].cost);
+    const user = await pool.query("SELECT wallet_balance FROM users WHERE id=$1", [req.user.id]);
 
-/* BUY DATA */
+    if (Number(user.rows[0].wallet_balance) < price)
+      return res.status(400).json({ message: "Insufficient balance" });
 
-app.post("/api/buy-data",auth,async(req,res)=>{
+    const profit = price - cost;
+    const newBalance = Number(user.rows[0].wallet_balance) - price;
 
-try{
+    await pool.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, req.user.id]);
+    await pool.query("UPDATE users SET admin_wallet=admin_wallet+$1 WHERE is_admin=true", [profit]);
+    await pool.query(
+      "INSERT INTO transactions(user_id,type,amount,profit,phone,status) VALUES($1,$2,$3,$4,$5,$6)",
+      [req.user.id, "data", price, profit, phone, "SUCCESS"]
+    );
 
-const {plan_id,phone,pin}=req.body
+    sendWalletUpdate(req.user.id, newBalance);
+    res.json({ message: "Data purchase successful", amount: price });
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: "Transaction failed" });
+  }
+});
 
-const validPin=await verifyPin(req.user.id,pin)
+/* =========================
+BUY AIRTIME
+========================= */
+app.post("/api/buy-airtime", auth, async (req, res) => {
+  try {
+    const { network, phone, amount, pin } = req.body;
+    const validPin = await verifyPin(req.user.id, pin);
+    if (!validPin) return res.status(400).json({ message: "Invalid PIN" });
 
-if(!validPin)
-return res.json({status:false,message:"Invalid PIN"})
+    const user = await pool.query("SELECT wallet_balance FROM users WHERE id=$1", [req.user.id]);
+    if (Number(user.rows[0].wallet_balance) < Number(amount))
+      return res.status(400).json({ message: "Insufficient balance" });
 
-const plan=await pool.query(
-"SELECT * FROM plans WHERE plan_id=$1 OR id=$1",
-[plan_id]
-)
+    const newBalance = Number(user.rows[0].wallet_balance) - Number(amount);
+    await pool.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, req.user.id]);
+    await pool.query(
+      "INSERT INTO transactions(user_id,type,amount,profit,phone,status) VALUES($1,$2,$3,$4,$5,$6)",
+      [req.user.id, "airtime", amount, 0, phone, "SUCCESS"]
+    );
 
-if(plan.rows.length===0)
-return res.json({status:false,message:"Plan not found"})
+    sendWalletUpdate(req.user.id, newBalance);
+    res.json({ message: "Airtime successful" });
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: "Airtime failed" });
+  }
+});
 
-const price=Number(plan.rows[0].price)
+/* =========================
+ADMIN DASHBOARD
+========================= */
+app.get("/api/admin/dashboard", auth, async (req, res) => {
+  if (!req.user.is_admin) return res.status(403).json({ message: "Forbidden" });
 
-const user=await pool.query(
-"SELECT wallet_balance FROM users WHERE id=$1",
-[req.user.id]
-)
+  try {
+    const todayProfit = await pool.query("SELECT SUM(profit) FROM transactions WHERE DATE(created_at)=CURRENT_DATE");
+    const totalProfit = await pool.query("SELECT SUM(profit) FROM transactions");
+    const users = await pool.query("SELECT COUNT(*) FROM users");
+    const todayTx = await pool.query("SELECT COUNT(*) FROM transactions WHERE DATE(created_at)=CURRENT_DATE");
 
-if(Number(user.rows[0].wallet_balance)<price)
-return res.json({status:false,message:"Insufficient balance"})
+    res.json({
+      today_profit: todayProfit.rows[0].sum || 0,
+      total_profit: totalProfit.rows[0].sum || 0,
+      total_users: users.rows[0].count,
+      today_transactions: todayTx.rows[0].count
+    });
+  } catch {
+    res.status(500).json({ message: "Failed to fetch admin dashboard" });
+  }
+});
 
-await pool.query(
-"UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
-[price,req.user.id]
-)
+/* =========================
+ADMIN WITHDRAW
+========================= */
+app.post("/api/admin/withdraw", auth, async (req, res) => {
+  if (!req.user.is_admin) return res.status(403).json({ message: "Forbidden" });
 
-await pool.query(
-`INSERT INTO transactions(user_id,type,amount,phone)
-VALUES($1,$2,$3,$4)`,
-[req.user.id,"data",price,phone]
-)
+  try {
+    const { amount, bank, account_number, account_name } = req.body;
+    const admin = await pool.query("SELECT admin_wallet FROM users WHERE id=$1", [req.user.id]);
 
-res.json({status:true,amount:price,message:"Data purchase successful"})
+    if (Number(admin.rows[0].admin_wallet) < Number(amount))
+      return res.status(400).json({ message: "Insufficient admin balance" });
 
-}catch{
+    await pool.query(
+      "INSERT INTO withdrawals(amount,bank,account_number,account_name,status) VALUES($1,$2,$3,$4,$5)",
+      [amount, bank, account_number, account_name, "PENDING"]
+    );
 
-res.json({status:false,message:"Transaction failed"})
+    await pool.query("UPDATE users SET admin_wallet=admin_wallet-$1 WHERE id=$2", [amount, req.user.id]);
+    res.json({ message: "Withdrawal recorded" });
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: "Withdrawal failed" });
+  }
+});
 
-}
+/* =========================
+WHITE LABEL BRAND
+========================= */
+app.get("/api/brand/:domain", async (req, res) => {
+  try {
+    const brand = await pool.query("SELECT * FROM brands WHERE domain=$1", [req.params.domain]);
+    res.json(brand.rows[0]);
+  } catch {
+    res.status(500).json({ message: "Failed to fetch brand" });
+  }
+});
 
-})
-
-/* BUY AIRTIME */
-
-app.post("/api/buy-airtime",auth,async(req,res)=>{
-
-try{
-
-const {phone,amount,pin}=req.body
-
-const validPin=await verifyPin(req.user.id,pin)
-
-if(!validPin)
-return res.json({status:false,message:"Invalid PIN"})
-
-const user=await pool.query(
-"SELECT wallet_balance FROM users WHERE id=$1",
-[req.user.id]
-)
-
-if(Number(user.rows[0].wallet_balance)<Number(amount))
-return res.json({status:false,message:"Insufficient balance"})
-
-await pool.query(
-"UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
-[amount,req.user.id]
-)
-
-await pool.query(
-`INSERT INTO transactions(user_id,type,amount,phone)
-VALUES($1,$2,$3,$4)`,
-[req.user.id,"airtime",amount,phone]
-)
-
-res.json({status:true,amount,message:"Airtime successful"})
-
-}catch{
-
-res.json({status:false,message:"Airtime failed"})
-
-}
-
-})
-
-const PORT=process.env.PORT||5000
-
-server.listen(PORT,()=>{
-console.log("MAY CONNECT SERVER RUNNING")
-})
+/* =========================
+START SERVER
+========================= */
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => console.log("MAY CONNECT SERVER RUNNING"));
