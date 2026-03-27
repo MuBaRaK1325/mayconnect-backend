@@ -1,5 +1,4 @@
 require("dotenv").config();
-
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -51,13 +50,6 @@ function sendWalletUpdate(userId, balance) {
 }
 
 /* =========================
-HEALTH CHECK
-========================= */
-app.get("/", (req, res) => {
-  res.json({ status: "MAY CONNECT API RUNNING" });
-});
-
-/* =========================
 AUTH MIDDLEWARE
 ========================= */
 function auth(req, res, next) {
@@ -80,7 +72,6 @@ SIGNUP
 app.post("/api/signup", async (req, res) => {
   try {
     const { username, email, password } = req.body;
-
     const exists = await pool.query("SELECT id FROM users WHERE username=$1", [username]);
     if (exists.rows.length > 0) return res.status(400).json({ message: "Username exists" });
 
@@ -140,7 +131,7 @@ app.get("/api/me", auth, async (req, res) => {
 });
 
 /* =========================
-SET PIN
+PIN SYSTEM
 ========================= */
 app.post("/api/set-pin", auth, async (req, res) => {
   try {
@@ -172,6 +163,27 @@ app.get("/api/transactions", auth, async (req, res) => {
     res.json(tx.rows);
   } catch {
     res.status(500).json({ message: "Failed to fetch transactions" });
+  }
+});
+
+/* =========================
+ADMIN TRANSACTIONS
+========================= */
+app.get("/api/admin/transactions", auth, async (req, res) => {
+  if (!req.user.is_admin) return res.status(403).json({ message: "Forbidden" });
+  try {
+    const txs = await pool.query(`
+      SELECT t.id, t.type, t.amount, t.profit, t.phone, t.status, t.created_at, u.username
+      FROM transactions t
+      JOIN users u ON u.id = t.user_id
+      ORDER BY t.created_at DESC
+    `);
+    res.json(txs.rows.map(tx => ({
+      ...tx,
+      date: tx.created_at
+    })));
+  } catch {
+    res.status(500).json({ message: "Failed to fetch admin transactions" });
   }
 });
 
@@ -230,34 +242,6 @@ app.post("/api/buy-data", auth, async (req, res) => {
 });
 
 /* =========================
-BUY AIRTIME
-========================= */
-app.post("/api/buy-airtime", auth, async (req, res) => {
-  try {
-    const { network, phone, amount, pin } = req.body;
-    const validPin = await verifyPin(req.user.id, pin);
-    if (!validPin) return res.status(400).json({ message: "Invalid PIN" });
-
-    const user = await pool.query("SELECT wallet_balance FROM users WHERE id=$1", [req.user.id]);
-    if (Number(user.rows[0].wallet_balance) < Number(amount))
-      return res.status(400).json({ message: "Insufficient balance" });
-
-    const newBalance = Number(user.rows[0].wallet_balance) - Number(amount);
-    await pool.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, req.user.id]);
-    await pool.query(
-      "INSERT INTO transactions(user_id,type,amount,profit,phone,status) VALUES($1,$2,$3,$4,$5,$6)",
-      [req.user.id, "airtime", amount, 0, phone, "SUCCESS"]
-    );
-
-    sendWalletUpdate(req.user.id, newBalance);
-    res.json({ message: "Airtime successful" });
-  } catch (err) {
-    console.log(err);
-    res.status(500).json({ message: "Airtime failed" });
-  }
-});
-
-/* =========================
 ADMIN DASHBOARD
 ========================= */
 app.get("/api/admin/dashboard", auth, async (req, res) => {
@@ -287,15 +271,15 @@ app.post("/api/admin/withdraw", auth, async (req, res) => {
   if (!req.user.is_admin) return res.status(403).json({ message: "Forbidden" });
 
   try {
-    const { amount, bank, account_number, account_name } = req.body;
+    const { amount, account } = req.body; // simplified to single 'account' field
     const admin = await pool.query("SELECT admin_wallet FROM users WHERE id=$1", [req.user.id]);
 
     if (Number(admin.rows[0].admin_wallet) < Number(amount))
       return res.status(400).json({ message: "Insufficient admin balance" });
 
     await pool.query(
-      "INSERT INTO withdrawals(amount,bank,account_number,account_name,status) VALUES($1,$2,$3,$4,$5)",
-      [amount, bank, account_number, account_name, "PENDING"]
+      "INSERT INTO withdrawals(amount,account,status) VALUES($1,$2,$3)",
+      [amount, account, "PENDING"]
     );
 
     await pool.query("UPDATE users SET admin_wallet=admin_wallet-$1 WHERE id=$2", [amount, req.user.id]);
@@ -307,19 +291,7 @@ app.post("/api/admin/withdraw", auth, async (req, res) => {
 });
 
 /* =========================
-WHITE LABEL BRAND
-========================= */
-app.get("/api/brand/:domain", async (req, res) => {
-  try {
-    const brand = await pool.query("SELECT * FROM brands WHERE domain=$1", [req.params.domain]);
-    res.json(brand.rows[0]);
-  } catch {
-    res.status(500).json({ message: "Failed to fetch brand" });
-  }
-});
-
-/* =========================
 START SERVER
 ========================= */
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log("MAY CONNECT SERVER RUNNING"));
+server.listen(PORT, () => console.log(`MAY CONNECT SERVER RUNNING on port ${PORT}`));
