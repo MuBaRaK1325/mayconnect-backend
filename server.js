@@ -43,8 +43,11 @@ ws.on("close",()=>{
 clients.delete(decoded.id);
 });
 
-}catch{
+}catch(err){
+
+console.log("WebSocket auth error:",err);
 ws.close();
+
 }
 
 });
@@ -72,27 +75,14 @@ try{
 
 console.log("SMS:",phone,message);
 
-/* 
+/*
 Add SMS provider here later
-
-Example Termii:
-
-await axios.post(
-"https://api.ng.termii.com/api/sms/send",
-{
-to:phone,
-from:process.env.SMS_SENDER,
-sms:message,
-type:"plain",
-channel:"generic",
-api_key:process.env.SMS_API_KEY
-}
-)
-
 */
 
 }catch(err){
-console.log("SMS failed");
+
+console.log("SMS failed",err.message);
+
 }
 
 }
@@ -114,8 +104,9 @@ const decoded=jwt.verify(token,process.env.JWT_SECRET);
 req.user=decoded;
 next();
 
-}catch{
+}catch(err){
 
+console.log("Auth error:",err.message);
 res.status(401).json({message:"Invalid token"});
 
 }
@@ -152,8 +143,9 @@ const token=jwt.sign(user.rows[0],process.env.JWT_SECRET,{expiresIn:"7d"});
 
 res.json({token,user:user.rows[0]});
 
-}catch{
+}catch(err){
 
+console.log("Signup error:",err);
 res.status(500).json({message:"Signup failed"});
 
 }
@@ -196,9 +188,32 @@ username:user.rows[0].username,
 is_admin:user.rows[0].is_admin
 });
 
-}catch{
+}catch(err){
 
-res.status(500).json({message:"Login failed"});
+console.log("LOGIN ERROR:",err);
+res.status(500).json({message:"Login server error"});
+
+}
+
+});
+
+/* ================= GET USER ================= */
+
+app.get("/api/me",auth,async(req,res)=>{
+
+try{
+
+const user=await pool.query(
+"SELECT id,username,wallet_balance,is_admin FROM users WHERE id=$1",
+[req.user.id]
+);
+
+res.json(user.rows[0]);
+
+}catch(err){
+
+console.log("ME ERROR:",err);
+res.status(500).json({message:"Failed to load user"});
 
 }
 
@@ -208,11 +223,20 @@ res.status(500).json({message:"Login failed"});
 
 app.get("/api/plans",async(req,res)=>{
 
+try{
+
 const plans=await pool.query(
 "SELECT * FROM plans ORDER BY price ASC"
 );
 
 res.json(plans.rows);
+
+}catch(err){
+
+console.log("Plans error:",err);
+res.status(500).json({message:"Failed to load plans"});
+
+}
 
 });
 
@@ -270,7 +294,9 @@ VALUES($1,$2,$3)`,
 
 await client.query("COMMIT");
 
-sendWalletUpdate(req.user.id,user.rows[0].wallet_balance-price);
+const newBalance=user.rows[0].wallet_balance-price;
+
+sendWalletUpdate(req.user.id,newBalance);
 
 sendSMS(phone,`Data purchase successful. Ref:${reference}`);
 
@@ -279,7 +305,13 @@ res.json({success:true,reference});
 }catch(err){
 
 await client.query("ROLLBACK");
-res.status(400).json({success:false,message:err.message});
+
+console.log("DATA ERROR:",err);
+
+res.status(400).json({
+success:false,
+message:err.message
+});
 
 }finally{
 
@@ -313,16 +345,20 @@ Authorization:`Bearer ${process.env.PAYSTACK_SECRET_KEY}`
 
 res.json(response.data.data);
 
-}catch{
+}catch(err){
 
+console.log("PAYSTACK INIT ERROR:",err);
 res.status(500).json({message:"Payment init failed"});
+
 }
 
 });
 
 /* ================= PAYSTACK WEBHOOK ================= */
 
-app.post("/api/paystack/webhook",express.raw({type:"application/json"}),async(req,res)=>{
+app.post("/api/paystack/webhook",express.json(),async(req,res)=>{
+
+try{
 
 const event=req.body;
 
@@ -335,24 +371,33 @@ const email=event.data.customer.email;
 const username=email.split("@")[0];
 
 const user=await pool.query(
-"SELECT id FROM users WHERE username=$1",
+"SELECT id,wallet_balance FROM users WHERE username=$1",
 [username]
 );
 
 if(user.rows.length){
 
+const newBalance=user.rows[0].wallet_balance+amount;
+
 await pool.query(
-"UPDATE users SET wallet_balance=wallet_balance+$1 WHERE id=$2",
-[amount,user.rows[0].id]
+"UPDATE users SET wallet_balance=$1 WHERE id=$2",
+[newBalance,user.rows[0].id]
 );
 
-sendWalletUpdate(user.rows[0].id);
+sendWalletUpdate(user.rows[0].id,newBalance);
 
 }
 
 }
 
 res.sendStatus(200);
+
+}catch(err){
+
+console.log("PAYSTACK WEBHOOK ERROR:",err);
+res.sendStatus(500);
+
+}
 
 });
 
@@ -363,25 +408,26 @@ app.get("/api/admin/analytics",auth,async(req,res)=>{
 if(!req.user.is_admin)
 return res.status(403).json({message:"Forbidden"});
 
+try{
+
 const users=await pool.query("SELECT COUNT(*) FROM users");
 const trx=await pool.query("SELECT COUNT(*) FROM transactions");
 const volume=await pool.query("SELECT SUM(amount) FROM transactions");
 const profit=await pool.query("SELECT SUM(amount) FROM profits");
 
-const daily=await pool.query(
-`SELECT DATE(created_at),COUNT(*) 
-FROM transactions
-GROUP BY DATE(created_at)
-ORDER BY DATE`
-);
-
 res.json({
 total_users:users.rows[0].count,
 total_transactions:trx.rows[0].count,
 total_volume:volume.rows[0].sum,
-total_profit:profit.rows[0].sum,
-daily_transactions:daily.rows
+total_profit:profit.rows[0].sum
 });
+
+}catch(err){
+
+console.log("ANALYTICS ERROR:",err);
+res.status(500).json({message:"Analytics failed"});
+
+}
 
 });
 
