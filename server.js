@@ -44,10 +44,8 @@ clients.delete(decoded.id);
 });
 
 }catch(err){
-
 console.log("WebSocket auth error:",err);
 ws.close();
-
 }
 
 });
@@ -74,10 +72,6 @@ async function sendSMS(phone,message){
 try{
 
 console.log("SMS:",phone,message);
-
-/*
-Add SMS provider here later
-*/
 
 }catch(err){
 
@@ -185,6 +179,7 @@ is_admin:user.rows[0].is_admin
 res.json({
 token,
 username:user.rows[0].username,
+wallet_balance:user.rows[0].wallet_balance,
 is_admin:user.rows[0].is_admin
 });
 
@@ -204,7 +199,7 @@ app.get("/api/me",auth,async(req,res)=>{
 try{
 
 const user=await pool.query(
-"SELECT id,username,wallet_balance,is_admin FROM users WHERE id=$1",
+"SELECT id,username,wallet_balance,is_admin,top_user FROM users WHERE id=$1",
 [req.user.id]
 );
 
@@ -253,7 +248,7 @@ const {plan_id,phone,pin}=req.body;
 await client.query("BEGIN");
 
 const user=await client.query(
-"SELECT wallet_balance,pin FROM users WHERE id=$1",
+"SELECT wallet_balance,pin,top_user FROM users WHERE id=$1",
 [req.user.id]
 );
 
@@ -265,8 +260,12 @@ const plan=await client.query(
 [plan_id]
 );
 
-const price=Number(plan.rows[0].price);
+let price=Number(plan.rows[0].price);
 const cost=Number(plan.rows[0].cost_price||price);
+
+if(user.rows[0].top_user){
+price=cost;
+}
 
 if(user.rows[0].wallet_balance < price)
 throw new Error("Insufficient balance");
@@ -321,113 +320,91 @@ client.release();
 
 });
 
-/* ================= PAYSTACK FUNDING ================= */
+/* ================= BUY AIRTIME ================= */
 
-app.post("/api/paystack/initialize",auth,async(req,res)=>{
+app.post("/api/buy-airtime",auth,async(req,res)=>{
+
+const client=await pool.connect();
 
 try{
 
-const {amount}=req.body;
+const {amount,phone,pin}=req.body;
 
-const response=await axios.post(
-"https://api.paystack.co/transaction/initialize",
-{
-email:req.user.username+"@app.com",
-amount:amount*100,
-callback_url:"https://yourdomain.com/dashboard.html"
-},
-{
-headers:{
-Authorization:`Bearer ${process.env.PAYSTACK_SECRET_KEY}`
-}
-}
+await client.query("BEGIN");
+
+const user=await client.query(
+"SELECT wallet_balance,pin FROM users WHERE id=$1",
+[req.user.id]
 );
 
-res.json(response.data.data);
+const valid=await bcrypt.compare(pin,user.rows[0].pin);
+if(!valid) throw new Error("Invalid PIN");
+
+if(user.rows[0].wallet_balance < amount)
+throw new Error("Insufficient balance");
+
+const reference="AIRTIME-"+uuidv4();
+
+await client.query(
+"UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
+[amount,req.user.id]
+);
+
+await client.query(
+`INSERT INTO transactions
+(user_id,type,amount,phone,reference,status)
+VALUES($1,$2,$3,$4,$5,$6)`,
+[req.user.id,"airtime",amount,phone,reference,"SUCCESS"]
+);
+
+await client.query(
+`INSERT INTO profits(type,amount,reference)
+VALUES($1,$2,$3)`,
+["airtime",amount*0.03,reference]
+);
+
+await client.query("COMMIT");
+
+const newBalance=user.rows[0].wallet_balance-amount;
+
+sendWalletUpdate(req.user.id,newBalance);
+
+sendSMS(phone,`Airtime purchase successful. Ref:${reference}`);
+
+res.json({success:true,reference});
 
 }catch(err){
 
-console.log("PAYSTACK INIT ERROR:",err);
-res.status(500).json({message:"Payment init failed"});
+await client.query("ROLLBACK");
+
+res.status(400).json({
+success:false,
+message:err.message
+});
+
+}finally{
+
+client.release();
 
 }
 
 });
 
-/* ================= PAYSTACK WEBHOOK ================= */
+/* ================= ADMIN SET TOP USER ================= */
 
-app.post("/api/paystack/webhook",express.json(),async(req,res)=>{
-
-try{
-
-const event=req.body;
-
-if(event.event==="charge.success"){
-
-const ref=event.data.reference;
-const amount=event.data.amount/100;
-const email=event.data.customer.email;
-
-const username=email.split("@")[0];
-
-const user=await pool.query(
-"SELECT id,wallet_balance FROM users WHERE username=$1",
-[username]
-);
-
-if(user.rows.length){
-
-const newBalance=user.rows[0].wallet_balance+amount;
-
-await pool.query(
-"UPDATE users SET wallet_balance=$1 WHERE id=$2",
-[newBalance,user.rows[0].id]
-);
-
-sendWalletUpdate(user.rows[0].id,newBalance);
-
-}
-
-}
-
-res.sendStatus(200);
-
-}catch(err){
-
-console.log("PAYSTACK WEBHOOK ERROR:",err);
-res.sendStatus(500);
-
-}
-
-});
-
-/* ================= ADMIN ANALYTICS ================= */
-
-app.get("/api/admin/analytics",auth,async(req,res)=>{
+app.post("/api/admin/top-user",auth,async(req,res)=>{
 
 if(!req.user.is_admin)
 return res.status(403).json({message:"Forbidden"});
 
-try{
+const {user_id,status}=req.body;
 
-const users=await pool.query("SELECT COUNT(*) FROM users");
-const trx=await pool.query("SELECT COUNT(*) FROM transactions");
-const volume=await pool.query("SELECT SUM(amount) FROM transactions");
-const profit=await pool.query("SELECT SUM(amount) FROM profits");
+await pool.query(
+"UPDATE users SET top_user=$1 WHERE id=$2",
+[status,user_id]
+);
 
-res.json({
-total_users:users.rows[0].count,
-total_transactions:trx.rows[0].count,
-total_volume:volume.rows[0].sum,
-total_profit:profit.rows[0].sum
-});
-
-}catch(err){
-
-console.log("ANALYTICS ERROR:",err);
-res.status(500).json({message:"Analytics failed"});
-
-}
+res.json({success:true});
 
 });
 
