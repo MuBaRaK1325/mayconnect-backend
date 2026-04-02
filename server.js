@@ -12,32 +12,20 @@ const app = express()
 const server = http.createServer(app)
 const wss = new WebSocket.Server({ server })
 
-/* ================= CORS FIX ================= */
-
-const allowedOrigins = [
-  "https://mayconnect-frontend.onrender.com",
-  "http://localhost:3000",
-  "http://127.0.0.1:5500"
-]
+/* ================= CORS (FULL FIX) ================= */
 
 app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true)
-
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true)
-    } else {
-      callback(null, true) // allow all (safer for now)
-    }
-  },
-  credentials: true
+  origin: "*",
+  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization"]
 }))
 
 app.options("*", cors())
 
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*")
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization")
+app.use((req,res,next)=>{
+  res.header("Access-Control-Allow-Origin","*")
+  res.header("Access-Control-Allow-Headers","*")
+  res.header("Access-Control-Allow-Methods","GET,POST,PUT,DELETE,OPTIONS")
   next()
 })
 
@@ -54,33 +42,32 @@ const pool = new Pool({
 
 const clients = new Map()
 
-wss.on("connection", (ws, req) => {
-  try {
-    const url = new URL(req.url, "http://localhost")
-    const token = url.searchParams.get("token")
+wss.on("connection",(ws,req)=>{
+  try{
+    const url=new URL(req.url,"http://localhost")
+    const token=url.searchParams.get("token")
 
-    if (!token) return ws.close()
+    if(!token) return ws.close()
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    const decoded=jwt.verify(token,process.env.JWT_SECRET)
 
-    clients.set(decoded.id, ws)
+    clients.set(decoded.id,ws)
 
-    ws.on("close", () => {
+    ws.on("close",()=>{
       clients.delete(decoded.id)
     })
 
-  } catch (err) {
-    console.log("WS ERROR:", err.message)
+  }catch{
     ws.close()
   }
 })
 
-function sendWalletUpdate(userId, balance) {
-  const ws = clients.get(userId)
+function sendWalletUpdate(userId,balance){
+  const ws=clients.get(userId)
 
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  if(ws && ws.readyState===WebSocket.OPEN){
     ws.send(JSON.stringify({
-      type: "wallet_update",
+      type:"wallet_update",
       balance
     }))
   }
@@ -88,102 +75,110 @@ function sendWalletUpdate(userId, balance) {
 
 /* ================= AUTH ================= */
 
-function auth(req, res, next) {
-  const header = req.headers.authorization
+function auth(req,res,next){
+  const header=req.headers.authorization
 
-  if (!header) return res.status(401).json({ message: "No token" })
+  if(!header) return res.status(401).json({message:"No token"})
 
-  try {
-    const token = header.split(" ")[1]
-    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+  try{
+    const token=header.split(" ")[1]
+    const decoded=jwt.verify(token,process.env.JWT_SECRET)
 
-    req.user = decoded
+    req.user=decoded
     next()
 
-  } catch {
-    res.status(401).json({ message: "Invalid token" })
+  }catch{
+    res.status(401).json({message:"Invalid token"})
   }
 }
 
 /* ================= SIGNUP ================= */
 
-app.post("/api/signup", async (req, res) => {
-  try {
-    const { username, email, password, pin } = req.body
+app.post("/api/signup",async(req,res)=>{
+  try{
+    const {username,email,password,pin}=req.body
 
-    if (!username || !password || !pin)
-      return res.status(400).json({ message: "Missing fields" })
+    if(!username || !password || !pin)
+      return res.status(400).json({message:"Missing fields"})
 
-    const exists = await pool.query(
+    const exists=await pool.query(
       "SELECT id FROM users WHERE username=$1",
       [username]
     )
 
-    if (exists.rows.length)
-      return res.status(400).json({ message: "Username exists" })
+    if(exists.rows.length)
+      return res.status(400).json({message:"Username exists"})
 
-    const hash = await bcrypt.hash(password, 10)
-    const pinHash = await bcrypt.hash(pin, 10)
+    const hash=await bcrypt.hash(password,10)
+    const pinHash=await bcrypt.hash(pin,10)
 
-    const user = await pool.query(
+    const user=await pool.query(
       `INSERT INTO users(username,email,password,pin,wallet_balance,top_user)
        VALUES($1,$2,$3,$4,0,false)
        RETURNING id,username,is_admin`,
-      [username, email, hash, pinHash]
+      [username,email,hash,pinHash]
     )
 
-    const token = jwt.sign(user.rows[0], process.env.JWT_SECRET, { expiresIn: "7d" })
+    const token=jwt.sign(user.rows[0],process.env.JWT_SECRET,{expiresIn:"7d"})
 
-    res.json({ token, user: user.rows[0] })
+    res.json({token,user:user.rows[0]})
 
-  } catch (err) {
-    console.log("SIGNUP ERROR:", err)
-    res.status(500).json({ message: "Signup failed" })
+  }catch(err){
+    console.log(err)
+    res.status(500).json({message:"Signup failed"})
   }
 })
 
-/* ================= LOGIN ================= */
+/* ================= LOGIN (FIXED) ================= */
 
-app.post("/api/login", async (req, res) => {
-  try {
-    const { username, password } = req.body
+app.post("/api/login",async(req,res)=>{
+  try{
+    const {username,password}=req.body
 
-    const user = await pool.query(
+    const user=await pool.query(
       "SELECT * FROM users WHERE username=$1",
       [username]
     )
 
-    if (!user.rows.length)
-      return res.status(400).json({ message: "User not found" })
+    if(!user.rows.length)
+      return res.status(400).json({message:"User not found"})
 
-    const valid = await bcrypt.compare(password, user.rows[0].password)
+    let valid=false
 
-    if (!valid)
-      return res.status(400).json({ message: "Wrong password" })
+    // ✅ try bcrypt
+    if(user.rows[0].password.startsWith("$2")){
+      valid=await bcrypt.compare(password,user.rows[0].password)
+    }else{
+      // ✅ fallback for old plain passwords
+      valid = password === user.rows[0].password
+    }
 
-    const token = jwt.sign({
-      id: user.rows[0].id,
-      username: user.rows[0].username,
-      is_admin: user.rows[0].is_admin
-    }, process.env.JWT_SECRET, { expiresIn: "7d" })
+    if(!valid)
+      return res.status(400).json({message:"Wrong password"})
+
+    const token=jwt.sign({
+      id:user.rows[0].id,
+      username:user.rows[0].username,
+      is_admin:user.rows[0].is_admin
+    },process.env.JWT_SECRET,{expiresIn:"7d"})
 
     res.json({
       token,
-      username: user.rows[0].username,
-      wallet_balance: user.rows[0].wallet_balance,
-      is_admin: user.rows[0].is_admin
+      username:user.rows[0].username,
+      wallet_balance:user.rows[0].wallet_balance,
+      is_admin:user.rows[0].is_admin
     })
 
-  } catch (err) {
-    console.log("LOGIN ERROR:", err)
-    res.status(500).json({ message: "Login server error" })
+  }catch(err){
+    console.log(err)
+    res.status(500).json({message:"Login error"})
   }
 })
 
 /* ================= USER ================= */
 
-app.get("/api/me", auth, async (req, res) => {
-  const user = await pool.query(
+app.get("/api/me",auth,async(req,res)=>{
+  const user=await pool.query(
     `SELECT id,username,wallet_balance,is_admin,top_user
      FROM users WHERE id=$1`,
     [req.user.id]
@@ -194,8 +189,8 @@ app.get("/api/me", auth, async (req, res) => {
 
 /* ================= TRANSACTIONS ================= */
 
-app.get("/api/transactions", auth, async (req, res) => {
-  const tx = await pool.query(
+app.get("/api/transactions",auth,async(req,res)=>{
+  const tx=await pool.query(
     `SELECT * FROM transactions
      WHERE user_id=$1
      ORDER BY created_at DESC`,
@@ -205,143 +200,143 @@ app.get("/api/transactions", auth, async (req, res) => {
   res.json(tx.rows)
 })
 
-/* ================= DATA ================= */
+/* ================= BUY DATA ================= */
 
-app.post("/api/buy-data", auth, async (req, res) => {
-  const client = await pool.connect()
+app.post("/api/buy-data",auth,async(req,res)=>{
+  const client=await pool.connect()
 
-  try {
-    const { plan_id, phone, pin } = req.body
+  try{
+    const {plan_id,phone,pin}=req.body
 
     await client.query("BEGIN")
 
-    const user = await client.query(
+    const user=await client.query(
       "SELECT wallet_balance,pin,top_user FROM users WHERE id=$1",
       [req.user.id]
     )
 
-    const valid = await bcrypt.compare(pin, user.rows[0].pin)
-    if (!valid) throw new Error("Invalid PIN")
+    const valid=await bcrypt.compare(pin,user.rows[0].pin)
+    if(!valid) throw new Error("Invalid PIN")
 
-    const plan = await client.query(
+    const plan=await client.query(
       "SELECT * FROM plans WHERE id=$1",
       [plan_id]
     )
 
-    let price = Number(plan.rows[0].price)
-    const cost = Number(plan.rows[0].cost_price || price)
+    let price=Number(plan.rows[0].price)
+    const cost=Number(plan.rows[0].cost_price||price)
 
-    if (user.rows[0].top_user) price = cost
+    if(user.rows[0].top_user) price=cost
 
-    if (user.rows[0].wallet_balance < price)
+    if(user.rows[0].wallet_balance < price)
       throw new Error("Insufficient balance")
 
-    const reference = "DATA-" + uuidv4()
+    const reference="DATA-"+uuidv4()
 
     await client.query(
       "UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
-      [price, req.user.id]
+      [price,req.user.id]
     )
 
     await client.query(
       `INSERT INTO transactions(user_id,type,amount,phone,reference,status)
        VALUES($1,$2,$3,$4,$5,$6)`,
-      [req.user.id, "DATA", price, phone, reference, "SUCCESS"]
+      [req.user.id,"DATA",price,phone,reference,"SUCCESS"]
     )
 
     await client.query(
       `INSERT INTO profits(type,amount,reference)
        VALUES($1,$2,$3)`,
-      ["data", price - cost, reference]
+      ["data",price-cost,reference]
     )
 
     await client.query("COMMIT")
 
-    sendWalletUpdate(req.user.id, user.rows[0].wallet_balance - price)
+    sendWalletUpdate(req.user.id,user.rows[0].wallet_balance-price)
 
-    res.json({ success: true, reference })
+    res.json({success:true,reference})
 
-  } catch (err) {
+  }catch(err){
     await client.query("ROLLBACK")
-    res.status(400).json({ success: false, message: err.message })
-  } finally {
+    res.status(400).json({success:false,message:err.message})
+  }finally{
     client.release()
   }
 })
 
-/* ================= AIRTIME ================= */
+/* ================= BUY AIRTIME ================= */
 
-app.post("/api/buy-airtime", auth, async (req, res) => {
-  const client = await pool.connect()
+app.post("/api/buy-airtime",auth,async(req,res)=>{
+  const client=await pool.connect()
 
-  try {
-    const { phone, amount, pin } = req.body
+  try{
+    const {phone,amount,pin}=req.body
 
     await client.query("BEGIN")
 
-    const user = await client.query(
+    const user=await client.query(
       "SELECT wallet_balance,pin FROM users WHERE id=$1",
       [req.user.id]
     )
 
-    const valid = await bcrypt.compare(pin, user.rows[0].pin)
-    if (!valid) throw new Error("Invalid PIN")
+    const valid=await bcrypt.compare(pin,user.rows[0].pin)
+    if(!valid) throw new Error("Invalid PIN")
 
-    if (user.rows[0].wallet_balance < amount)
+    if(user.rows[0].wallet_balance < amount)
       throw new Error("Insufficient balance")
 
-    const reference = "AIRTIME-" + uuidv4()
+    const reference="AIRTIME-"+uuidv4()
 
     await client.query(
       "UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
-      [amount, req.user.id]
+      [amount,req.user.id]
     )
 
     await client.query(
       `INSERT INTO transactions(user_id,type,amount,phone,reference,status)
        VALUES($1,$2,$3,$4,$5,$6)`,
-      [req.user.id, "AIRTIME", amount, phone, reference, "SUCCESS"]
+      [req.user.id,"AIRTIME",amount,phone,reference,"SUCCESS"]
     )
 
     await client.query(
       `INSERT INTO profits(type,amount,reference)
        VALUES($1,$2,$3)`,
-      ["airtime", amount * 0.03, reference]
+      ["airtime",amount*0.03,reference]
     )
 
     await client.query("COMMIT")
 
-    sendWalletUpdate(req.user.id, user.rows[0].wallet_balance - amount)
+    sendWalletUpdate(req.user.id,user.rows[0].wallet_balance-amount)
 
-    res.json({ success: true, reference })
+    res.json({success:true,reference})
 
-  } catch (err) {
+  }catch(err){
     await client.query("ROLLBACK")
-    res.status(400).json({ success: false, message: err.message })
-  } finally {
+    res.status(400).json({success:false,message:err.message})
+  }finally{
     client.release()
   }
 })
 
-/* ================= ADMIN ================= */
+/* ================= ADMIN PROFITS ================= */
 
-app.get("/api/admin/profits", auth, async (req, res) => {
-  if (!req.user.is_admin)
-    return res.status(403).json({ message: "Forbidden" })
+app.get("/api/admin/profits",auth,async(req,res)=>{
+  if(!req.user.is_admin)
+    return res.status(403).json({message:"Forbidden"})
 
-  const profit = await pool.query(
+  const profit=await pool.query(
     "SELECT SUM(amount) AS total_profit FROM profits"
   )
 
   res.json({
-    total_profit: profit.rows[0].total_profit || 0
+    total_profit:profit.rows[0].total_profit || 0
   })
 })
 
 /* ================= SERVER ================= */
 
-const PORT = process.env.PORT || 5000
+const PORT=process.env.PORT||5000
 
-server.listen(PORT, () => {
-  console.log("SERVER RUNNING ON PORT", PORT)
+server.listen(PORT,()=>{
+  console.log("SERVER RUNNING ON PORT",PORT)
 })
