@@ -17,7 +17,7 @@ const wss = new WebSocket.Server({ server })
 /* ================= CONFIG ================= */
 
 const ADMIN_EMAILS = [
-  "abubakarmubarak3456@gmail.com",
+  "mayconnectofficial@gmail.com",
   "bashirahmadt11696@gmail.com",
   "abdullahihabibudanalhaji@gmail.com",
   "Sadeeqtukur765@gmailcom"
@@ -168,7 +168,24 @@ app.post("/api/login", async (req, res) => {
     })
 
   } catch (err) {
+    console.log("LOGIN ERROR:", err)
     res.status(500).json({ message: "Login error" })
+  }
+})
+
+/* ================= GET PLANS (FIX FOR DASHBOARD) ================= */
+
+app.get("/api/plans", auth, async (req, res) => {
+  try {
+    const plans = await pool.query(
+      "SELECT * FROM plans WHERE company=$1",
+      [req.user.company]
+    )
+
+    res.json(plans.rows)
+  } catch (err) {
+    console.log("PLANS ERROR:", err)
+    res.status(500).json({ message: "Failed to load plans" })
   }
 })
 
@@ -194,6 +211,8 @@ app.post("/api/buy-data", auth, async (req, res) => {
       "SELECT * FROM plans WHERE id=$1",
       [plan_id]
     )
+
+    if (!plan.rows.length) throw new Error("Invalid plan")
 
     const price = Number(plan.rows[0].price)
 
@@ -258,10 +277,13 @@ app.post("/api/buy-data", auth, async (req, res) => {
 
     await client.query("COMMIT")
 
+    sendWalletUpdate(req.user.id, user.rows[0].wallet_balance - price)
+
     res.json({ success: true, reference, provider })
 
   } catch (err) {
     await client.query("ROLLBACK")
+    console.log("BUY ERROR:", err)
     res.status(400).json({ message: err.message })
   } finally {
     client.release()
@@ -284,20 +306,21 @@ app.get("/api/tx/:reference", auth, async (req, res) => {
   res.json(tx.rows[0])
 })
 
-/* ================= WEBHOOK (SECURE) ================= */
+/* ================= WEBHOOK ================= */
 
 app.post("/api/webhook", async (req, res) => {
   try {
     const signature = req.headers["x-signature"]
 
-    // VERIFY SIGNATURE
+    if (!signature) return res.sendStatus(400)
+
     const hash = crypto
       .createHmac("sha256", process.env.WEBHOOK_SECRET)
       .update(JSON.stringify(req.body))
       .digest("hex")
 
     if (signature !== hash) {
-      console.log("❌ INVALID WEBHOOK SIGNATURE")
+      console.log("INVALID SIGNATURE")
       return res.sendStatus(403)
     }
 
@@ -310,13 +333,11 @@ app.post("/api/webhook", async (req, res) => {
 
     if (!tx.rows.length) return res.sendStatus(404)
 
-    // UPDATE STATUS
     await pool.query(
       "UPDATE transactions SET status=$1 WHERE reference=$2",
       [status.toUpperCase(), reference]
     )
 
-    // AUTO REFUND IF FAILED
     if (status.toLowerCase() === "failed") {
       await pool.query(
         "UPDATE users SET wallet_balance=wallet_balance+$1 WHERE id=$2",
