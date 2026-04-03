@@ -15,18 +15,11 @@ const wss = new WebSocket.Server({ server })
 
 /* ================= CONFIG ================= */
 
-const ADMIN_EMAIL = "abubakarmubarak3456@gmail.com"
+const ADMIN_EMAIL = "mayconnectofficial@gmail.com"
 
-/* ================= CORS FIX ================= */
+/* ================= MIDDLEWARE ================= */
 
-app.use(cors({
-  origin: "*",
-  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"]
-}))
-
-app.options("*", cors())
-
+app.use(cors())
 app.use(express.json())
 
 /* ================= DATABASE ================= */
@@ -48,7 +41,6 @@ wss.on("connection", (ws, req) => {
     if (!token) return ws.close()
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET)
-
     clients.set(decoded.id, ws)
 
     ws.on("close", () => clients.delete(decoded.id))
@@ -60,12 +52,8 @@ wss.on("connection", (ws, req) => {
 
 function sendWalletUpdate(userId, balance) {
   const ws = clients.get(userId)
-
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: "wallet_update",
-      balance
-    }))
+    ws.send(JSON.stringify({ type: "wallet_update", balance }))
   }
 }
 
@@ -73,16 +61,12 @@ function sendWalletUpdate(userId, balance) {
 
 function auth(req, res, next) {
   const header = req.headers.authorization
-
   if (!header) return res.status(401).json({ message: "No token" })
 
   try {
     const token = header.split(" ")[1]
-    const decoded = jwt.verify(token, process.env.JWT_SECRET)
-
-    req.user = decoded
+    req.user = jwt.verify(token, process.env.JWT_SECRET)
     next()
-
   } catch {
     res.status(401).json({ message: "Invalid token" })
   }
@@ -108,14 +92,13 @@ app.post("/api/signup", async (req, res) => {
     const hash = await bcrypt.hash(password, 10)
     const pinHash = await bcrypt.hash(pin, 10)
 
-    /* ✅ ADMIN AUTO DETECTION */
     const isAdmin = email === ADMIN_EMAIL
 
     const user = await pool.query(
-      `INSERT INTO users(username,email,password,pin,wallet_balance,top_user,is_admin)
-       VALUES($1,$2,$3,$4,0,false,$5)
+      `INSERT INTO users(username,email,password,pin,is_admin,company)
+       VALUES($1,$2,$3,$4,$5,$6)
        RETURNING id,username,is_admin`,
-      [username, email, hash, pinHash, isAdmin]
+      [username, email, hash, pinHash, isAdmin, "mayconnect"]
     )
 
     const token = jwt.sign(user.rows[0], process.env.JWT_SECRET, { expiresIn: "7d" })
@@ -144,7 +127,6 @@ app.post("/api/login", async (req, res) => {
 
     let valid = false
 
-    // ✅ HANDLE OLD USERS
     if (user.rows[0].password.startsWith("$2")) {
       valid = await bcrypt.compare(password, user.rows[0].password)
     } else {
@@ -173,32 +155,18 @@ app.post("/api/login", async (req, res) => {
   }
 })
 
-/* ================= USER ================= */
+/* ================= GET PLANS (IMPORTANT FIX) ================= */
 
-app.get("/api/me", auth, async (req, res) => {
-  const user = await pool.query(
-    `SELECT id,username,wallet_balance,is_admin,top_user
-     FROM users WHERE id=$1`,
-    [req.user.id]
+app.get("/api/plans", auth, async (req, res) => {
+  const plans = await pool.query(
+    "SELECT * FROM plans WHERE company=$1",
+    ["mayconnect"]
   )
 
-  res.json(user.rows[0])
+  res.json(plans.rows)
 })
 
-/* ================= TRANSACTIONS ================= */
-
-app.get("/api/transactions", auth, async (req, res) => {
-  const tx = await pool.query(
-    `SELECT * FROM transactions
-     WHERE user_id=$1
-     ORDER BY created_at DESC`,
-    [req.user.id]
-  )
-
-  res.json(tx.rows)
-})
-
-/* ================= DATA PURCHASE ================= */
+/* ================= BUY DATA ================= */
 
 app.post("/api/buy-data", auth, async (req, res) => {
   const client = await pool.connect()
@@ -222,23 +190,12 @@ app.post("/api/buy-data", auth, async (req, res) => {
     )
 
     let price = Number(plan.rows[0].price)
-    const cost = Number(plan.rows[0].cost_price || price)
+    const cost = Number(plan.rows[0].cost || price)
 
     if (user.rows[0].top_user) price = cost
 
     if (user.rows[0].wallet_balance < price)
       throw new Error("Insufficient balance")
-
-    /* ================= VTU API ================= */
-    await axios.post(process.env.VTU_ENDPOINT, {
-      network: plan.rows[0].network,
-      phone,
-      plan: plan.rows[0].name
-    }, {
-      headers: {
-        Authorization: `Bearer ${process.env.VTU_TOKEN}`
-      }
-    })
 
     const reference = "DATA-" + uuidv4()
 
@@ -250,7 +207,7 @@ app.post("/api/buy-data", auth, async (req, res) => {
     await client.query(
       `INSERT INTO transactions(user_id,type,amount,phone,reference,status)
        VALUES($1,$2,$3,$4,$5,$6)`,
-      [req.user.id, "DATA", price, phone, reference, "SUCCESS"]
+      [req.user.id, "DATA", price, phone, reference, "PENDING"]
     )
 
     await client.query(
@@ -273,92 +230,22 @@ app.post("/api/buy-data", auth, async (req, res) => {
   }
 })
 
-/* ================= AIRTIME ================= */
+/* ================= WEBHOOK ================= */
 
-app.post("/api/buy-airtime", auth, async (req, res) => {
-  const client = await pool.connect()
-
+app.post("/api/webhook", async (req, res) => {
   try {
-    const { phone, amount, pin } = req.body
+    const { reference, status } = req.body
 
-    await client.query("BEGIN")
-
-    const user = await client.query(
-      "SELECT wallet_balance,pin FROM users WHERE id=$1",
-      [req.user.id]
+    await pool.query(
+      "UPDATE transactions SET status=$1 WHERE reference=$2",
+      [status.toUpperCase(), reference]
     )
 
-    const valid = await bcrypt.compare(pin, user.rows[0].pin)
-    if (!valid) throw new Error("Invalid PIN")
+    res.sendStatus(200)
 
-    if (user.rows[0].wallet_balance < amount)
-      throw new Error("Insufficient balance")
-
-    /* ================= VTU API ================= */
-    await axios.post(process.env.VTU_ENDPOINT, {
-      phone,
-      amount
-    })
-
-    const reference = "AIRTIME-" + uuidv4()
-
-    await client.query(
-      "UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
-      [amount, req.user.id]
-    )
-
-    await client.query(
-      `INSERT INTO transactions(user_id,type,amount,phone,reference,status)
-       VALUES($1,$2,$3,$4,$5,$6)`,
-      [req.user.id, "AIRTIME", amount, phone, reference, "SUCCESS"]
-    )
-
-    await client.query("COMMIT")
-
-    sendWalletUpdate(req.user.id, user.rows[0].wallet_balance - amount)
-
-    res.json({ success: true, reference })
-
-  } catch (err) {
-    await client.query("ROLLBACK")
-    res.status(400).json({ success: false, message: err.message })
-  } finally {
-    client.release()
+  } catch {
+    res.sendStatus(500)
   }
-})
-
-/* ================= ADMIN PROFITS ================= */
-
-app.get("/api/admin/profits", auth, async (req, res) => {
-  if (!req.user.is_admin)
-    return res.status(403).json({ message: "Forbidden" })
-
-  const profit = await pool.query(
-    "SELECT SUM(amount) AS total_profit FROM profits"
-  )
-
-  res.json({
-    total_profit: profit.rows[0].total_profit || 0
-  })
-})
-
-/* ================= ADMIN WITHDRAW ================= */
-
-app.post("/api/admin/withdraw", auth, async (req, res) => {
-  if (!req.user.is_admin)
-    return res.status(403).json({ message: "Forbidden" })
-
-  const { amount, bank, account } = req.body
-
-  const reference = "ADMIN-WD-" + uuidv4()
-
-  await pool.query(
-    `INSERT INTO transactions(user_id,type,amount,reference,status)
-     VALUES($1,$2,$3,$4,$5)`,
-    [req.user.id, "ADMIN_WITHDRAW", amount, reference, "PENDING"]
-  )
-
-  res.json({ success: true, reference })
 })
 
 /* ================= SERVER ================= */
