@@ -17,7 +17,7 @@ const wss = new WebSocket.Server({ server })
 /* ================= CONFIG ================= */
 
 const ADMIN_EMAILS = [
-  "abubakarmubarak3456@gmail.com",
+  "mayconnectofficial@gmail.com",
   "bashirahmadt11696@gmail.com",
   "abdullahihabibudanalhaji@gmail.com",
   "Sadeeqtukur765@gmailcom"
@@ -55,12 +55,21 @@ function sendWalletUpdate(userId, balance){
   }
 }
 
-/* ================= AUTH ================= */
+/* ================= AUTH (🔥 UPDATED) ================= */
 
 function auth(req,res,next){
   try{
     const token = req.headers.authorization.split(" ")[1]
-    req.user = jwt.verify(token,process.env.JWT_SECRET)
+    const user = jwt.verify(token,process.env.JWT_SECRET)
+
+    // 🔥 COMPANY OVERRIDE FROM FRONTEND
+    const company = req.headers["x-company"]
+
+    req.user = {
+      ...user,
+      company: company || user.company
+    }
+
     next()
   }catch{
     res.status(401).json({message:"Unauthorized"})
@@ -76,7 +85,7 @@ function detectCompany(email){
   return "mayconnect"
 }
 
-/* ================= SIGNUP + PAYSTACK ================= */
+/* ================= SIGNUP ================= */
 
 app.post("/api/signup", async (req,res)=>{
   try{
@@ -86,7 +95,9 @@ app.post("/api/signup", async (req,res)=>{
     const pinHash = await bcrypt.hash(pin,10)
 
     const isAdmin = ADMIN_EMAILS.includes(email)
-    const company = detectCompany(email)
+
+    // 🔥 USE FRONTEND COMPANY FIRST
+    const company = req.headers["x-company"] || detectCompany(email)
 
     const user = await pool.query(
       `INSERT INTO users(username,email,password,pin,is_admin,company)
@@ -196,7 +207,7 @@ app.post("/api/buy-data",auth,async(req,res)=>{
     if(!valid) return res.status(400).json({message:"Invalid PIN"})
 
     const plan = await pool.query("SELECT * FROM plans WHERE id=$1",[plan_id])
-    const price = plan.rows[0].price
+    const price = Number(plan.rows[0].price)
 
     if(user.rows[0].wallet_balance < price){
       return res.status(400).json({message:"Insufficient balance"})
@@ -204,9 +215,11 @@ app.post("/api/buy-data",auth,async(req,res)=>{
 
     const ref = "DATA-"+uuidv4()
 
+    const newBalance = user.rows[0].wallet_balance - price
+
     await pool.query(
-      "UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
-      [price,req.user.id]
+      "UPDATE users SET wallet_balance=$1 WHERE id=$2",
+      [newBalance,req.user.id]
     )
 
     await pool.query(
@@ -215,7 +228,7 @@ app.post("/api/buy-data",auth,async(req,res)=>{
       [req.user.id,price,phone,ref]
     )
 
-    sendWalletUpdate(req.user.id,user.rows[0].wallet_balance-price)
+    sendWalletUpdate(req.user.id,newBalance)
 
     res.json({success:true})
 
@@ -231,17 +244,19 @@ app.post("/api/buy-airtime",auth,async(req,res)=>{
     const {phone,amount,pin}=req.body
 
     const user = await pool.query("SELECT * FROM users WHERE id=$1",[req.user.id])
-    const valid = await bcrypt.compare(pin,user.rows[0].pin)
 
+    const valid = await bcrypt.compare(pin,user.rows[0].pin)
     if(!valid) return res.status(400).json({message:"Invalid PIN"})
+
     if(user.rows[0].wallet_balance < amount)
       return res.status(400).json({message:"Insufficient balance"})
 
     const ref="AIRTIME-"+uuidv4()
+    const newBalance = user.rows[0].wallet_balance - amount
 
     await pool.query(
-      "UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
-      [amount,req.user.id]
+      "UPDATE users SET wallet_balance=$1 WHERE id=$2",
+      [newBalance,req.user.id]
     )
 
     await pool.query(
@@ -250,7 +265,7 @@ app.post("/api/buy-airtime",auth,async(req,res)=>{
       [req.user.id,amount,phone,ref]
     )
 
-    sendWalletUpdate(req.user.id,user.rows[0].wallet_balance-amount)
+    sendWalletUpdate(req.user.id,newBalance)
 
     res.json({success:true})
 
@@ -304,10 +319,14 @@ app.post("/api/withdraw",auth,async(req,res)=>{
     return res.json({message:"Insufficient balance"})
   }
 
+  const newBalance = user.rows[0].wallet_balance - amount
+
   await pool.query(
-    "UPDATE users SET wallet_balance=wallet_balance-$1 WHERE id=$2",
-    [amount,req.user.id]
+    "UPDATE users SET wallet_balance=$1 WHERE id=$2",
+    [newBalance,req.user.id]
   )
+
+  sendWalletUpdate(req.user.id,newBalance)
 
   res.json({message:"Withdrawal requested"})
 })
@@ -316,7 +335,12 @@ app.post("/api/withdraw",auth,async(req,res)=>{
 
 app.get("/api/admin/profits",auth,async(req,res)=>{
   if(!req.user.is_admin) return res.status(403).json({})
-  const r = await pool.query("SELECT SUM(amount) FROM transactions")
+
+  const r = await pool.query(
+    "SELECT SUM(amount) FROM transactions WHERE user_id IN (SELECT id FROM users WHERE company=$1)",
+    [req.user.company]
+  )
+
   res.json({total_profit:r.rows[0].sum||0})
 })
 
@@ -325,12 +349,16 @@ app.post("/api/admin/credit",auth,async(req,res)=>{
 
   const {user_id,amount}=req.body
 
+  const user = await pool.query("SELECT * FROM users WHERE id=$1",[user_id])
+
+  const newBalance = user.rows[0].wallet_balance + amount
+
   await pool.query(
-    "UPDATE users SET wallet_balance=wallet_balance+$1 WHERE id=$2",
-    [amount,user_id]
+    "UPDATE users SET wallet_balance=$1 WHERE id=$2",
+    [newBalance,user_id]
   )
 
-  sendWalletUpdate(user_id,amount)
+  sendWalletUpdate(user_id,newBalance)
 
   res.json({success:true})
 })
@@ -351,12 +379,14 @@ app.post("/api/paystack/webhook",async(req,res)=>{
 
     const user = await pool.query("SELECT * FROM users WHERE email=$1",[email])
 
+    const newBalance = user.rows[0].wallet_balance + amount
+
     await pool.query(
-      "UPDATE users SET wallet_balance=wallet_balance+$1 WHERE id=$2",
-      [amount,user.rows[0].id]
+      "UPDATE users SET wallet_balance=$1 WHERE id=$2",
+      [newBalance,user.rows[0].id]
     )
 
-    sendWalletUpdate(user.rows[0].id,user.rows[0].wallet_balance+amount)
+    sendWalletUpdate(user.rows[0].id,newBalance)
   }
 
   res.sendStatus(200)
