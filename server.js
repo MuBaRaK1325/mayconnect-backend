@@ -17,7 +17,7 @@ const wss = new WebSocket.Server({ server })
 /* ================= CONFIG ================= */
 
 const ADMIN_EMAILS = [
-  "mayconnectofficial@gmail.com",
+  "abubakarmubarak3456@gmail.com",
   "bashirahmadt11696@gmail.com",
   "abdullahihabibudanalhaji@gmail.com",
   "Sadeeqtukur765@gmailcom"
