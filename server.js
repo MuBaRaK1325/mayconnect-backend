@@ -143,9 +143,9 @@ app.post("/api/signup", async (req,res)=>{
     })
 
   }catch(err){
-    console.log(err)
-    res.status(500).json({message:"Signup error"})
-  }
+  console.log(err) // 🔥 shows error in Render logs
+  res.status(500).json({ message: err.message })
+}
 })
 
 /* ================= LOGIN ================= */
