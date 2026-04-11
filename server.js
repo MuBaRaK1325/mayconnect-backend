@@ -33,7 +33,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 })
 
-/* ================= PAYSTACK SWITCH ================= */
+/* ================= PAYSTACK PER COMPANY ================= */
 
 function getPaystackKey(company){
   if(company==="teeversh") return process.env.PAYSTACK_TEEVERSH
@@ -68,7 +68,6 @@ function auth(req,res,next){
   try{
     const token = req.headers.authorization.split(" ")[1]
     const user = jwt.verify(token,process.env.JWT_SECRET)
-
     req.user = user
     next()
   }catch{
@@ -105,7 +104,7 @@ app.post("/api/signup", async (req,res)=>{
     )
 
     if(existing.rows.length){
-      return res.status(400).json({message:"Username or Email exists"})
+      return res.status(400).json({message:"Username or Email already exists"})
     }
 
     const hash = await bcrypt.hash(password,10)
@@ -160,7 +159,7 @@ app.post("/api/signup", async (req,res)=>{
     res.json({token,account_number,bank_name})
 
   }catch(err){
-    console.log(err)
+    console.log("SIGNUP ERROR:", err)
     res.status(500).json({message:"Signup failed"})
   }
 })
@@ -186,11 +185,37 @@ app.post("/api/login", async (req,res)=>{
   res.json({token,...user.rows[0]})
 })
 
-/* ================= BUY DATA (WITH PROFIT) ================= */
+/* ================= TRANSACTIONS ================= */
+
+app.get("/api/transactions",auth,async(req,res)=>{
+  const tx = await pool.query(
+    "SELECT * FROM transactions WHERE user_id=$1 ORDER BY id DESC",
+    [req.user.id]
+  )
+
+  const user = await pool.query(
+    "SELECT wallet_balance FROM users WHERE id=$1",
+    [req.user.id]
+  )
+
+  res.json(tx.rows.map(t=>({...t,wallet_balance:user.rows[0].wallet_balance})))
+})
+
+/* ================= PLANS ================= */
+
+app.get("/api/plans",auth,async(req,res)=>{
+  const plans = await pool.query(
+    "SELECT * FROM plans WHERE company=$1",
+    [req.user.company]
+  )
+  res.json(plans.rows)
+})
+
+/* ================= BUY DATA ================= */
 
 app.post("/api/buy-data",auth,async(req,res)=>{
   try{
-    const {plan_id,phone,pin}=req.body
+    const {plan_id,phone,pin} = req.body
 
     const user = await pool.query("SELECT * FROM users WHERE id=$1",[req.user.id])
 
@@ -204,15 +229,11 @@ app.post("/api/buy-data",auth,async(req,res)=>{
       return res.status(400).json({message:"Insufficient balance"})
     }
 
-    const profit = price * 0.1 // 🔥 10% profit
+    const profit = price * 0.1
     const ref = "DATA-"+uuidv4()
-
     const newBalance = user.rows[0].wallet_balance - price
 
-    await pool.query(
-      "UPDATE users SET wallet_balance=$1 WHERE id=$2",
-      [newBalance,req.user.id]
-    )
+    await pool.query("UPDATE users SET wallet_balance=$1 WHERE id=$2",[newBalance,req.user.id])
 
     await pool.query(
       `INSERT INTO transactions(user_id,type,amount,phone,reference,status,company,profit)
@@ -227,6 +248,41 @@ app.post("/api/buy-data",auth,async(req,res)=>{
   }catch(err){
     console.log(err)
     res.status(500).json({message:"Data error"})
+  }
+})
+
+/* ================= BUY AIRTIME ================= */
+
+app.post("/api/buy-airtime",auth,async(req,res)=>{
+  try{
+    const {phone,amount,pin} = req.body
+
+    const user = await pool.query("SELECT * FROM users WHERE id=$1",[req.user.id])
+
+    const valid = await bcrypt.compare(pin,user.rows[0].pin)
+    if(!valid) return res.status(400).json({message:"Invalid PIN"})
+
+    if(user.rows[0].wallet_balance < amount){
+      return res.status(400).json({message:"Insufficient balance"})
+    }
+
+    const ref="AIRTIME-"+uuidv4()
+    const newBalance = user.rows[0].wallet_balance - amount
+
+    await pool.query("UPDATE users SET wallet_balance=$1 WHERE id=$2",[newBalance,req.user.id])
+
+    await pool.query(
+      `INSERT INTO transactions(user_id,type,amount,phone,reference,status,company,profit)
+       VALUES($1,'AIRTIME',$2,$3,$4,'SUCCESS',$5,$6)`,
+      [req.user.id,amount,phone,ref,req.user.company,0]
+    )
+
+    sendWalletUpdate(req.user.id,newBalance)
+
+    res.json({success:true})
+
+  }catch{
+    res.status(500).json({message:"Airtime error"})
   }
 })
 
@@ -246,5 +302,5 @@ app.get("/api/admin/profits",auth,async(req,res)=>{
 /* ================= SERVER ================= */
 
 server.listen(process.env.PORT||5000,()=>{
-  console.log("🚀 SERVER RUNNING (NEXT LEVEL)")
+  console.log("🚀 NEXT LEVEL SERVER RUNNING")
 })
