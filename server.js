@@ -3,7 +3,6 @@ const express = require("express")
 const cors = require("cors")
 const bcrypt = require("bcryptjs")
 const jwt = require("jsonwebtoken")
-const axios = require("axios")
 const { Pool } = require("pg")
 const http = require("http")
 const WebSocket = require("ws")
@@ -31,15 +30,6 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 })
-
-/* ================= PAYSTACK ================= */
-
-function getPaystackKey(company){
-  if(company==="teeversh") return process.env.PAYSTACK_TEEVERSH
-  if(company==="bnhabeeb") return process.env.PAYSTACK_BNHABEEB
-  if(company==="sadeeq") return process.env.PAYSTACK_SADEEQ
-  return process.env.PAYSTACK_TEEVERSH
-}
 
 /* ================= WEBSOCKET ================= */
 
@@ -117,36 +107,6 @@ app.post("/api/signup", async (req,res)=>{
       [username,email,hash,pinHash,isAdmin,company]
     )
 
-    let account_number=null, bank_name=null, customer_code=null
-
-    try{
-      const key = getPaystackKey(company)
-
-      const customer = await axios.post(
-        "https://api.paystack.co/customer",
-        { email, first_name: username },
-        { headers:{Authorization:`Bearer ${key}`} }
-      )
-
-      const dva = await axios.post(
-        "https://api.paystack.co/dedicated_account",
-        { customer: customer.data.data.customer_code },
-        { headers:{Authorization:`Bearer ${key}`} }
-      )
-
-      account_number = dva.data.data.account_number
-      bank_name = dva.data.data.bank.name
-      customer_code = customer.data.data.customer_code
-
-    }catch(e){
-      console.log("Paystack error:", e.message)
-    }
-
-    await pool.query(
-      "UPDATE users SET account_number=$1,bank_name=$2,customer_code=$3 WHERE id=$4",
-      [account_number,bank_name,customer_code,user.rows[0].id]
-    )
-
     const token = jwt.sign({
       id:user.rows[0].id,
       username:user.rows[0].username,
@@ -154,15 +114,9 @@ app.post("/api/signup", async (req,res)=>{
       company:user.rows[0].company
     },process.env.JWT_SECRET)
 
-    res.json({
-      token,
-      user:user.rows[0],
-      account_number,
-      bank_name
-    })
+    res.json({token,user:user.rows[0]})
 
-  }catch(err){
-    console.log(err)
+  }catch{
     res.status(500).json({message:"Signup failed"})
   }
 })
@@ -170,48 +124,104 @@ app.post("/api/signup", async (req,res)=>{
 /* ================= LOGIN ================= */
 
 app.post("/api/login", async (req,res)=>{
-  try{
-    const {username,password}=req.body
+  const {username,password}=req.body
 
-    const user = await pool.query(
-      "SELECT * FROM users WHERE username=$1",
-      [username]
-    )
+  const user = await pool.query(
+    "SELECT * FROM users WHERE username=$1",
+    [username]
+  )
 
-    if(!user.rows.length){
-      return res.status(400).json({message:"User not found"})
-    }
-
-    const valid = await bcrypt.compare(password,user.rows[0].password)
-    if(!valid){
-      return res.status(400).json({message:"Wrong password"})
-    }
-
-    const token = jwt.sign({
-      id:user.rows[0].id,
-      username:user.rows[0].username,
-      is_admin:user.rows[0].is_admin,
-      company:user.rows[0].company
-    },process.env.JWT_SECRET)
-
-    res.json({
-      token,
-      user:user.rows[0]
-    })
-
-  }catch{
-    res.status(500).json({message:"Login failed"})
+  if(!user.rows.length){
+    return res.status(400).json({message:"User not found"})
   }
+
+  const valid = await bcrypt.compare(password,user.rows[0].password)
+  if(!valid){
+    return res.status(400).json({message:"Wrong password"})
+  }
+
+  const token = jwt.sign({
+    id:user.rows[0].id,
+    username:user.rows[0].username,
+    is_admin:user.rows[0].is_admin,
+    company:user.rows[0].company
+  },process.env.JWT_SECRET)
+
+  res.json({token,user:user.rows[0]})
 })
 
-/* ================= GET USER ================= */
+/* ================= FORGOT PASSWORD ================= */
 
-app.get("/api/me",auth,async(req,res)=>{
+app.post("/api/forgot-password", async (req,res)=>{
+  const {email,newPassword} = req.body
+
+  const user = await pool.query(
+    "SELECT * FROM users WHERE email=$1",
+    [email]
+  )
+
+  if(!user.rows.length){
+    return res.status(400).json({message:"Email not found"})
+  }
+
+  const hash = await bcrypt.hash(newPassword,10)
+
+  await pool.query(
+    "UPDATE users SET password=$1 WHERE email=$2",
+    [hash,email]
+  )
+
+  res.json({message:"Password reset successful"})
+})
+
+/* ================= CHANGE PASSWORD ================= */
+
+app.post("/api/change-password",auth,async(req,res)=>{
+  const {oldPass,newPass} = req.body
+
   const user = await pool.query(
     "SELECT * FROM users WHERE id=$1",
     [req.user.id]
   )
-  res.json(user.rows[0])
+
+  const valid = await bcrypt.compare(oldPass,user.rows[0].password)
+  if(!valid){
+    return res.status(400).json({message:"Wrong old password"})
+  }
+
+  const hash = await bcrypt.hash(newPass,10)
+
+  await pool.query(
+    "UPDATE users SET password=$1 WHERE id=$2",
+    [hash,req.user.id]
+  )
+
+  res.json({message:"Password updated"})
+})
+
+/* ================= CHANGE PIN ================= */
+
+app.post("/api/change-pin",auth,async(req,res)=>{
+  const {oldPin,newPin} = req.body
+
+  const user = await pool.query(
+    "SELECT * FROM users WHERE id=$1",
+    [req.user.id]
+  )
+
+  const valid = await bcrypt.compare(oldPin,user.rows[0].pin)
+  if(!valid){
+    return res.status(400).json({message:"Wrong old PIN"})
+  }
+
+  const hash = await bcrypt.hash(newPin,10)
+
+  await pool.query(
+    "UPDATE users SET pin=$1 WHERE id=$2",
+    [hash,req.user.id]
+  )
+
+  res.json({message:"PIN updated"})
 })
 
 /* ================= BIOMETRIC ================= */
@@ -224,38 +234,27 @@ app.post("/api/biometric/enable",auth,async(req,res)=>{
   res.json({success:true})
 })
 
-app.get("/api/biometric/status",auth,async(req,res)=>{
-  const u = await pool.query(
-    "SELECT biometric_enabled FROM users WHERE id=$1",
-    [req.user.id]
-  )
-  res.json({enabled:u.rows[0].biometric_enabled || false})
-})
-
-/* ================= TRANSACTIONS ================= */
-
-app.get("/api/transactions",auth,async(req,res)=>{
-  const tx = await pool.query(
-    "SELECT * FROM transactions WHERE user_id=$1 ORDER BY id DESC",
-    [req.user.id]
-  )
-
-  const user = await pool.query(
-    "SELECT wallet_balance FROM users WHERE id=$1",
-    [req.user.id]
-  )
-
-  res.json(tx.rows.map(t=>({...t,wallet_balance:user.rows[0].wallet_balance})))
-})
-
 /* ================= PLANS ================= */
 
 app.get("/api/plans",auth,async(req,res)=>{
+
+  const user = await pool.query(
+    "SELECT is_top_user FROM users WHERE id=$1",
+    [req.user.id]
+  )
+
   const plans = await pool.query(
     "SELECT * FROM plans WHERE company=$1",
     [req.user.company]
   )
-  res.json(plans.rows)
+
+  let filtered = plans.rows
+
+  if(!user.rows[0]?.is_top_user){
+    filtered = filtered.filter(p=>!p.is_top)
+  }
+
+  res.json(filtered)
 })
 
 /* ================= BUY DATA ================= */
@@ -266,17 +265,19 @@ app.post("/api/buy-data",auth,async(req,res)=>{
 
     const user = await pool.query("SELECT * FROM users WHERE id=$1",[req.user.id])
 
-    const valid = await bcrypt.compare(pin,user.rows[0].pin)
-    if(!valid) return res.status(400).json({message:"Invalid PIN"})
+    if(pin !== "biometric"){
+      const valid = await bcrypt.compare(pin,user.rows[0].pin)
+      if(!valid) return res.status(400).json({message:"Invalid PIN"})
+    }else{
+      if(!user.rows[0].biometric_enabled){
+        return res.status(400).json({message:"Enable biometric"})
+      }
+    }
 
     const plan = await pool.query(
       "SELECT * FROM plans WHERE id=$1 AND company=$2",
       [plan_id,req.user.company]
     )
-
-    if(!plan.rows.length){
-      return res.status(400).json({message:"Invalid plan"})
-    }
 
     const price = Number(plan.rows[0].price)
 
@@ -284,16 +285,17 @@ app.post("/api/buy-data",auth,async(req,res)=>{
       return res.status(400).json({message:"Insufficient balance"})
     }
 
-    const profit = price * 0.1
-    const ref = "DATA-"+uuidv4()
     const newBalance = user.rows[0].wallet_balance - price
 
-    await pool.query("UPDATE users SET wallet_balance=$1 WHERE id=$2",[newBalance,req.user.id])
+    await pool.query(
+      "UPDATE users SET wallet_balance=$1 WHERE id=$2",
+      [newBalance,req.user.id]
+    )
 
     await pool.query(
       `INSERT INTO transactions(user_id,type,amount,phone,reference,status,company,profit)
        VALUES($1,'DATA',$2,$3,$4,'SUCCESS',$5,$6)`,
-      [req.user.id,price,phone,ref,req.user.company,profit]
+      [req.user.id,price,phone,"DATA-"+uuidv4(),req.user.company,price*0.1]
     )
 
     sendWalletUpdate(req.user.id,newBalance)
@@ -305,13 +307,13 @@ app.post("/api/buy-data",auth,async(req,res)=>{
   }
 })
 
-/* ================= BUY AIRTIME (ONLY MAYCONNECT) ================= */
+/* ================= BUY AIRTIME ================= */
 
 app.post("/api/buy-airtime",auth,async(req,res)=>{
   try{
 
     if(req.user.company !== "mayconnect"){
-      return res.status(403).json({message:"Airtime coming soon"})
+      return res.status(403).json({message:"Coming soon"})
     }
 
     const {phone,amount,pin} = req.body
@@ -322,15 +324,12 @@ app.post("/api/buy-airtime",auth,async(req,res)=>{
     )
 
     const valid = await bcrypt.compare(pin,user.rows[0].pin)
-    if(!valid){
-      return res.status(400).json({message:"Invalid PIN"})
-    }
+    if(!valid) return res.status(400).json({message:"Invalid PIN"})
 
     if(user.rows[0].wallet_balance < amount){
       return res.status(400).json({message:"Insufficient balance"})
     }
 
-    const ref="AIRTIME-"+uuidv4()
     const newBalance = user.rows[0].wallet_balance - amount
 
     await pool.query(
@@ -341,7 +340,7 @@ app.post("/api/buy-airtime",auth,async(req,res)=>{
     await pool.query(
       `INSERT INTO transactions(user_id,type,amount,phone,reference,status,company,profit)
        VALUES($1,'AIRTIME',$2,$3,$4,'SUCCESS',$5,$6)`,
-      [req.user.id,amount,phone,ref,req.user.company,0]
+      [req.user.id,amount,phone,"AIRTIME-"+uuidv4(),req.user.company,0]
     )
 
     sendWalletUpdate(req.user.id,newBalance)
@@ -353,8 +352,23 @@ app.post("/api/buy-airtime",auth,async(req,res)=>{
   }
 })
 
+/* ================= ADMIN ================= */
+
+app.get("/api/admin/profits",auth,async(req,res)=>{
+  if(!req.user.is_admin){
+    return res.status(403).json({message:"Forbidden"})
+  }
+
+  const r = await pool.query(
+    "SELECT SUM(profit) FROM transactions WHERE company=$1",
+    [req.user.company]
+  )
+
+  res.json({total_profit:r.rows[0].sum || 0})
+})
+
 /* ================= SERVER ================= */
 
 server.listen(process.env.PORT||5000,()=>{
-  console.log("🚀 SERVER READY (FULL + AIRTIME CONTROL)")
+  console.log("🚀 PRODUCTION SERVER READY ✅")
 })
