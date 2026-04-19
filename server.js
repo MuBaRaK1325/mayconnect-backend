@@ -71,10 +71,13 @@ function auth(req, res, next) {
 }
 
 /* ================= SIGNUP ================= */
-
 app.post("/api/signup", async (req, res) => {
   try {
     const { username, email, password, pin, company } = req.body
+
+    if (!username || !email || !password || !pin) {
+      return res.status(400).json({ message: "All fields required" })
+    }
 
     const hash = await bcrypt.hash(password, 10)
     const pinHash = await bcrypt.hash(pin, 10)
@@ -87,27 +90,46 @@ app.post("/api/signup", async (req, res) => {
       [username, email, hash, pinHash, isAdmin, company || "mayconnect"]
     )
 
-    /* PAYSTACK CUSTOMER */
-    const customer = await axios.post(
-      "https://api.paystack.co/customer",
-      { email, first_name: username },
-      { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
-    )
+    let customer_code = null
+    let account_number = null
+    let account_name = null
+    let bank_name = null
 
-    const customer_code = customer.data.data.customer_code
+    /* ================= PAYSTACK SAFE ================= */
+    try {
+      if (!PAYSTACK_SECRET) throw new Error("No Paystack key")
 
-    /* DEDICATED ACCOUNT */
-    const account = await axios.post(
-      "https://api.paystack.co/dedicated_account",
-      { customer: customer_code },
-      { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
-    )
+      const customer = await axios.post(
+        "https://api.paystack.co/customer",
+        { email, first_name: username },
+        { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
+      )
 
-    const acc = account.data.data
+      customer_code = customer.data.data.customer_code
 
+      const account = await axios.post(
+        "https://api.paystack.co/dedicated_account",
+        { customer: customer_code },
+        { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
+      )
+
+      const acc = account.data.data
+
+      account_number = acc.account_number
+      account_name = acc.account_name
+      bank_name = acc.bank.name
+
+    } catch (e) {
+      console.log("PAYSTACK ERROR:", e.response?.data || e.message)
+      // DO NOT FAIL SIGNUP
+    }
+
+    /* ================= UPDATE USER ================= */
     await pool.query(
-      `UPDATE users SET customer_code=$1,account_number=$2,account_name=$3,bank_name=$4 WHERE id=$5`,
-      [customer_code, acc.account_number, acc.account_name, acc.bank.name, user.rows[0].id]
+      `UPDATE users 
+       SET customer_code=$1, account_number=$2, account_name=$3, bank_name=$4 
+       WHERE id=$5`,
+      [customer_code, account_number, account_name, bank_name, user.rows[0].id]
     )
 
     const token = jwt.sign({
@@ -120,7 +142,7 @@ app.post("/api/signup", async (req, res) => {
     res.json({ token })
 
   } catch (e) {
-    console.log(e.response?.data || e.message)
+    console.log("SIGNUP ERROR:", e.message)
     res.status(500).json({ message: "Signup failed" })
   }
 })
