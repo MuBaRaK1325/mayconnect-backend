@@ -16,12 +16,26 @@ const wss = new WebSocket.Server({ server });
 /* ================= CONFIG ================= */
 const ADMIN_EMAILS = [
   "abubakarmubarak3456@gmail.com",
+  "mayconnectofficial@gmail.com",
   "bashirahmadt11696@gmail.com",
   "abdullahihabibudanalhaji@gmail.com",
-  "Sadeeqtukur765@gmailcom"
+  "Sadeeqtukur765@gmail.com"
 ];
 
-const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET;
+const PAYSTACK_KEYS = {
+  mayconnect: {
+    secret: process.env.PAYSTACK_SECRET_LIVE,
+    public: process.env.PAYSTACK_PUBLIC_LIVE
+  },
+  teeversh: {
+    secret: process.env.PAYSTACK_SECRET_TEEVERSH,
+    public: process.env.PAYSTACK_PUBLIC_TEEVERSH
+  },
+  bnhabeeb: {
+    secret: process.env.PAYSTACK_SECRET_BNHABEEB,
+    public: process.env.PAYSTACK_PUBLIC_BNHABEEB
+  }
+};
 
 /* ================= MIDDLEWARE ================= */
 app.use(cors({ origin: "*" }));
@@ -35,7 +49,6 @@ const pool = new Pool({
 
 /* ================= WS ================= */
 const clients = new Map();
-
 wss.on("connection", (ws, req) => {
   try {
     const token = new URL(req.url, "http://x").searchParams.get("token");
@@ -46,7 +59,6 @@ wss.on("connection", (ws, req) => {
     ws.close();
   }
 });
-
 function sendWalletUpdate(userId, balance) {
   const ws = clients.get(userId);
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "wallet_update", balance }));
@@ -82,20 +94,20 @@ app.post("/api/signup", async (req, res) => {
 
     let customer_code = null, account_number = null, account_name = null, bank_name = null;
 
-    /* PAYSTACK SAFE */
     try {
-      if (PAYSTACK_SECRET) {
+      const paystack = PAYSTACK_KEYS[company] || PAYSTACK_KEYS.mayconnect;
+      if (paystack.secret) {
         const customer = await axios.post(
           "https://api.paystack.co/customer",
           { email, first_name: username },
-          { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
+          { headers: { Authorization: `Bearer ${paystack.secret}` } }
         );
         customer_code = customer.data.data.customer_code;
 
         const account = await axios.post(
           "https://api.paystack.co/dedicated_account",
           { customer: customer_code },
-          { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
+          { headers: { Authorization: `Bearer ${paystack.secret}` } }
         );
 
         const acc = account.data.data;
@@ -116,7 +128,6 @@ app.post("/api/signup", async (req, res) => {
       { id: user.rows[0].id, username: user.rows[0].username, is_admin: user.rows[0].is_admin, company: user.rows[0].company },
       process.env.JWT_SECRET
     );
-
     res.json({ token });
   } catch (e) {
     console.log("SIGNUP ERROR:", e.message);
@@ -137,7 +148,6 @@ app.post("/api/login", async (req, res) => {
     { id: user.rows[0].id, username: user.rows[0].username, is_admin: user.rows[0].is_admin, company: user.rows[0].company },
     process.env.JWT_SECRET
   );
-
   res.json({ token });
 });
 
@@ -157,7 +167,6 @@ app.get("/api/transactions", auth, async (req, res) => {
 app.get("/api/plans", auth, async (req, res) => {
   const user = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
   const plans = await pool.query("SELECT * FROM plans WHERE company=$1 OR company IS NULL", [user.rows[0].company]);
-
   const result = plans.rows.map(p => ({
     ...p,
     price: user.rows[0].is_top_user ? (p.top_price || p.price) : p.price
@@ -169,7 +178,6 @@ app.get("/api/plans", auth, async (req, res) => {
 app.post("/api/buy-data", auth, async (req, res) => {
   const { plan_id, phone, pin } = req.body;
   const user = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
-
   if (!await bcrypt.compare(pin, user.rows[0].pin)) return res.status(400).json({ message: "Invalid PIN" });
 
   const plan = await pool.query("SELECT * FROM plans WHERE id=$1", [plan_id]);
@@ -189,11 +197,10 @@ app.post("/api/buy-data", auth, async (req, res) => {
   res.json({ success: true });
 });
 
-/* ================= BUY AIRTIME (MAYCONNECT ONLY) ================= */
+/* ================= BUY AIRTIME ================= */
 app.post("/api/buy-airtime", auth, async (req, res) => {
   const { phone, amount, pin } = req.body;
   const user = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
-
   if (user.rows[0].company !== "mayconnect") return res.status(403).json({ message: "Airtime disabled for your company" });
   if (!await bcrypt.compare(pin, user.rows[0].pin)) return res.status(400).json({ message: "Invalid PIN" });
   if (user.rows[0].wallet_balance < amount) return res.status(400).json({ message: "Insufficient balance" });
@@ -214,12 +221,15 @@ app.post("/api/fund/init", auth, async (req, res) => {
   const { amount } = req.body;
   const user = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
 
+  const paystack = PAYSTACK_KEYS[user.rows[0].company] || PAYSTACK_KEYS.mayconnect;
   const reference = "FUND-" + uuidv4();
+
   const response = await axios.post(
     "https://api.paystack.co/transaction/initialize",
     { email: user.rows[0].email, amount: Number(amount) * 100, reference },
-    { headers: { Authorization: `Bearer ${PAYSTACK_SECRET}` } }
+    { headers: { Authorization: `Bearer ${paystack.secret}` } }
   );
+
   res.json({ url: response.data.data.authorization_url });
 });
 
