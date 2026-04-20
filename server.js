@@ -9,6 +9,7 @@ const WebSocket = require("ws");
 const { v4: uuidv4 } = require("uuid");
 const axios = require("axios");
 const crypto = require("crypto");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
 const server = http.createServer(app);
@@ -41,6 +42,23 @@ const PAYSTACK_KEYS = {
     public: process.env.PAYSTACK_PUBLIC_SADEEQ
   }
 };
+
+/* ================= RATE LIMITERS ================= */
+const buyDataLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 5, // 5 requests per minute per IP
+  message: { message: "Too many purchase attempts. Try again in 1 minute." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const fundInitLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 3, // 3 funding attempts per minute
+  message: { message: "Too many funding requests. Try again in 1 minute." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 /* ================= MIDDLEWARE ================= */
 app.use(cors({ origin: "*" }));
@@ -208,14 +226,14 @@ app.get("/api/plans", auth, async (req, res) => {
   );
 
   const result = plans.rows.map(p => ({
-   ...p,
+  ...p,
     price: is_top_user? (p.top_price || p.price) : p.price
   }));
   res.json(result);
 });
 
-/* ================= BUY DATA - WITH PROFIT SPLIT ================= */
-app.post("/api/buy-data", auth, async (req, res) => {
+/* ================= BUY DATA - WITH PROFIT SPLIT + RATE LIMIT ================= */
+app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -236,7 +254,6 @@ app.post("/api/buy-data", auth, async (req, res) => {
     }
     const plan = planRes.rows[0];
 
-    // Check restricted plans
     if (plan.restricted && plan.company!== user.company) {
       await client.query("ROLLBACK");
       return res.status(403).json({ message: "Plan restricted to company users" });
@@ -260,7 +277,6 @@ app.post("/api/buy-data", auth, async (req, res) => {
       [user.id, plan.id, price, cost, phone, plan.network, ref]
     );
 
-    // Credit profit to company admin_wallet
     const adminId = await getCompanyAdmin(user.company);
     const profit = Number(price) - Number(cost);
     if (adminId && profit > 0) {
@@ -311,7 +327,7 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
     await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user.id]);
 
     const ref = "AIRTIME-" + uuidv4();
-    const cost = Number(amount) * 0.98; // assume 2% profit
+    const cost = Number(amount) * 0.98;
 
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status)
@@ -342,8 +358,8 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
   }
 });
 
-/* ================= FUND INIT ================= */
-app.post("/api/fund/init", auth, async (req, res) => {
+/* ================= FUND INIT + RATE LIMIT ================= */
+app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
   const { amount } = req.body;
   if (!amount || amount < 100) return res.status(400).json({ message: "Minimum funding is ₦100" });
 
@@ -369,18 +385,12 @@ app.post("/api/fund/init", auth, async (req, res) => {
   }
 });
 
-/* ================= PAYSTACK WEBHOOK - MULTI COMPANY ================= */
+/* ================= PAYSTACK WEBHOOK ================= */
 app.post("/api/paystack/webhook", async (req, res) => {
   try {
-    const hash = crypto.createHmac('sha512', getPaystackKey('mayconnect', 'secret'))
-     .update(req.body)
-     .digest('hex');
-
-    // We can't know which company until we check metadata, so we verify against all
     const event = JSON.parse(req.body);
-
     if (event.event === "charge.success") {
-      const { user_id, company } = event.data.metadata || {};
+      const { user_id } = event.data.metadata || {};
       const amount = event.data.amount / 100;
       const reference = event.data.reference;
 
@@ -487,7 +497,17 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
 
 /* ================= ADMIN: TOP USERS MANAGEMENT ================= */
 app.get("/admin/top-users", auth, adminOnly, async (req, res) => {
-  const users = await pool.query("SELECT * FROM top_users WHERE id IN (SELECT id FROM users WHERE company=$1)", [req.user.company]);
+  const users = await pool.query(
+    `SELECT u.id,u.username,u.email,u.company,u.is_top_user,
+            COALESCE(SUM(t.amount),0) as total_spent,
+            COALESCE(SUM(t.profit),0) as total_profit_generated
+     FROM users u
+     LEFT JOIN transactions t ON t.user_id = u.id AND t.status='SUCCESS'
+     WHERE u.company=$1
+     GROUP BY u.id
+     ORDER BY total_spent DESC`,
+    [req.user.company]
+  );
   res.json(users.rows);
 });
 
@@ -511,7 +531,92 @@ app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
   res.json({ message: "Top user removed" });
 });
 
-/* ================= ADMIN: WITHDRAW REQUEST ================= */
+/* ================= ADMIN: PLANS MANAGER ================= */
+app.get("/admin/plans", auth, adminOnly, async (req, res) => {
+  const plans = await pool.query(
+    "SELECT * FROM plans WHERE company=$1 OR company IS NULL ORDER BY network, price",
+    [req.user.company]
+  );
+  res.json(plans.rows);
+});
+
+app.post("/admin/plans", auth, adminOnly, async (req, res) => {
+  const { plan_id, network, name, price, top_price, cost, validity, restricted } = req.body;
+  if (!plan_id ||!network ||!name ||!price ||!cost) {
+    return res.status(400).json({ message: "Missing required fields" });
+  }
+  try {
+    const result = await pool.query(
+      `INSERT INTO plans(plan_id,company,network,name,price,top_price,cost,validity,restricted,is_active)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE) RETURNING *`,
+      [plan_id, req.user.company, network, name, price, top_price || price, cost, validity, restricted || false]
+    );
+    res.json({ message: "Plan added", plan: result.rows[0] });
+  } catch (e) {
+    if (e.code === '23505') return res.status(400).json({ message: "plan_id already exists" });
+    res.status(500).json({ message: "Failed to add plan" });
+  }
+});
+
+app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
+  const { id } = req.params;
+  const { name, price, top_price, cost, validity, restricted, is_active } = req.body;
+  const result = await pool.query(
+    `UPDATE plans SET
+      name=COALESCE($1,name),
+      price=COALESCE($2,price),
+      top_price=COALESCE($3,top_price),
+      cost=COALESCE($4,cost),
+      validity=COALESCE($5,validity),
+      restricted=COALESCE($6,restricted),
+      is_active=COALESCE($7,is_active)
+     WHERE id=$8 AND company=$9 RETURNING *`,
+    [name, price, top_price, cost, validity, restricted, is_active, id, req.user.company]
+  );
+  if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
+  res.json({ message: "Plan updated", plan: result.rows[0] });
+});
+
+app.delete("/admin/plans/:id", auth, adminOnly, async (req, res) => {
+  const { id } = req.params;
+  const result = await pool.query(
+    "UPDATE plans SET is_active=FALSE WHERE id=$1 AND company=$2 RETURNING *",
+    [id, req.user.company]
+  );
+  if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
+  res.json({ message: "Plan disabled" });
+});
+
+/* ================= ADMIN: USERS MANAGER ================= */
+app.get("/admin/users", auth, adminOnly, async (req, res) => {
+  const { search } = req.query;
+  let query = `SELECT id,username,email,company,wallet_balance,admin_wallet,is_admin,is_top_user,created_at FROM users WHERE company=$1`;
+  const params = [req.user.company];
+  if (search) {
+    params.push(`%${search}%`);
+    query += ` AND (username ILIKE $2 OR email ILIKE $2)`;
+  }
+  query += ` ORDER BY created_at DESC LIMIT 100`;
+  const users = await pool.query(query, params);
+  res.json(users.rows);
+});
+
+app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
+  const { id } = req.params;
+  const { wallet_balance, is_top_user, is_admin } = req.body;
+  const result = await pool.query(
+    `UPDATE users SET
+      wallet_balance=COALESCE($1,wallet_balance),
+      is_top_user=COALESCE($2,is_top_user),
+      is_admin=COALESCE($3,is_admin)
+     WHERE id=$4 AND company=$5 RETURNING id,username,email,is_top_user,is_admin,wallet_balance`,
+    [wallet_balance, is_top_user, is_admin, id, req.user.company]
+  );
+  if (!result.rows.length) return res.status(404).json({ message: "User not found" });
+  res.json({ message: "User updated", user: result.rows[0] });
+});
+
+/* ================= ADMIN: WITHDRAWALS ================= */
 app.post("/admin/withdraw-request", auth, adminOnly, async (req, res) => {
   const { amount, bank_name, account_number, account_name } = req.body;
   const user = await pool.query("SELECT admin_wallet FROM users WHERE id=$1", [req.user.id]);
@@ -561,19 +666,6 @@ app.post("/admin/withdraw/approve", auth, adminOnly, async (req, res) => {
   }
 });
 
-/* ================= ADMIN: OLD WITHDRAW - DEPRECATE ================= */
-app.post("/api/admin/withdraw", auth, adminOnly, async (req, res) => {
-  return res.status(410).json({ message: "Use /admin/withdraw-request instead" });
-});
-
-/* ================= ADMIN: OLD TOP USER ROUTES - DEPRECATE ================= */
-app.post("/api/admin/add-top-user", auth, adminOnly, async (req, res) => {
-  return res.status(410).json({ message: "Use /admin/top-users/add instead" });
-});
-app.post("/api/admin/remove-top-user", auth, adminOnly, async (req, res) => {
-  return res.status(410).json({ message: "Use /admin/top-users/remove instead" });
-});
-
 /* ================= TRANSACTION REVERSAL ================= */
 app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
   const client = await pool.connect();
@@ -591,7 +683,6 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
     await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user.rows[0].id]);
     await client.query("UPDATE transactions SET status='REVERSED' WHERE reference=$1", [reference]);
 
-    // Reverse profit from admin_wallet
     if (tx.rows[0].profit > 0) {
       const adminId = await getCompanyAdmin(user.rows[0].company);
       if (adminId) {
