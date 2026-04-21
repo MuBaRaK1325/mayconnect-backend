@@ -24,37 +24,20 @@ const ADMIN_EMAILS = [
   "Sadeeqtukur765@gmail.com"
 ];
 
-const PAYSTACK_KEYS = {
-  mayconnect: {
-    secret: process.env.PAYSTACK_SECRET_LIVE,
-    public: process.env.PAYSTACK_PUBLIC_LIVE
-  },
-  teeversh: {
-    secret: process.env.PAYSTACK_SECRET_TEEVERSH,
-    public: process.env.PAYSTACK_PUBLIC_TEEVERSH
-  },
-  bnhabeeb: {
-    secret: process.env.PAYSTACK_SECRET_BNHABEEB,
-    public: process.env.PAYSTACK_PUBLIC_BNHABEEB
-  },
-  sadeeq: {
-    secret: process.env.PAYSTACK_SECRET_SADEEQ,
-    public: process.env.PAYSTACK_PUBLIC_SADEEQ
-  }
-};
+const PAYSTACK_KEYS = JSON.parse(process.env.PAYSTACK_KEYS || "{}");
 
 /* ================= RATE LIMITERS ================= */
 const buyDataLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 5, // 5 requests per minute per IP
+  windowMs: 60 * 1000,
+  max: 5,
   message: { message: "Too many purchase attempts. Try again in 1 minute." },
   standardHeaders: true,
   legacyHeaders: false,
 });
 
 const fundInitLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 3, // 3 funding attempts per minute
+  windowMs: 60 * 1000,
+  max: 3,
   message: { message: "Too many funding requests. Try again in 1 minute." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -62,7 +45,6 @@ const fundInitLimiter = rateLimit({
 
 /* ================= MIDDLEWARE ================= */
 app.use(cors({ origin: "*" }));
-// Use raw body for webhook signature verification
 app.use((req, res, next) => {
   if (req.originalUrl === "/api/paystack/webhook") {
     express.raw({ type: "application/json" })(req, res, next);
@@ -88,8 +70,39 @@ const getCompanyAdmin = async (company) => {
 
 const getPaystackKey = (company, type = "secret") => {
   const keys = PAYSTACK_KEYS[company] || PAYSTACK_KEYS.mayconnect;
-  return keys[type];
+  return keys?.[type] || null;
 };
+
+const getUser = async (id) => {
+  const res = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
+  return res.rows[0];
+};
+
+async function createDedicatedAccount(user) {
+  const paystackSecret = getPaystackKey(user.company, "secret");
+  if (!paystackSecret) throw new Error("Paystack key not set for " + user.company);
+
+  const customer = await axios.post(
+    "https://api.paystack.co/customer",
+    { email: user.email, first_name: user.username, last_name: user.company },
+    { headers: { Authorization: `Bearer ${paystackSecret}` } }
+  );
+  const customer_code = customer.data.data.customer_code;
+
+  const account = await axios.post(
+    "https://api.paystack.co/dedicated_account",
+    { customer: customer_code, preferred_bank: "wema-bank" },
+    { headers: { Authorization: `Bearer ${paystackSecret}` } }
+  );
+
+  const acc = account.data.data;
+  await pool.query(
+    `UPDATE users SET customer_code=$1, account_number=$2, account_name=$3, bank_name=$4 WHERE id=$5`,
+    [customer_code, acc.account_number, acc.account_name, acc.bank.name, user.id]
+  );
+
+  return acc;
+}
 
 /* ================= WS ================= */
 const clients = new Map();
@@ -142,45 +155,21 @@ app.post("/api/signup", async (req, res) => {
       [username, email, hash, pinHash, isAdmin, userCompany]
     );
 
-    let customer_code = null, account_number = null, account_name = null, bank_name = null;
-
     try {
-      const paystackSecret = getPaystackKey(userCompany, "secret");
-      if (paystackSecret) {
-        const customer = await axios.post(
-          "https://api.paystack.co/customer",
-          { email, first_name: username },
-          { headers: { Authorization: `Bearer ${paystackSecret}` } }
-        );
-        customer_code = customer.data.data.customer_code;
-
-        const account = await axios.post(
-          "https://api.paystack.co/dedicated_account",
-          { customer: customer_code, preferred_bank: "wema-bank" },
-          { headers: { Authorization: `Bearer ${paystackSecret}` } }
-        );
-
-        const acc = account.data.data;
-        account_number = acc.account_number;
-        account_name = acc.account_name;
-        bank_name = acc.bank.name;
-      }
+      await createDedicatedAccount(user.rows[0]);
     } catch (e) {
-      console.log("PAYSTACK ERROR:", e.response?.data || e.message);
+      console.log("PAYSTACK ERROR ON SIGNUP:", e.response?.data || e.message);
     }
 
-    await pool.query(
-      `UPDATE users SET customer_code=$1, account_number=$2, account_name=$3, bank_name=$4 WHERE id=$5`,
-      [customer_code, account_number, account_name, bank_name, user.rows[0].id]
-    );
-
+    const updatedUser = await getUser(user.rows[0].id);
     const token = jwt.sign(
-      { id: user.rows[0].id, username: user.rows[0].username, is_admin: user.rows[0].is_admin, company: user.rows[0].company },
+      { id: updatedUser.id, username: updatedUser.username, is_admin: updatedUser.is_admin, company: updatedUser.company },
       process.env.JWT_SECRET
     );
     res.json({ token });
   } catch (e) {
     console.log("SIGNUP ERROR:", e.message);
+    if (e.code === "23505") return res.status(400).json({ message: "Username or email already exists" });
     res.status(500).json({ message: "Signup failed" });
   }
 });
@@ -201,10 +190,42 @@ app.post("/api/login", async (req, res) => {
   res.json({ token });
 });
 
-/* ================= USER INFO ================= */
+/* ================= USER INFO + AUTO ACCOUNT CREATE ================= */
 app.get("/api/me", auth, async (req, res) => {
-  const user = await pool.query("SELECT id,username,email,wallet_balance,admin_wallet,is_admin,is_top_user,company,account_number,account_name,bank_name,created_at FROM users WHERE id=$1", [req.user.id]);
-  res.json(user.rows[0]);
+  try {
+    let user = await getUser(req.user.id);
+
+    if (!user.account_number && getPaystackKey(user.company, "secret")) {
+      try {
+        await createDedicatedAccount(user);
+        user = await getUser(req.user.id);
+      } catch (e) {
+        console.log("Account creation failed on /me:", e.message);
+      }
+    }
+
+    delete user.password;
+    delete user.pin;
+    res.json(user);
+  } catch (e) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* ================= GENERATE ACCOUNT ENDPOINT ================= */
+app.post("/api/generate-account", auth, async (req, res) => {
+  try {
+    const user = await getUser(req.user.id);
+    if (user.account_number) {
+      return res.json({ message: "Account already exists", account: user });
+    }
+
+    const acc = await createDedicatedAccount(user);
+    res.json({ message: "Account created", account: acc });
+  } catch (e) {
+    console.log("GENERATE ACCOUNT ERROR:", e.response?.data || e.message);
+    res.status(500).json({ message: e.message || "Failed to create account" });
+  }
 });
 
 /* ================= TRANSACTIONS ================= */
@@ -213,7 +234,7 @@ app.get("/api/transactions", auth, async (req, res) => {
   res.json(tx.rows);
 });
 
-/* ================= PLANS - WITH RESTRICTED LOGIC ================= */
+/* ================= PLANS ================= */
 app.get("/api/plans", auth, async (req, res) => {
   const user = await pool.query("SELECT is_top_user, company FROM users WHERE id=$1", [req.user.id]);
   const { is_top_user, company } = user.rows[0];
@@ -226,13 +247,13 @@ app.get("/api/plans", auth, async (req, res) => {
   );
 
   const result = plans.rows.map(p => ({
-  ...p,
+   ...p,
     price: is_top_user? (p.top_price || p.price) : p.price
   }));
   res.json(result);
 });
 
-/* ================= BUY DATA - WITH PROFIT SPLIT + RATE LIMIT ================= */
+/* ================= BUY DATA ================= */
 app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -358,23 +379,23 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
   }
 });
 
-/* ================= FUND INIT + RATE LIMIT ================= */
+/* ================= FUND INIT ================= */
 app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
   const { amount } = req.body;
   if (!amount || amount < 100) return res.status(400).json({ message: "Minimum funding is ₦100" });
 
-  const user = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
-  const paystackSecret = getPaystackKey(user.rows[0].company, "secret");
+  const user = await getUser(req.user.id);
+  const paystackSecret = getPaystackKey(user.company, "secret");
   const reference = "FUND-" + uuidv4();
 
   try {
     const response = await axios.post(
       "https://api.paystack.co/transaction/initialize",
       {
-        email: user.rows[0].email,
+        email: user.email,
         amount: Number(amount) * 100,
         reference,
-        metadata: { user_id: user.rows[0].id, company: user.rows[0].company }
+        metadata: { user_id: user.id, company: user.company }
       },
       { headers: { Authorization: `Bearer ${paystackSecret}` } }
     );
@@ -388,6 +409,11 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
 /* ================= PAYSTACK WEBHOOK ================= */
 app.post("/api/paystack/webhook", async (req, res) => {
   try {
+    const hash = crypto.createHmac("sha512", getPaystackKey("mayconnect", "secret"))
+     .update(req.body)
+     .digest("hex");
+    if (hash!== req.headers["x-paystack-signature"]) return res.sendStatus(400);
+
     const event = JSON.parse(req.body);
     if (event.event === "charge.success") {
       const { user_id } = event.data.metadata || {};
@@ -458,12 +484,12 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
 
   let query = `
     SELECT DATE(t.created_at) as date,
-           SUM(t.profit) as total_profit,
-           COUNT(*) as total_sales,
-           u.company
+           SUM(p.amount) as total_profit,
+           COUNT(*) as total_sales
     FROM transactions t
+    JOIN profits p ON p.transaction_id = t.id
     JOIN users u ON t.user_id = u.id
-    WHERE t.status = 'SUCCESS' AND t.profit > 0
+    WHERE t.status = 'SUCCESS'
   `;
   const params = [];
 
@@ -475,15 +501,10 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
     params.push(to);
     query += ` AND t.created_at <= $${params.length}`;
   }
-  if (company) {
-    params.push(company);
-    query += ` AND u.company = $${params.length}`;
-  } else {
-    params.push(userCompany);
-    query += ` AND u.company = $${params.length}`;
-  }
+  params.push(company || userCompany);
+  query += ` AND u.company = $${params.length}`;
 
-  query += ` GROUP BY DATE(t.created_at), u.company ORDER BY date DESC`;
+  query += ` GROUP BY DATE(t.created_at) ORDER BY date DESC`;
 
   const result = await pool.query(query, params);
   const adminWallet = await pool.query("SELECT admin_wallet FROM users WHERE id=$1", [req.user.id]);
@@ -495,14 +516,15 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
   });
 });
 
-/* ================= ADMIN: TOP USERS MANAGEMENT ================= */
+/* ================= ADMIN: TOP USERS ================= */
 app.get("/admin/top-users", auth, adminOnly, async (req, res) => {
   const users = await pool.query(
     `SELECT u.id,u.username,u.email,u.company,u.is_top_user,
             COALESCE(SUM(t.amount),0) as total_spent,
-            COALESCE(SUM(t.profit),0) as total_profit_generated
+            COALESCE(SUM(p.amount),0) as total_profit_generated
      FROM users u
      LEFT JOIN transactions t ON t.user_id = u.id AND t.status='SUCCESS'
+     LEFT JOIN profits p ON p.transaction_id = t.id
      WHERE u.company=$1
      GROUP BY u.id
      ORDER BY total_spent DESC`,
@@ -553,48 +575,34 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
     );
     res.json({ message: "Plan added", plan: result.rows[0] });
   } catch (e) {
-    if (e.code === '23505') return res.status(400).json({ message: "plan_id already exists" });
+    if (e.code === "23505") return res.status(400).json({ message: "Plan ID already exists" });
     res.status(500).json({ message: "Failed to add plan" });
   }
 });
 
 app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
   const { id } = req.params;
-  const { name, price, top_price, cost, validity, restricted, is_active } = req.body;
+  const fields = req.body;
+  const set = Object.keys(fields).map((k, i) => `${k}=$${i + 1}`).join(",");
+  const values = Object.values(fields);
+  values.push(id);
+
   const result = await pool.query(
-    `UPDATE plans SET
-      name=COALESCE($1,name),
-      price=COALESCE($2,price),
-      top_price=COALESCE($3,top_price),
-      cost=COALESCE($4,cost),
-      validity=COALESCE($5,validity),
-      restricted=COALESCE($6,restricted),
-      is_active=COALESCE($7,is_active)
-     WHERE id=$8 AND company=$9 RETURNING *`,
-    [name, price, top_price, cost, validity, restricted, is_active, id, req.user.company]
+    `UPDATE plans SET ${set} WHERE id=$${values.length} AND company=$${values.length + 1} RETURNING *`,
+    [...values, req.user.company]
   );
   if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
   res.json({ message: "Plan updated", plan: result.rows[0] });
 });
 
-app.delete("/admin/plans/:id", auth, adminOnly, async (req, res) => {
-  const { id } = req.params;
-  const result = await pool.query(
-    "UPDATE plans SET is_active=FALSE WHERE id=$1 AND company=$2 RETURNING *",
-    [id, req.user.company]
-  );
-  if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
-  res.json({ message: "Plan disabled" });
-});
-
 /* ================= ADMIN: USERS MANAGER ================= */
 app.get("/admin/users", auth, adminOnly, async (req, res) => {
   const { search } = req.query;
-  let query = `SELECT id,username,email,company,wallet_balance,admin_wallet,is_admin,is_top_user,created_at FROM users WHERE company=$1`;
+  let query = `SELECT id,username,email,wallet_balance,is_top_user,company,created_at FROM users WHERE company=$1`;
   const params = [req.user.company];
   if (search) {
     params.push(`%${search}%`);
-    query += ` AND (username ILIKE $2 OR email ILIKE $2)`;
+    query += ` AND (username ILIKE $${params.length} OR email ILIKE $${params.length})`;
   }
   query += ` ORDER BY created_at DESC LIMIT 100`;
   const users = await pool.query(query, params);
@@ -603,95 +611,80 @@ app.get("/admin/users", auth, adminOnly, async (req, res) => {
 
 app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
   const { id } = req.params;
-  const { wallet_balance, is_top_user, is_admin } = req.body;
+  const { is_top_user } = req.body;
   const result = await pool.query(
-    `UPDATE users SET
-      wallet_balance=COALESCE($1,wallet_balance),
-      is_top_user=COALESCE($2,is_top_user),
-      is_admin=COALESCE($3,is_admin)
-     WHERE id=$4 AND company=$5 RETURNING id,username,email,is_top_user,is_admin,wallet_balance`,
-    [wallet_balance, is_top_user, is_admin, id, req.user.company]
+    "UPDATE users SET is_top_user=$1 WHERE id=$2 AND company=$3 RETURNING id,username,email,is_top_user",
+    [is_top_user, id, req.user.company]
   );
   if (!result.rows.length) return res.status(404).json({ message: "User not found" });
   res.json({ message: "User updated", user: result.rows[0] });
 });
 
 /* ================= ADMIN: WITHDRAWALS ================= */
+app.get("/admin/withdrawals", auth, adminOnly, async (req, res) => {
+  const wds = await pool.query(
+    "SELECT * FROM withdrawals WHERE admin_id=$1 ORDER BY created_at DESC",
+    [req.user.id]
+  );
+  res.json(wds.rows);
+});
+
 app.post("/admin/withdraw-request", auth, adminOnly, async (req, res) => {
   const { amount, bank_name, account_number, account_name } = req.body;
-  const user = await pool.query("SELECT admin_wallet FROM users WHERE id=$1", [req.user.id]);
+  if (!amount ||!bank_name ||!account_number ||!account_name) {
+    return res.status(400).json({ message: "All fields required" });
+  }
 
-  if (Number(user.rows[0].admin_wallet) < Number(amount)) {
+  const user = await getUser(req.user.id);
+  if (Number(user.admin_wallet) < Number(amount)) {
     return res.status(400).json({ message: "Insufficient admin wallet balance" });
   }
 
   const reference = "WD-" + uuidv4();
   await pool.query(
-    `INSERT INTO withdrawals(user_id,amount,bank_name,account_number,account_name,reference,status)
+    `INSERT INTO withdrawals(admin_id,amount,bank_name,account_number,account_name,reference,status)
      VALUES($1,$2,$3,$4,$5,$6,'PENDING')`,
     [req.user.id, amount, bank_name, account_number, account_name, reference]
   );
+  await pool.query("UPDATE users SET admin_wallet = admin_wallet - $1 WHERE id=$2", [amount, req.user.id]);
 
-  res.json({ message: "Withdrawal request created", reference });
-});
-
-app.get("/admin/withdrawals", auth, adminOnly, async (req, res) => {
-  const wd = await pool.query("SELECT * FROM withdrawals WHERE user_id=$1 ORDER BY id DESC", [req.user.id]);
-  res.json(wd.rows);
+  res.json({ message: "Withdrawal request submitted", reference });
 });
 
 app.post("/admin/withdraw/approve", auth, adminOnly, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const { reference } = req.body;
-
-    const wd = await client.query("SELECT * FROM withdrawals WHERE reference=$1 AND user_id=$2 FOR UPDATE", [reference, req.user.id]);
-    if (!wd.rows.length) throw new Error("Withdrawal not found");
-    if (wd.rows[0].status!== 'PENDING') throw new Error("Already processed");
-
-    const user = await client.query("SELECT admin_wallet FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
-    if (Number(user.rows[0].admin_wallet) < Number(wd.rows[0].amount)) throw new Error("Insufficient admin balance");
-
-    await client.query("UPDATE users SET admin_wallet = admin_wallet - $1 WHERE id=$2", [wd.rows[0].amount, req.user.id]);
-    await client.query("UPDATE withdrawals SET status='PAID', processed_at=NOW() WHERE reference=$1", [reference]);
-
-    await client.query("COMMIT");
-    res.json({ message: "Withdrawal approved and paid" });
-  } catch (e) {
-    await client.query("ROLLBACK");
-    res.status(400).json({ message: e.message });
-  } finally {
-    client.release();
-  }
+  const { reference } = req.body;
+  const result = await pool.query(
+    "UPDATE withdrawals SET status='PAID' WHERE reference=$1 AND admin_id=$2 RETURNING *",
+    [reference, req.user.id]
+  );
+  if (!result.rows.length) return res.status(404).json({ message: "Withdrawal not found" });
+  res.json({ message: "Marked as paid" });
 });
 
-/* ================= TRANSACTION REVERSAL ================= */
+/* ================= ADMIN: REVERSE ================= */
 app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
+  const { reference } = req.body;
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const { reference } = req.body;
     const tx = await client.query("SELECT * FROM transactions WHERE reference=$1 FOR UPDATE", [reference]);
     if (!tx.rows.length) throw new Error("Transaction not found");
     if (tx.rows[0].status === "REVERSED") throw new Error("Already reversed");
-    if (tx.rows[0].status!== "SUCCESS") throw new Error("Only SUCCESS tx can be reversed");
 
-    const user = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [tx.rows[0].user_id]);
-    const newBalance = Number(user.rows[0].wallet_balance) + Number(tx.rows[0].amount);
+    const t = tx.rows[0];
+    await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [t.amount, t.user_id]);
+    await client.query("UPDATE transactions SET status='REVERSED' WHERE id=$1", [t.id]);
 
-    await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user.rows[0].id]);
-    await client.query("UPDATE transactions SET status='REVERSED' WHERE reference=$1", [reference]);
-
-    if (tx.rows[0].profit > 0) {
-      const adminId = await getCompanyAdmin(user.rows[0].company);
-      if (adminId) {
-        await client.query("UPDATE users SET admin_wallet = admin_wallet - $1 WHERE id=$2", [tx.rows[0].profit, adminId]);
-      }
+    const profit = await client.query("SELECT * FROM profits WHERE transaction_id=$1", [t.id]);
+    if (profit.rows.length) {
+      const p = profit.rows[0];
+      await client.query("UPDATE users SET admin_wallet = admin_wallet - $1 WHERE id=$2", [p.amount, p.credited_to_user_id]);
+      await client.query("DELETE FROM profits WHERE id=$1", [p.id]);
     }
 
     await client.query("COMMIT");
-    sendWalletUpdate(user.rows[0].id, newBalance);
+    const user = await getUser(t.user_id);
+    sendWalletUpdate(t.user_id, user.wallet_balance);
     res.json({ message: "Transaction reversed" });
   } catch (e) {
     await client.query("ROLLBACK");
@@ -701,5 +694,6 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
   }
 });
 
-/* ================= SERVER ================= */
-server.listen(process.env.PORT || 5000, () => console.log("🚀 SERVER READY ✅"));
+/* ================= START ================= */
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => console.log(`Server running on ${PORT}`));
