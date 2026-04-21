@@ -25,6 +25,7 @@ const ADMIN_EMAILS = [
 ];
 
 const PAYSTACK_KEYS = JSON.parse(process.env.PAYSTACK_KEYS || "{}");
+console.log("Loaded Paystack keys for:", Object.keys(PAYSTACK_KEYS));
 
 /* ================= RATE LIMITERS ================= */
 const buyDataLimiter = rateLimit({
@@ -80,28 +81,54 @@ const getUser = async (id) => {
 
 async function createDedicatedAccount(user) {
   const paystackSecret = getPaystackKey(user.company, "secret");
-  if (!paystackSecret) throw new Error("Paystack key not set for " + user.company);
+  if (!paystackSecret) {
+    console.log(`No paystack secret for company: ${user.company}`);
+    return null;
+  }
 
-  const customer = await axios.post(
-    "https://api.paystack.co/customer",
-    { email: user.email, first_name: user.username, last_name: user.company },
-    { headers: { Authorization: `Bearer ${paystackSecret}` } }
-  );
-  const customer_code = customer.data.data.customer_code;
+  try {
+    // 1. Get or create customer
+    let customer_code;
+    try {
+      const existing = await axios.get(
+        `https://api.paystack.co/customer/${user.email}`,
+        { headers: { Authorization: `Bearer ${paystackSecret}` } }
+      );
+      customer_code = existing.data.data.customer_code;
+      console.log(`Customer exists for ${user.email}: ${customer_code}`);
+    } catch (e) {
+      if (e.response?.status === 404) {
+        const newCustomer = await axios.post(
+          "https://api.paystack.co/customer",
+          { email: user.email, first_name: user.username, last_name: user.company },
+          { headers: { Authorization: `Bearer ${paystackSecret}` } }
+        );
+        customer_code = newCustomer.data.data.customer_code;
+        console.log(`Customer created for ${user.email}: ${customer_code}`);
+      } else {
+        throw e;
+      }
+    }
 
-  const account = await axios.post(
-    "https://api.paystack.co/dedicated_account",
-    { customer: customer_code, preferred_bank: "wema-bank" },
-    { headers: { Authorization: `Bearer ${paystackSecret}` } }
-  );
+    // 2. Create dedicated account
+    const account = await axios.post(
+      "https://api.paystack.co/dedicated_account",
+      { customer: customer_code, preferred_bank: "wema-bank" },
+      { headers: { Authorization: `Bearer ${paystackSecret}` } }
+    );
 
-  const acc = account.data.data;
-  await pool.query(
-    `UPDATE users SET customer_code=$1, account_number=$2, account_name=$3, bank_name=$4 WHERE id=$5`,
-    [customer_code, acc.account_number, acc.account_name, acc.bank.name, user.id]
-  );
-
-  return acc;
+    const acc = account.data.data;
+    await pool.query(
+      `UPDATE users SET customer_code=$1, account_number=$2, account_name=$3, bank_name=$4 WHERE id=$5`,
+      [customer_code, acc.account_number, acc.account_name, acc.bank.name, user.id]
+    );
+    console.log(`Dedicated account created for ${user.email}: ${acc.account_number} ${acc.bank.name}`);
+    return acc;
+  } catch (e) {
+    const errData = e.response?.data || e.message;
+    console.log("PAYSTACK CREATE ACCOUNT ERROR:", JSON.stringify(errData));
+    throw new Error(errData?.message || "Failed to create Paystack account");
+  }
 }
 
 /* ================= WS ================= */
@@ -155,10 +182,11 @@ app.post("/api/signup", async (req, res) => {
       [username, email, hash, pinHash, isAdmin, userCompany]
     );
 
+    // Try create account but never fail signup if Paystack errors
     try {
       await createDedicatedAccount(user.rows[0]);
     } catch (e) {
-      console.log("PAYSTACK ERROR ON SIGNUP:", e.response?.data || e.message);
+      console.log("PAYSTACK ERROR ON SIGNUP - continuing anyway:", e.message);
     }
 
     const updatedUser = await getUser(user.rows[0].id);
@@ -166,7 +194,7 @@ app.post("/api/signup", async (req, res) => {
       { id: updatedUser.id, username: updatedUser.username, is_admin: updatedUser.is_admin, company: updatedUser.company },
       process.env.JWT_SECRET
     );
-    res.json({ token });
+    res.json({ token, message: "Signup successful" });
   } catch (e) {
     console.log("SIGNUP ERROR:", e.message);
     if (e.code === "23505") return res.status(400).json({ message: "Username or email already exists" });
@@ -223,8 +251,8 @@ app.post("/api/generate-account", auth, async (req, res) => {
     const acc = await createDedicatedAccount(user);
     res.json({ message: "Account created", account: acc });
   } catch (e) {
-    console.log("GENERATE ACCOUNT ERROR:", e.response?.data || e.message);
-    res.status(500).json({ message: e.message || "Failed to create account" });
+    console.log("GENERATE ACCOUNT ERROR:", e.message);
+    res.status(400).json({ message: e.message || "Failed to create account" });
   }
 });
 
@@ -386,6 +414,8 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
 
   const user = await getUser(req.user.id);
   const paystackSecret = getPaystackKey(user.company, "secret");
+  if (!paystackSecret) return res.status(500).json({ message: "Payment not configured for your company" });
+
   const reference = "FUND-" + uuidv4();
 
   try {
@@ -409,12 +439,27 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
 /* ================= PAYSTACK WEBHOOK ================= */
 app.post("/api/paystack/webhook", async (req, res) => {
   try {
-    const hash = crypto.createHmac("sha512", getPaystackKey("mayconnect", "secret"))
-     .update(req.body)
-     .digest("hex");
-    if (hash!== req.headers["x-paystack-signature"]) return res.sendStatus(400);
+    const rawBody = req.body;
+    const signature = req.headers["x-paystack-signature"];
 
-    const event = JSON.parse(req.body);
+    // Verify against all company secrets since we don't know which company sent it
+    let isValid = false;
+    for (const company of Object.keys(PAYSTACK_KEYS)) {
+      const secret = PAYSTACK_KEYS[company]?.secret;
+      if (!secret) continue;
+      const hash = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
+      if (hash === signature) {
+        isValid = true;
+        console.log(`Webhook verified for company: ${company}`);
+        break;
+      }
+    }
+    if (!isValid) {
+      console.log("Webhook signature verification failed");
+      return res.sendStatus(400);
+    }
+
+    const event = JSON.parse(rawBody);
     if (event.event === "charge.success") {
       const { user_id } = event.data.metadata || {};
       const amount = event.data.amount / 100;
@@ -443,6 +488,7 @@ app.post("/api/paystack/webhook", async (req, res) => {
 
         await client.query("COMMIT");
         sendWalletUpdate(user_id, newBalance);
+        console.log(`Wallet funded: ${user_id} +${amount} new balance: ${newBalance}`);
       } catch (e) {
         await client.query("ROLLBACK");
         console.log("WEBHOOK TX ERROR:", e.message);
