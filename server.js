@@ -85,6 +85,9 @@ async function createDedicatedAccount(user) {
     console.log(`No paystack secret for company: ${user.company}`);
     return null;
   }
+  if (!user.phone) {
+    throw new Error("Phone number required to create virtual account. Please update your profile.");
+  }
 
   try {
     // 1. Get or create customer
@@ -95,12 +98,27 @@ async function createDedicatedAccount(user) {
         { headers: { Authorization: `Bearer ${paystackSecret}` } }
       );
       customer_code = existing.data.data.customer_code;
+
+      // Update customer with phone if missing
+      if (!existing.data.data.phone) {
+        await axios.put(
+          `https://api.paystack.co/customer/${customer_code}`,
+          { phone: user.phone },
+          { headers: { Authorization: `Bearer ${paystackSecret}` } }
+        );
+        console.log(`Updated customer phone for ${user.email}`);
+      }
       console.log(`Customer exists for ${user.email}: ${customer_code}`);
     } catch (e) {
       if (e.response?.status === 404) {
         const newCustomer = await axios.post(
           "https://api.paystack.co/customer",
-          { email: user.email, first_name: user.username, last_name: user.company },
+          {
+            email: user.email,
+            first_name: user.username,
+            last_name: user.company,
+            phone: user.phone
+          },
           { headers: { Authorization: `Bearer ${paystackSecret}` } }
         );
         customer_code = newCustomer.data.data.customer_code;
@@ -167,9 +185,9 @@ function adminOnly(req, res, next) {
 /* ================= SIGNUP ================= */
 app.post("/api/signup", async (req, res) => {
   try {
-    const { username, email, password, pin, company } = req.body;
-    if (!username ||!email ||!password ||!pin)
-      return res.status(400).json({ message: "All fields required" });
+    const { username, email, password, pin, phone, company } = req.body;
+    if (!username ||!email ||!password ||!pin ||!phone)
+      return res.status(400).json({ message: "All fields required including phone" });
 
     const userCompany = company || "mayconnect";
     const hash = await bcrypt.hash(password, 10);
@@ -177,12 +195,11 @@ app.post("/api/signup", async (req, res) => {
     const isAdmin = ADMIN_EMAILS.includes(email);
 
     const user = await pool.query(
-      `INSERT INTO users(username,email,password,pin,is_admin,company)
-       VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [username, email, hash, pinHash, isAdmin, userCompany]
+      `INSERT INTO users(username,email,password,pin,phone,is_admin,company)
+       VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [username, email, hash, pinHash, phone, isAdmin, userCompany]
     );
 
-    // Try create account but never fail signup if Paystack errors
     try {
       await createDedicatedAccount(user.rows[0]);
     } catch (e) {
@@ -223,7 +240,7 @@ app.get("/api/me", auth, async (req, res) => {
   try {
     let user = await getUser(req.user.id);
 
-    if (!user.account_number && getPaystackKey(user.company, "secret")) {
+    if (!user.account_number && getPaystackKey(user.company, "secret") && user.phone) {
       try {
         await createDedicatedAccount(user);
         user = await getUser(req.user.id);
@@ -246,6 +263,9 @@ app.post("/api/generate-account", auth, async (req, res) => {
     const user = await getUser(req.user.id);
     if (user.account_number) {
       return res.json({ message: "Account already exists", account: user });
+    }
+    if (!user.phone) {
+      return res.status(400).json({ message: "Please update your phone number in profile first" });
     }
 
     const acc = await createDedicatedAccount(user);
@@ -275,7 +295,7 @@ app.get("/api/plans", auth, async (req, res) => {
   );
 
   const result = plans.rows.map(p => ({
-   ...p,
+  ...p,
     price: is_top_user? (p.top_price || p.price) : p.price
   }));
   res.json(result);
@@ -442,7 +462,6 @@ app.post("/api/paystack/webhook", async (req, res) => {
     const rawBody = req.body;
     const signature = req.headers["x-paystack-signature"];
 
-    // Verify against all company secrets since we don't know which company sent it
     let isValid = false;
     for (const company of Object.keys(PAYSTACK_KEYS)) {
       const secret = PAYSTACK_KEYS[company]?.secret;
