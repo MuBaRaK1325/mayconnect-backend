@@ -100,13 +100,8 @@ const getUser = async (id) => {
 
 async function createDedicatedAccount(user) {
   const paystackSecret = getPaystackKey(user.company, "secret");
-  if (!paystackSecret) {
-    console.log(`No paystack secret for company: ${user.company}`);
-    return null;
-  }
-  if (!user.phone) {
-    throw new Error("Phone number required to create virtual account. Please update your profile.");
-  }
+  if (!paystackSecret) return null;
+  if (!user.phone) throw new Error("Phone number required to create virtual account. Please update your profile.");
 
   try {
     let customer_code;
@@ -116,30 +111,21 @@ async function createDedicatedAccount(user) {
         { headers: { Authorization: `Bearer ${paystackSecret}` } }
       );
       customer_code = existing.data.data.customer_code;
-
       if (!existing.data.data.phone) {
         await axios.put(
           `https://api.paystack.co/customer/${customer_code}`,
           { phone: user.phone },
           { headers: { Authorization: `Bearer ${paystackSecret}` } }
         );
-        console.log(`Updated customer phone for ${user.email}`);
       }
-      console.log(`Customer exists for ${user.email}: ${customer_code}`);
     } catch (e) {
       if (e.response?.status === 404) {
         const newCustomer = await axios.post(
           "https://api.paystack.co/customer",
-          {
-            email: user.email,
-            first_name: user.username,
-            last_name: user.company,
-            phone: user.phone
-          },
+          { email: user.email, first_name: user.username, last_name: user.company, phone: user.phone },
           { headers: { Authorization: `Bearer ${paystackSecret}` } }
         );
         customer_code = newCustomer.data.data.customer_code;
-        console.log(`Customer created for ${user.email}: ${customer_code}`);
       } else {
         throw e;
       }
@@ -156,7 +142,6 @@ async function createDedicatedAccount(user) {
       `UPDATE users SET customer_code=$1, account_number=$2, account_name=$3, bank_name=$4 WHERE id=$5`,
       [customer_code, acc.account_number, acc.account_name, acc.bank.name, user.id]
     );
-    console.log(`Dedicated account created for ${user.email}: ${acc.account_number} ${acc.bank.name}`);
     return acc;
   } catch (e) {
     const errData = e.response?.data || e.message;
@@ -166,43 +151,34 @@ async function createDedicatedAccount(user) {
 }
 
 /* ================= VTU API CALLS ================= */
-async function callMaitamaData(phone, planCode) {
+async function callMaitamaData(phone, network_id, api_plan_id) {
   const { base_url, api_token } = VTU_PROVIDERS.maitama;
   const res = await axios.post(
     `${base_url}/buydata`,
-    { network: planCode.network_id, plan: planCode.api_plan_id, phone },
+    { network: network_id, plan: api_plan_id, phone },
     { headers: { Authorization: `Bearer ${api_token}` } }
   );
+  if (res.data.status!== "success" && res.data.status!== true) throw new Error(res.data.message || "Maitama failed");
   return res.data;
 }
 
-async function callCheapDataHubData(phone, planCode) {
+async function callCheapDataHubData(phone, network_id, api_plan_id) {
   const { data_url, token, userid } = VTU_PROVIDERS.cheapdatahub;
   const res = await axios.post(
     data_url,
-    {
-      network: planCode.network_id,
-      plan: planCode.api_plan_id,
-      mobile_number: phone,
-      Ported_number: true,
-      userid,
-      api_token: token
-    }
+    { network: network_id, plan: api_plan_id, mobile_number: phone, Ported_number: true, userid, api_token: token }
   );
+  if (res.data.status!== "successful") throw new Error(res.data.message || "CheapDataHub failed");
   return res.data;
 }
 
-async function callSubPadiData(phone, planCode) {
+async function callSubPadiData(phone, network_id, api_plan_id) {
   const { base_url, api_key } = VTU_PROVIDERS.subpadi;
   const res = await axios.post(
     `${base_url}/data`,
-    {
-      network: planCode.network_id,
-      plan: planCode.api_plan_id,
-      phone,
-      api_key
-    }
+    { network: network_id, plan: api_plan_id, phone, api_key }
   );
+  if (!res.data.status) throw new Error(res.data.message || "SubPadi failed");
   return res.data;
 }
 
@@ -292,11 +268,10 @@ app.post("/api/login", async (req, res) => {
   res.json({ token });
 });
 
-/* ================= USER INFO + AUTO ACCOUNT CREATE ================= */
+/* ================= USER INFO ================= */
 app.get("/api/me", auth, async (req, res) => {
   try {
     let user = await getUser(req.user.id);
-
     if (!user.account_number && getPaystackKey(user.company, "secret") && user.phone) {
       try {
         await createDedicatedAccount(user);
@@ -305,7 +280,6 @@ app.get("/api/me", auth, async (req, res) => {
         console.log("Account creation failed on /me:", e.message);
       }
     }
-
     delete user.password;
     delete user.pin;
     res.json(user);
@@ -314,17 +288,12 @@ app.get("/api/me", auth, async (req, res) => {
   }
 });
 
-/* ================= GENERATE ACCOUNT ENDPOINT ================= */
+/* ================= GENERATE ACCOUNT ================= */
 app.post("/api/generate-account", auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
-    if (user.account_number) {
-      return res.json({ message: "Account already exists", account: user });
-    }
-    if (!user.phone) {
-      return res.status(400).json({ message: "Please update your phone number in profile first" });
-    }
-
+    if (user.account_number) return res.json({ message: "Account already exists", account: user });
+    if (!user.phone) return res.status(400).json({ message: "Please update your phone number in profile first" });
     const acc = await createDedicatedAccount(user);
     res.json({ message: "Account created", account: acc });
   } catch (e) {
@@ -345,14 +314,12 @@ app.get("/api/plans", auth, async (req, res) => {
   const { is_top_user, company } = user.rows[0];
 
   const plans = await pool.query(
-    `SELECT * FROM plans
-     WHERE is_active = TRUE AND (restricted = FALSE OR company = $1)
-     ORDER BY network, price ASC`,
+    `SELECT * FROM plans WHERE is_active = TRUE AND (restricted = FALSE OR company = $1) ORDER BY network, price ASC`,
     [company]
   );
 
   const result = plans.rows.map(p => ({
- ...p,
+...p,
     price: is_top_user? (p.top_price || p.price) : p.price
   }));
   res.json(result);
@@ -385,49 +352,49 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       return res.status(403).json({ message: "Plan restricted to company users" });
     }
 
+    if (!plan.provider ||!plan.network_id ||!plan.api_plan_id) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
+    }
+
     const price = user.is_top_user? (plan.top_price || plan.price) : plan.price;
     if (Number(user.wallet_balance) < Number(price)) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Insufficient balance" });
     }
 
-    // Deduct wallet first
     const newBalance = Number(user.wallet_balance) - Number(price);
     await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user.id]);
 
     const ref = "DATA-" + uuidv4();
     const cost = plan.cost;
-    let vtuStatus = "SUCCESS";
-    let vtuMessage = "Success";
 
-    // Call VTU provider based on plan.provider field
     try {
       if (plan.provider === "maitama") {
-        await callMaitamaData(phone, { network_id: plan.network_id, api_plan_id: plan.api_plan_id });
+        await callMaitamaData(phone, plan.network_id, plan.api_plan_id);
       } else if (plan.provider === "cheapdatahub") {
-        await callCheapDataHubData(phone, { network_id: plan.network_id, api_plan_id: plan.api_plan_id });
+        await callCheapDataHubData(phone, plan.network_id, plan.api_plan_id);
       } else if (plan.provider === "subpadi") {
-        await callSubPadiData(phone, { network_id: plan.network_id, api_plan_id: plan.api_plan_id });
+        await callSubPadiData(phone, plan.network_id, plan.api_plan_id);
+      } else {
+        throw new Error("Unknown provider");
       }
     } catch (vtuErr) {
-      console.log("VTU API ERROR:", vtuErr.response?.data || vtuErr.message);
-      vtuStatus = "FAILED";
-      vtuMessage = vtuErr.response?.data?.message || "VTU provider failed";
-      // Refund user
+      console.log("VTU API ERROR:", vtuErr.message);
       await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [price, user.id]);
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Purchase failed: " + vtuMessage });
+      return res.status(400).json({ message: "Purchase failed: " + vtuErr.message });
     }
 
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status)
-       VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [user.id, plan.id, price, cost, phone, plan.network, ref, vtuStatus]
+       VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'SUCCESS') RETURNING *`,
+      [user.id, plan.id, price, cost, phone, plan.network, ref]
     );
 
     const adminId = await getCompanyAdmin(user.company);
     const profit = Number(price) - Number(cost);
-    if (adminId && profit > 0 && vtuStatus === "SUCCESS") {
+    if (adminId && profit > 0) {
       await client.query("UPDATE users SET admin_wallet = admin_wallet + $1 WHERE id=$2", [profit, adminId]);
       await client.query(
         `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
@@ -548,14 +515,10 @@ app.post("/api/paystack/webhook", async (req, res) => {
       const hash = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
       if (hash === signature) {
         isValid = true;
-        console.log(`Webhook verified for company: ${company}`);
         break;
       }
     }
-    if (!isValid) {
-      console.log("Webhook signature verification failed");
-      return res.sendStatus(400);
-    }
+    if (!isValid) return res.sendStatus(400);
 
     const event = JSON.parse(rawBody);
     if (event.event === "charge.success") {
@@ -586,7 +549,6 @@ app.post("/api/paystack/webhook", async (req, res) => {
 
         await client.query("COMMIT");
         sendWalletUpdate(user_id, newBalance);
-        console.log(`Wallet funded: ${user_id} +${amount} new balance: ${newBalance}`);
       } catch (e) {
         await client.query("ROLLBACK");
         console.log("WEBHOOK TX ERROR:", e.message);
@@ -601,7 +563,7 @@ app.post("/api/paystack/webhook", async (req, res) => {
   }
 });
 
-/* ================= CHANGE PASSWORD ================= */
+/* ================= CHANGE PASSWORD/PIN ================= */
 app.post("/api/change-password", auth, async (req, res) => {
   const { oldPass, newPass } = req.body;
   const user = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
@@ -611,7 +573,6 @@ app.post("/api/change-password", auth, async (req, res) => {
   res.json({ message: "Password updated" });
 });
 
-/* ================= CHANGE PIN ================= */
 app.post("/api/change-pin", auth, async (req, res) => {
   const { oldPin, newPin } = req.body;
   const user = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
@@ -621,7 +582,7 @@ app.post("/api/change-pin", auth, async (req, res) => {
   res.json({ message: "PIN updated" });
 });
 
-/* ================= ADMIN: PROFIT DASHBOARD ================= */
+/* ================= ADMIN: PROFIT ================= */
 app.get("/admin/profit", auth, adminOnly, async (req, res) => {
   const { from, to, company } = req.query;
   const userCompany = req.user.company;
@@ -647,7 +608,6 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
   }
   params.push(company || userCompany);
   query += ` AND u.company = $${params.length}`;
-
   query += ` GROUP BY DATE(t.created_at) ORDER BY date DESC`;
 
   const result = await pool.query(query, params);
@@ -697,7 +657,7 @@ app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
   res.json({ message: "Top user removed" });
 });
 
-/* ================= ADMIN: PLANS MANAGER ================= */
+/* ================= ADMIN: PLANS MANAGER - FULL CONTROL ================= */
 app.get("/admin/plans", auth, adminOnly, async (req, res) => {
   const plans = await pool.query(
     "SELECT * FROM plans WHERE company=$1 OR company IS NULL ORDER BY network, price",
@@ -708,8 +668,8 @@ app.get("/admin/plans", auth, adminOnly, async (req, res) => {
 
 app.post("/admin/plans", auth, adminOnly, async (req, res) => {
   const { plan_id, network, name, price, top_price, cost, validity, restricted, provider, network_id, api_plan_id } = req.body;
-  if (!plan_id ||!network ||!name ||!price ||!cost ||!provider) {
-    return res.status(400).json({ message: "Missing required fields: plan_id, network, name, price, cost, provider" });
+  if (!plan_id ||!network ||!name ||!price ||!cost ||!provider ||!network_id ||!api_plan_id) {
+    return res.status(400).json({ message: "Missing required fields: plan_id, network, name, price, cost, provider, network_id, api_plan_id" });
   }
   try {
     const result = await pool.query(
@@ -727,22 +687,39 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
 app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
   const { id } = req.params;
   const fields = req.body;
+  if (!Object.keys(fields).length) return res.status(400).json({ message: "No fields to update" });
+
   const set = Object.keys(fields).map((k, i) => `${k}=$${i + 1}`).join(",");
   const values = Object.values(fields);
-  values.push(id);
+  values.push(id, req.user.company);
 
-  const result = await pool.query(
-    `UPDATE plans SET ${set} WHERE id=$${values.length} AND company=$${values.length + 1} RETURNING *`,
-    [...values, req.user.company]
-  );
-  if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
-  res.json({ message: "Plan updated", plan: result.rows[0] });
+  try {
+    const result = await pool.query(
+      `UPDATE plans SET ${set} WHERE id=$${values.length - 1} AND company=$${values.length} RETURNING *`,
+      values
+    );
+    if (!result.rows.length) return res.status(404).json({ message: "Plan not found or not in your company" });
+    res.json({ message: "Plan updated", plan: result.rows[0] });
+  } catch (e) {
+    console.log("UPDATE PLAN ERROR:", e.message);
+    res.status(500).json({ message: "Failed to update plan" });
+  }
 });
 
-/* ================= ADMIN: USERS MANAGER ================= */
+app.delete("/admin/plans/:id", auth, adminOnly, async (req, res) => {
+  const { id } = req.params;
+  const result = await pool.query(
+    "UPDATE plans SET is_active=FALSE WHERE id=$1 AND company=$2 RETURNING id",
+    [id, req.user.company]
+  );
+  if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
+  res.json({ message: "Plan deactivated" });
+});
+
+/* ================= ADMIN: USERS ================= */
 app.get("/admin/users", auth, adminOnly, async (req, res) => {
   const { search } = req.query;
-  let query = `SELECT id,username,email,wallet_balance,is_top_user,company,created_at FROM users WHERE company=$1`;
+  let query = `SELECT id,username,email,wallet_balance,is_top_user,company,created_at,phone FROM users WHERE company=$1`;
   const params = [req.user.company];
   if (search) {
     params.push(`%${search}%`);
@@ -755,10 +732,26 @@ app.get("/admin/users", auth, adminOnly, async (req, res) => {
 
 app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
   const { id } = req.params;
-  const { is_top_user } = req.body;
+  const { is_top_user, wallet_balance } = req.body;
+  const updates = [];
+  const values = [];
+  let idx = 1;
+
+  if (is_top_user!== undefined) {
+    updates.push(`is_top_user=$${idx++}`);
+    values.push(is_top_user);
+  }
+  if (wallet_balance!== undefined) {
+    updates.push(`wallet_balance=$${idx++}`);
+    values.push(wallet_balance);
+  }
+
+  if (!updates.length) return res.status(400).json({ message: "No fields to update" });
+
+  values.push(id, req.user.company);
   const result = await pool.query(
-    "UPDATE users SET is_top_user=$1 WHERE id=$2 AND company=$3 RETURNING id,username,email,is_top_user",
-    [is_top_user, id, req.user.company]
+    `UPDATE users SET ${updates.join(",")} WHERE id=$${idx} AND company=$${idx + 1} RETURNING id,username,email,is_top_user,wallet_balance`,
+    values
   );
   if (!result.rows.length) return res.status(404).json({ message: "User not found" });
   res.json({ message: "User updated", user: result.rows[0] });
@@ -785,14 +778,24 @@ app.post("/admin/withdraw-request", auth, adminOnly, async (req, res) => {
   }
 
   const reference = "WD-" + uuidv4();
-  await pool.query(
-    `INSERT INTO withdrawals(admin_id,amount,bank_name,account_number,account_name,reference,status)
-     VALUES($1,$2,$3,$4,$5,$6,'PENDING')`,
-    [req.user.id, amount, bank_name, account_number, account_name, reference]
-  );
-  await pool.query("UPDATE users SET admin_wallet = admin_wallet - $1 WHERE id=$2", [amount, req.user.id]);
-
-  res.json({ message: "Withdrawal request submitted", reference });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO withdrawals(admin_id,amount,bank_name,account_number,account_name,reference,status)
+       VALUES($1,$2,$3,$4,$5,$6,'PENDING')`,
+      [req.user.id, amount, bank_name, account_number, account_name, reference]
+    );
+    await client.query("UPDATE users SET admin_wallet = admin_wallet - $1 WHERE id=$2", [amount, req.user.id]);
+    await client.query("COMMIT");
+    res.json({ message: "Withdrawal request submitted", reference });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.log("WITHDRAW ERROR:", e.message);
+    res.status(500).json({ message: "Withdrawal failed" });
+  } finally {
+    client.release();
+  }
 });
 
 app.post("/admin/withdraw/approve", auth, adminOnly, async (req, res) => {
@@ -835,8 +838,6 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
     res.status(400).json({ message: e.message });
   } finally {
     client.release();
-  }
-});
 /* ================= START ================= */
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on ${PORT}`));
