@@ -14,7 +14,23 @@ const rateLimit = require("express-rate-limit");
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+// TEMP CREDIT ROUTE - DELETE AFTER USE
+app.get('/api/dev/credit', async (req, res) => {
+  try {
+    const { email, amount } = req.query;
+    if (!email ||!amount) return res.status(400).send('Missing email or amount');
 
+    const result = await pool.query(
+      'UPDATE users SET wallet = wallet + $1 WHERE email = $2 AND company = $3 RETURNING wallet',
+      [parseInt(amount), email, 'bnhabeeb']
+    );
+
+    if (result.rowCount === 0) return res.status(404).send('User not found');
+    res.json({ success: true, new_balance: result.rows[0].wallet });
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
 /* ================= CONFIG ================= */
 const ADMIN_EMAILS = [
   "abubakarmubarak3456@gmail.com",
@@ -756,23 +772,6 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
     res.status(400).json({ message: e.message });
   } finally {
     client.release();
-  }
-});
-// TEMP CREDIT ROUTE - DELETE AFTER USE
-app.get('/api/dev/credit', async (req, res) => {
-  try {
-    const { email, amount } = req.query;
-    if (!email ||!amount) return res.status(400).send('Missing email or amount');
-
-    const result = await db.query(
-      'UPDATE users SET wallet = wallet + $1 WHERE email = $2 AND company = $3 RETURNING wallet',
-      [parseInt(amount), email, 'bnhabeeb']
-    );
-
-    if (result.rowCount === 0) return res.status(404).send('User not found');
-    res.json({ success: true, new_balance: result.rows[0].wallet });
-  } catch (err) {
-    res.status(500).send(err.message);
   }
 });
 /* ================= START ================= */
