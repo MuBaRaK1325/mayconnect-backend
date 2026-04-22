@@ -758,7 +758,23 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
     client.release();
   }
 });
+// TEMP CREDIT ROUTE - DELETE AFTER USE
+app.get('/api/dev/credit', async (req, res) => {
+  try {
+    const { email, amount } = req.query;
+    if (!email ||!amount) return res.status(400).send('Missing email or amount');
 
+    const result = await db.query(
+      'UPDATE users SET wallet = wallet + $1 WHERE email = $2 AND company = $3 RETURNING wallet',
+      [parseInt(amount), email, 'bnhabeeb']
+    );
+
+    if (result.rowCount === 0) return res.status(404).send('User not found');
+    res.json({ success: true, new_balance: result.rows[0].wallet });
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
 /* ================= START ================= */
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on ${PORT}`));
