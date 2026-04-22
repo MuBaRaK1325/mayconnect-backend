@@ -832,12 +832,20 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
     await client.query("COMMIT");
     const user = await getUser(t.user_id);
     sendWalletUpdate(t.user_id, user.wallet_balance);
-    res.json({ message: "Transaction reversed" });
+   res.json({ message: "Transaction reversed" });
   } catch (e) {
     await client.query("ROLLBACK");
     res.status(400).json({ message: e.message });
   } finally {
     client.release();
+  }  // <- Close finally
+});  // <- Close app.post route
+
+// Add this for UptimeRobot
+app.get("/", (req, res) => {
+  res.send("MAYCONNECT API Live");
+});
+
 /* ================= START ================= */
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on ${PORT}`));
