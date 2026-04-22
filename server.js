@@ -14,6 +14,7 @@ const rateLimit = require("express-rate-limit");
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+
 /* ================= CONFIG ================= */
 const ADMIN_EMAILS = [
   "abubakarmubarak3456@gmail.com",
@@ -25,6 +26,25 @@ const ADMIN_EMAILS = [
 
 const PAYSTACK_KEYS = JSON.parse(process.env.PAYSTACK_KEYS || "{}");
 console.log("Loaded Paystack keys for:", Object.keys(PAYSTACK_KEYS));
+
+/* ================= VTU PROVIDER CONFIG ================= */
+const VTU_PROVIDERS = {
+  maitama: {
+    base_url: process.env.MAITAMA_BASE_URL,
+    api_token: process.env.MAITAMA_API_TOKEN,
+    secret: process.env.MAITAMA_SECRET_KEY
+  },
+  cheapdatahub: {
+    data_url: process.env.CHEAPDATAHUB_DATA_URL,
+    airtime_url: process.env.CHEAPDATAHUB_AIRTIME_URL,
+    token: process.env.CHEAPDATAHUB_TOKEN,
+    userid: process.env.CHEAPDATAHUB_USERID
+  },
+  subpadi: {
+    base_url: process.env.SUBPADI_BASE_URL,
+    api_key: process.env.SUBPADI_KEY
+  }
+};
 
 /* ================= RATE LIMITERS ================= */
 const buyDataLimiter = rateLimit({
@@ -89,7 +109,6 @@ async function createDedicatedAccount(user) {
   }
 
   try {
-    // 1. Get or create customer
     let customer_code;
     try {
       const existing = await axios.get(
@@ -98,7 +117,6 @@ async function createDedicatedAccount(user) {
       );
       customer_code = existing.data.data.customer_code;
 
-      // Update customer with phone if missing
       if (!existing.data.data.phone) {
         await axios.put(
           `https://api.paystack.co/customer/${customer_code}`,
@@ -127,7 +145,6 @@ async function createDedicatedAccount(user) {
       }
     }
 
-    // 2. Create dedicated account
     const account = await axios.post(
       "https://api.paystack.co/dedicated_account",
       { customer: customer_code, preferred_bank: "wema-bank" },
@@ -146,6 +163,47 @@ async function createDedicatedAccount(user) {
     console.log("PAYSTACK CREATE ACCOUNT ERROR:", JSON.stringify(errData));
     throw new Error(errData?.message || "Failed to create Paystack account");
   }
+}
+
+/* ================= VTU API CALLS ================= */
+async function callMaitamaData(phone, planCode) {
+  const { base_url, api_token } = VTU_PROVIDERS.maitama;
+  const res = await axios.post(
+    `${base_url}/buydata`,
+    { network: planCode.network_id, plan: planCode.api_plan_id, phone },
+    { headers: { Authorization: `Bearer ${api_token}` } }
+  );
+  return res.data;
+}
+
+async function callCheapDataHubData(phone, planCode) {
+  const { data_url, token, userid } = VTU_PROVIDERS.cheapdatahub;
+  const res = await axios.post(
+    data_url,
+    {
+      network: planCode.network_id,
+      plan: planCode.api_plan_id,
+      mobile_number: phone,
+      Ported_number: true,
+      userid,
+      api_token: token
+    }
+  );
+  return res.data;
+}
+
+async function callSubPadiData(phone, planCode) {
+  const { base_url, api_key } = VTU_PROVIDERS.subpadi;
+  const res = await axios.post(
+    `${base_url}/data`,
+    {
+      network: planCode.network_id,
+      plan: planCode.api_plan_id,
+      phone,
+      api_key
+    }
+  );
+  return res.data;
 }
 
 /* ================= WS ================= */
@@ -294,13 +352,13 @@ app.get("/api/plans", auth, async (req, res) => {
   );
 
   const result = plans.rows.map(p => ({
-  ...p,
+ ...p,
     price: is_top_user? (p.top_price || p.price) : p.price
   }));
   res.json(result);
 });
 
-/* ================= BUY DATA ================= */
+/* ================= BUY DATA - WITH VTU ROUTING ================= */
 app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -333,21 +391,43 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       return res.status(400).json({ message: "Insufficient balance" });
     }
 
+    // Deduct wallet first
     const newBalance = Number(user.wallet_balance) - Number(price);
     await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user.id]);
 
     const ref = "DATA-" + uuidv4();
     const cost = plan.cost;
+    let vtuStatus = "SUCCESS";
+    let vtuMessage = "Success";
+
+    // Call VTU provider based on plan.provider field
+    try {
+      if (plan.provider === "maitama") {
+        await callMaitamaData(phone, { network_id: plan.network_id, api_plan_id: plan.api_plan_id });
+      } else if (plan.provider === "cheapdatahub") {
+        await callCheapDataHubData(phone, { network_id: plan.network_id, api_plan_id: plan.api_plan_id });
+      } else if (plan.provider === "subpadi") {
+        await callSubPadiData(phone, { network_id: plan.network_id, api_plan_id: plan.api_plan_id });
+      }
+    } catch (vtuErr) {
+      console.log("VTU API ERROR:", vtuErr.response?.data || vtuErr.message);
+      vtuStatus = "FAILED";
+      vtuMessage = vtuErr.response?.data?.message || "VTU provider failed";
+      // Refund user
+      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [price, user.id]);
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Purchase failed: " + vtuMessage });
+    }
 
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status)
-       VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'SUCCESS') RETURNING *`,
-      [user.id, plan.id, price, cost, phone, plan.network, ref]
+       VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [user.id, plan.id, price, cost, phone, plan.network, ref, vtuStatus]
     );
 
     const adminId = await getCompanyAdmin(user.company);
     const profit = Number(price) - Number(cost);
-    if (adminId && profit > 0) {
+    if (adminId && profit > 0 && vtuStatus === "SUCCESS") {
       await client.query("UPDATE users SET admin_wallet = admin_wallet + $1 WHERE id=$2", [profit, adminId]);
       await client.query(
         `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
@@ -627,15 +707,15 @@ app.get("/admin/plans", auth, adminOnly, async (req, res) => {
 });
 
 app.post("/admin/plans", auth, adminOnly, async (req, res) => {
-  const { plan_id, network, name, price, top_price, cost, validity, restricted } = req.body;
-  if (!plan_id ||!network ||!name ||!price ||!cost) {
-    return res.status(400).json({ message: "Missing required fields" });
+  const { plan_id, network, name, price, top_price, cost, validity, restricted, provider, network_id, api_plan_id } = req.body;
+  if (!plan_id ||!network ||!name ||!price ||!cost ||!provider) {
+    return res.status(400).json({ message: "Missing required fields: plan_id, network, name, price, cost, provider" });
   }
   try {
     const result = await pool.query(
-      `INSERT INTO plans(plan_id,company,network,name,price,top_price,cost,validity,restricted,is_active)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE) RETURNING *`,
-      [plan_id, req.user.company, network, name, price, top_price || price, cost, validity, restricted || false]
+      `INSERT INTO plans(plan_id,company,network,name,price,top_price,cost,validity,restricted,is_active,provider,network_id,api_plan_id)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10,$11,$12) RETURNING *`,
+      [plan_id, req.user.company, network, name, price, top_price || price, cost, validity, restricted || false, provider, network_id, api_plan_id]
     );
     res.json({ message: "Plan added", plan: result.rows[0] });
   } catch (e) {
