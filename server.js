@@ -802,11 +802,17 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
 
 app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
   const { id } = req.params;
-  const fields = req.body;
-  if (!Object.keys(fields).length) return res.status(400).json({ message: "No fields to update" });
+  const allowed = ['plan_id','network','name','price','top_price','cost','validity','restricted','is_active','provider','network_id','api_plan_id'];
 
-  const set = Object.keys(fields).map((k, i) => `${k}=$${i + 1}`).join(",");
-  const values = Object.values(fields);
+  const updates = {};
+  for (const key of allowed) {
+    if (req.body[key]!== undefined) updates[key] = req.body[key];
+  }
+
+  if (!Object.keys(updates).length) return res.status(400).json({ message: "No fields to update" });
+
+  const set = Object.keys(updates).map((k, i) => `${k}=$${i + 1}`).join(",");
+  const values = Object.values(updates);
   values.push(id, req.user.company);
 
   try {
@@ -814,7 +820,7 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
       `UPDATE plans SET ${set} WHERE id=$${values.length - 1} AND company=$${values.length} RETURNING *`,
       values
     );
-    if (!result.rows.length) return res.status(404).json({ message: "Plan not found or not in your company" });
+    if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
     res.json({ message: "Plan updated", plan: result.rows[0] });
   } catch (e) {
     console.log("UPDATE PLAN ERROR:", e.message);
