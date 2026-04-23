@@ -16,58 +16,7 @@ app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-app.post('/api/wallet/create-dva', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    
-    // Get user details INCLUDING phone
-    const userResult = await pool.query(
-      'SELECT email, username, phone FROM users WHERE id = $1', 
-      [userId]
-    );
-    const user = userResult.rows[0];
-    
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    if (!user.phone) return res.status(400).json({ error: 'Phone number missing. Update profile first.' });
 
-    // Create dedicated account on Paystack using DB phone
-    const response = await axios.post('https://api.paystack.co/dedicated_account', {
-      customer: user.email,
-      preferred_bank: 'wema-bank',
-      phone: user.phone,  // <-- Now pulls from DB
-      first_name: user.username,
-      last_name: 'VTU'
-    }, {
-      headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    const account = response.data.data;
-    
-    // Save to DB
-    await pool.query(
-      `UPDATE users SET 
-        dva_account_number = $1, 
-        dva_bank_name = $2,
-        dva_account_name = $3
-       WHERE id = $4`,
-      [account.account_number, account.bank.name, account.account_name, userId]
-    );
-
-    res.json({ 
-      success: true, 
-      account_number: account.account_number,
-      bank_name: account.bank.name,
-      account_name: account.account_name
-    });
-
-  } catch (error) {
-    console.error('DVA Error:', error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data?.message || 'Failed to create virtual account' });
-  }
-});
 /* ================= CONFIG ================= */
 const ADMIN_EMAILS = [
   "abubakarmubarak3456@gmail.com",
@@ -83,7 +32,7 @@ console.log("Loaded Paystack keys for:", Object.keys(PAYSTACK_KEYS));
 /* ================= VTU PROVIDER CONFIG - MULTI COMPANY ================= */
 const VTU_PROVIDERS = {
   maitama: {
-    base_url: process.env.MAITAMA_BASE_URL, // https://app.maitamadatahub.com
+    base_url: process.env.MAITAMA_BASE_URL,
     tokens: {
       mayconnect: process.env.MAITAMA_TOKEN_MAYCONNECT,
       teeversh: process.env.MAITAMA_TOKEN_TEEVERSH,
@@ -217,7 +166,7 @@ async function callMaitamaData(phone, network_id, api_plan_id, company) {
   const payload = {
     plan: Number(api_plan_id),
     mobile_number: String(phone),
-    network: Number(network_id) // 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+    network: Number(network_id)
   };
 
   console.log(`[Maitama] ${company} REQUEST:`, {
@@ -316,6 +265,66 @@ function adminOnly(req, res, next) {
   next();
 }
 
+/* ================= TEMP HASH GENERATOR - DELETE AFTER USE ================= */
+app.get('/api/generate-hash', async (req, res) => {
+  const hash = await bcrypt.hash('admin123', 10);
+  res.json({
+    password: 'admin123',
+    hash: hash
+  });
+});
+
+/* ================= DVA ROUTE - FIXED ================= */
+app.post('/api/wallet/create-dva', auth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const userResult = await pool.query(
+      'SELECT email, username, phone FROM users WHERE id = $1',
+      [userId]
+    );
+    const user = userResult.rows[0];
+
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.phone) return res.status(400).json({ error: 'Phone number missing. Update profile first.' });
+
+    const response = await axios.post('https://api.paystack.co/dedicated_account', {
+      customer: user.email,
+      preferred_bank: 'wema-bank',
+      phone: user.phone,
+      first_name: user.username,
+      last_name: 'VTU'
+    }, {
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const account = response.data.data;
+
+    await pool.query(
+      `UPDATE users SET
+        dva_account_number = $1,
+        dva_bank_name = $2,
+        dva_account_name = $3
+       WHERE id = $4`,
+      [account.account_number, account.bank.name, account.account_name, userId]
+    );
+
+    res.json({
+      success: true,
+      account_number: account.account_number,
+      bank_name: account.bank.name,
+      account_name: account.account_name
+    });
+
+  } catch (error) {
+    console.error('DVA Error:', error.response?.data || error.message);
+    res.status(500).json({ error: error.response?.data?.message || 'Failed to create virtual account' });
+  }
+});
+
 /* ================= SIGNUP ================= */
 app.post("/api/signup", async (req, res) => {
   try {
@@ -368,10 +377,7 @@ app.post("/api/login", async (req, res) => {
   );
   res.json({ token });
 });
-app.get('/api/generate-hash', async (req, res) => {
-  const hash = await bcrypt.hash('admin123', 10);
-  res.json({ hash });
-});
+
 /* ================= USER INFO ================= */
 app.get("/api/me", auth, async (req, res) => {
   try {
@@ -749,7 +755,6 @@ app.post("/admin/top-users/add", auth, adminOnly, async (req, res) => {
   );
   if (!result.rows.length) return res.status(404).json({ message: "User not found in your company" });
 
-  // Broadcast to all clients so prices update instantly
   broadcastTopUserUpdate(req.user.company);
 
   res.json({ message: "Top user added", user: result.rows[0] });
@@ -763,7 +768,6 @@ app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
   );
   if (!result.rows.length) return res.status(404).json({ message: "User not found in your company" });
 
-  // Broadcast to all clients so prices update instantly
   broadcastTopUserUpdate(req.user.company);
 
   res.json({ message: "Top user removed" });
@@ -867,13 +871,13 @@ app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
   );
   if (!result.rows.length) return res.status(404).json({ message: "User not found" });
 
-  // If top_user status changed, broadcast update
   if (is_top_user!== undefined) {
     broadcastTopUserUpdate(req.user.company);
   }
 
   res.json({ message: "User updated", user: result.rows[0] });
 });
+
 
 
 /* ================= ADMIN: WITHDRAWALS ================= */
