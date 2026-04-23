@@ -849,7 +849,32 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
 app.get("/", (req, res) => {
   res.send("MAYCONNECT API Live");
 });
-
+async function callMaitamaData(phone, network_id, api_plan_id) {
+  const { base_url, api_token } = VTU_PROVIDERS.maitama;
+  
+  console.log("MAITAMA REQUEST:", {
+    url: `${base_url}/buydata`,
+    payload: { network: network_id, plan: api_plan_id, phone },
+    token_exists: !!api_token
+  });
+  
+  try {
+    const res = await axios.post(
+      `${base_url}/buydata`,
+      { 
+        network: String(network_id),  // Force string
+        plan: String(api_plan_id),    // Force string
+        phone: String(phone)
+      },
+      { headers: { Authorization: `Bearer ${api_token}` } }
+    );
+    console.log("MAITAMA SUCCESS:", res.data);
+    return res.data;
+  } catch (err) {
+    console.log("MAITAMA RAW ERROR:", err.response?.status, err.response?.data);
+    throw new Error(err.response?.data?.message || "Maitama API error");
+  }
+}
 /* ================= START ================= */
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on ${PORT}`));
