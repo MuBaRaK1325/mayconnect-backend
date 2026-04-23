@@ -12,9 +12,7 @@ const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 
 const app = express();
-
-// ===== FIX: Tell Express to trust Render's proxy =====
-app.set('trust proxy', 1); // ADD THIS LINE - must be before rate limiters
+app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -31,12 +29,16 @@ const ADMIN_EMAILS = [
 const PAYSTACK_KEYS = JSON.parse(process.env.PAYSTACK_KEYS || "{}");
 console.log("Loaded Paystack keys for:", Object.keys(PAYSTACK_KEYS));
 
-/* ================= VTU PROVIDER CONFIG ================= */
+/* ================= VTU PROVIDER CONFIG - MULTI COMPANY ================= */
 const VTU_PROVIDERS = {
   maitama: {
-    base_url: process.env.MAITAMA_BASE_URL,
-    api_token: process.env.MAITAMA_API_TOKEN,
-    secret: process.env.MAITAMA_SECRET_KEY
+    base_url: process.env.MAITAMA_BASE_URL, // https://app.maitamadatahub.com
+    tokens: {
+      mayconnect: process.env.MAITAMA_TOKEN_MAYCONNECT,
+      teeversh: process.env.MAITAMA_TOKEN_TEEVERSH,
+      sadeeq: process.env.MAITAMA_TOKEN_SADEEQ,
+      bnhabeeb: process.env.MAITAMA_TOKEN_BNHABEEB
+    }
   },
   cheapdatahub: {
     data_url: process.env.CHEAPDATAHUB_DATA_URL,
@@ -154,16 +156,51 @@ async function createDedicatedAccount(user) {
   }
 }
 
-/* ================= VTU API CALLS ================= */
-async function callMaitamaData(phone, network_id, api_plan_id) {
-  const { base_url, api_token } = VTU_PROVIDERS.maitama;
-  const res = await axios.post(
-    `${base_url}/buydata`,
-    { network: network_id, plan: api_plan_id, phone },
-    { headers: { Authorization: `Bearer ${api_token}` } }
-  );
-  if (res.data.status!== "success" && res.data.status!== true) throw new Error(res.data.message || "Maitama failed");
-  return res.data;
+/* ================= VTU API CALLS - MAITAMA FIXED ================= */
+async function callMaitamaData(phone, network_id, api_plan_id, company) {
+  const { base_url, tokens } = VTU_PROVIDERS.maitama;
+  const api_token = tokens[company];
+
+  if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
+
+  const payload = {
+    plan: Number(api_plan_id),
+    mobile_number: String(phone),
+    network: Number(network_id) // 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+  };
+
+  console.log(`[Maitama] ${company} REQUEST:`, {
+    url: `${base_url}/api/data`,
+    payload,
+    token_exists:!!api_token
+  });
+
+  try {
+    const res = await axios.post(
+      `${base_url}/api/data`,
+      payload,
+      {
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${api_token}`
+        },
+        timeout: 30000
+      }
+    );
+
+    console.log(`[Maitama] ${company} SUCCESS:`, res.data);
+
+    const status = res.data.Status || res.data.status;
+    if (status?.toLowerCase()!== "successful" && status?.toLowerCase()!== "success") {
+      throw new Error(res.data.api_response || res.data.message || "Maitama purchase failed");
+    }
+
+    return res.data;
+  } catch (err) {
+    console.log(`[Maitama] ${company} ERROR:`, err.response?.status, err.response?.data);
+    throw new Error(err.response?.data?.api_response || err.response?.data?.message || err.message || "Maitama API error");
+  }
 }
 
 async function callCheapDataHubData(phone, network_id, api_plan_id) {
@@ -198,9 +235,18 @@ wss.on("connection", (ws, req) => {
     ws.close();
   }
 });
+
 function sendWalletUpdate(userId, balance) {
   const ws = clients.get(userId);
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "wallet_update", balance }));
+}
+
+function broadcastTopUserUpdate(company) {
+  for (const [userId, ws] of clients.entries()) {
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: "top_user_update", company }));
+    }
+  }
 }
 
 /* ================= AUTH ================= */
@@ -312,7 +358,7 @@ app.get("/api/transactions", auth, async (req, res) => {
   res.json(tx.rows);
 });
 
-/* ================= PLANS ================= */
+/* ================= PLANS - INSTANT TOP USER PRICING ================= */
 app.get("/api/plans", auth, async (req, res) => {
   const user = await pool.query("SELECT is_top_user, company FROM users WHERE id=$1", [req.user.id]);
   const { is_top_user, company } = user.rows[0];
@@ -375,7 +421,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
 
     try {
       if (plan.provider === "maitama") {
-        await callMaitamaData(phone, plan.network_id, plan.api_plan_id);
+        await callMaitamaData(phone, plan.network_id, plan.api_plan_id, user.company);
       } else if (plan.provider === "cheapdatahub") {
         await callCheapDataHubData(phone, plan.network_id, plan.api_plan_id);
       } else if (plan.provider === "subpadi") {
@@ -624,7 +670,7 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
   });
 });
 
-/* ================= ADMIN: TOP USERS ================= */
+/* ================= ADMIN: TOP USERS - WITH WS BROADCAST ================= */
 app.get("/admin/top-users", auth, adminOnly, async (req, res) => {
   const users = await pool.query(
     `SELECT u.id,u.username,u.email,u.company,u.is_top_user,
@@ -644,27 +690,35 @@ app.get("/admin/top-users", auth, adminOnly, async (req, res) => {
 app.post("/admin/top-users/add", auth, adminOnly, async (req, res) => {
   const { email } = req.body;
   const result = await pool.query(
-    "UPDATE users SET is_top_user=true WHERE email=$1 AND company=$2 RETURNING id,username,email",
+    "UPDATE users SET is_top_user=true WHERE email=$1 AND company=$2 RETURNING id,username,email,company",
     [email, req.user.company]
   );
   if (!result.rows.length) return res.status(404).json({ message: "User not found in your company" });
+
+  // Broadcast to all clients so prices update instantly
+  broadcastTopUserUpdate(req.user.company);
+
   res.json({ message: "Top user added", user: result.rows[0] });
 });
 
 app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
   const { email } = req.body;
   const result = await pool.query(
-    "UPDATE users SET is_top_user=false WHERE email=$1 AND company=$2 RETURNING id",
+    "UPDATE users SET is_top_user=false WHERE email=$1 AND company=$2 RETURNING id,company",
     [email, req.user.company]
   );
   if (!result.rows.length) return res.status(404).json({ message: "User not found in your company" });
+
+  // Broadcast to all clients so prices update instantly
+  broadcastTopUserUpdate(req.user.company);
+
   res.json({ message: "Top user removed" });
 });
 
-/* ================= ADMIN: PLANS MANAGER - FULL CONTROL ================= */
+/* ================= ADMIN: PLANS MANAGER ================= */
 app.get("/admin/plans", auth, adminOnly, async (req, res) => {
   const plans = await pool.query(
-    "SELECT * FROM plans WHERE company=$1 OR company IS NULL ORDER BY network, price",
+    "SELECT * FROM plans WHERE company=$1 ORDER BY network, price",
     [req.user.company]
   );
   res.json(plans.rows);
@@ -754,12 +808,19 @@ app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
 
   values.push(id, req.user.company);
   const result = await pool.query(
-    `UPDATE users SET ${updates.join(",")} WHERE id=$${idx} AND company=$${idx + 1} RETURNING id,username,email,is_top_user,wallet_balance`,
+    `UPDATE users SET ${updates.join(",")} WHERE id=$${idx} AND company=$${idx + 1} RETURNING id,username,email,is_top_user,wallet_balance,company`,
     values
   );
   if (!result.rows.length) return res.status(404).json({ message: "User not found" });
+
+  // If top_user status changed, broadcast update
+  if (is_top_user!== undefined) {
+    broadcastTopUserUpdate(req.user.company);
+  }
+
   res.json({ message: "User updated", user: result.rows[0] });
 });
+
 
 /* ================= ADMIN: WITHDRAWALS ================= */
 app.get("/admin/withdrawals", auth, adminOnly, async (req, res) => {
@@ -849,32 +910,6 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
 app.get("/", (req, res) => {
   res.send("MAYCONNECT API Live");
 });
-async function callMaitamaData(phone, network_id, api_plan_id) {
-  const { base_url, api_token } = VTU_PROVIDERS.maitama;
-  
-  console.log("MAITAMA REQUEST:", {
-    url: `${base_url}/buydata`,
-    payload: { network: network_id, plan: api_plan_id, phone },
-    token_exists: !!api_token
-  });
-  
-  try {
-    const res = await axios.post(
-      `${base_url}/buydata`,
-      { 
-        network: String(network_id),  // Force string
-        plan: String(api_plan_id),    // Force string
-        phone: String(phone)
-      },
-      { headers: { Authorization: `Bearer ${api_token}` } }
-    );
-    console.log("MAITAMA SUCCESS:", res.data);
-    return res.data;
-  } catch (err) {
-    console.log("MAITAMA RAW ERROR:", err.response?.status, err.response?.data);
-    throw new Error(err.response?.data?.message || "Maitama API error");
-  }
-}
 /* ================= START ================= */
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on ${PORT}`));
