@@ -16,7 +16,58 @@ app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+app.post('/api/wallet/create-dva', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    // Get user details INCLUDING phone
+    const userResult = await pool.query(
+      'SELECT email, username, phone FROM users WHERE id = $1', 
+      [userId]
+    );
+    const user = userResult.rows[0];
+    
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.phone) return res.status(400).json({ error: 'Phone number missing. Update profile first.' });
 
+    // Create dedicated account on Paystack using DB phone
+    const response = await axios.post('https://api.paystack.co/dedicated_account', {
+      customer: user.email,
+      preferred_bank: 'wema-bank',
+      phone: user.phone,  // <-- Now pulls from DB
+      first_name: user.username,
+      last_name: 'VTU'
+    }, {
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const account = response.data.data;
+    
+    // Save to DB
+    await pool.query(
+      `UPDATE users SET 
+        dva_account_number = $1, 
+        dva_bank_name = $2,
+        dva_account_name = $3
+       WHERE id = $4`,
+      [account.account_number, account.bank.name, account.account_name, userId]
+    );
+
+    res.json({ 
+      success: true, 
+      account_number: account.account_number,
+      bank_name: account.bank.name,
+      account_name: account.account_name
+    });
+
+  } catch (error) {
+    console.error('DVA Error:', error.response?.data || error.message);
+    res.status(500).json({ error: error.response?.data?.message || 'Failed to create virtual account' });
+  }
+});
 /* ================= CONFIG ================= */
 const ADMIN_EMAILS = [
   "abubakarmubarak3456@gmail.com",
@@ -317,7 +368,10 @@ app.post("/api/login", async (req, res) => {
   );
   res.json({ token });
 });
-
+app.get('/api/generate-hash', async (req, res) => {
+  const hash = await bcrypt.hash('admin123', 10);
+  res.json({ hash });
+});
 /* ================= USER INFO ================= */
 app.get("/api/me", auth, async (req, res) => {
   try {
