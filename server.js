@@ -12,6 +12,10 @@ const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 
 const app = express();
+
+// ===== FIX: Tell Express to trust Render's proxy =====
+app.set('trust proxy', 1); // ADD THIS LINE - must be before rate limiters
+
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
@@ -319,7 +323,7 @@ app.get("/api/plans", auth, async (req, res) => {
   );
 
   const result = plans.rows.map(p => ({
-...p,
+   ...p,
     price: is_top_user? (p.top_price || p.price) : p.price
   }));
   res.json(result);
@@ -832,14 +836,14 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
     await client.query("COMMIT");
     const user = await getUser(t.user_id);
     sendWalletUpdate(t.user_id, user.wallet_balance);
-   res.json({ message: "Transaction reversed" });
+    res.json({ message: "Transaction reversed" });
   } catch (e) {
     await client.query("ROLLBACK");
     res.status(400).json({ message: e.message });
   } finally {
     client.release();
-  }  // <- Close finally
-});  // <- Close app.post route
+  }
+});
 
 // Add this for UptimeRobot
 app.get("/", (req, res) => {
