@@ -20,17 +20,16 @@ app.use(cors());
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Neon DB
+// Neon DB connection - only declare pool once
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// VAPID - Same keys for all 4 companies
+// VAPID setup for push notifications - 1 Firebase project for all 4 companies
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC;
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE;
 webpush.setVapidDetails('mailto:support@teeversh.com', VAPID_PUBLIC, VAPID_PRIVATE);
-
 // SQL to run once in Neon:
 /*
 CREATE TABLE push_subscriptions (
