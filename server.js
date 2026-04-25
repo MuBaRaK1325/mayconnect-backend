@@ -10,20 +10,15 @@ const { v4: uuidv4 } = require("uuid");
 const axios = require("axios");
 const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
+const webpush = require("web-push");
 
 const app = express();
 app.set('trust proxy', 1);
+app.use(express.json());
+app.use(cors());
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-const express = require('express');
-const { Pool } = require('pg');
-const webpush = require('web-push');
-const cors = require('cors');
-
-const app = express();
-app.use(express.json());
-app.use(cors());
 
 // Neon DB
 const pool = new Pool({
