@@ -14,92 +14,31 @@ const webpush = require("web-push");
 
 const app = express();
 app.set('trust proxy', 1);
-app.use(express.json());
-app.use(cors());
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// VAPID setup for push notifications - 1 Firebase project for all 4 companies
+// Middleware
+app.use((req, res, next) => {
+  if (req.originalUrl === "/api/paystack/webhook") {
+    express.raw({ type: "application/json" })(req, res, next);
+  } else {
+    express.json()(req, res, next);
+  }
+});
+app.use(cors({ origin: "*" }));
+
+/* ================= DATABASE ================= */
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+/* ================= VAPID - 1 Firebase for all 4 companies ================= */
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC;
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE;
 webpush.setVapidDetails('mailto:support@teeversh.com', VAPID_PUBLIC, VAPID_PRIVATE);
 
-// SQL to run once in Neon:
-/*
-CREATE TABLE push_subscriptions (
-  id SERIAL PRIMARY KEY,
-  company_id TEXT NOT NULL,
-  user_id TEXT NOT NULL,
-  subscription JSONB NOT NULL,
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(company_id, user_id)
-);
-*/
-
-// Save subscription
-app.post('/api/save-push-sub', async (req, res) => {
-  try {
-    const {company_id, user_id, subscription} = req.body;
-    if (!company_id ||!user_id ||!subscription) {
-      return res.status(400).json({success: false, error: 'Missing data'});
-    }
-
-    await pool.query(
-      `INSERT INTO push_subscriptions (company_id, user_id, subscription)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (company_id, user_id)
-       DO UPDATE SET subscription = $3, updated_at = NOW()`,
-      [company_id, user_id, subscription]
-    );
-    res.json({success: true});
-  } catch (err) {
-    console.error('Save push sub error:', err);
-    res.status(500).json({success: false});
-  }
-});
-
-// Send push - call this from your wallet/data/airtime endpoints
-async function sendPushNotification(company_id, user_id, payload) {
-  try {
-    const result = await pool.query(
-      'SELECT subscription FROM push_subscriptions WHERE company_id = $1 AND user_id = $2',
-      [company_id, user_id]
-    );
-    if (result.rows.length === 0) return false;
-
-    await webpush.sendNotification(
-      result.rows[0].subscription,
-      JSON.stringify(payload)
-    );
-    return true;
-  } catch (err) {
-    console.error(`Push failed for ${company_id}:`, err.message);
-    if (err.statusCode === 410 || err.statusCode === 404) {
-      await pool.query(
-        'DELETE FROM push_subscriptions WHERE company_id = $1 AND user_id = $2',
-        [company_id, user_id]
-      );
-    }
-    return false;
-  }
-}
-
-// Example: Trigger push after funding
-app.post('/api/test-push', async (req, res) => {
-  const {company_id, user_id} = req.body;
-  await sendPushNotification(company_id, user_id, {
-    title: `${company_id.toUpperCase()} Test`,
-    body: 'Push notifications are working!',
-    url: '/dashboard.html'
-  });
-  res.json({sent: true});
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
-
-module.exports = { app, sendPushNotification };
 /* ================= CONFIG ================= */
 const ADMIN_EMAILS = [
   "abubakarmubarak3456@gmail.com",
@@ -112,7 +51,7 @@ const ADMIN_EMAILS = [
 const PAYSTACK_KEYS = JSON.parse(process.env.PAYSTACK_KEYS || "{}");
 console.log("Loaded Paystack keys for:", Object.keys(PAYSTACK_KEYS));
 
-/* ================= VTU PROVIDER CONFIG - MULTI COMPANY ================= */
+/* ================= VTU PROVIDER CONFIG ================= */
 const VTU_PROVIDERS = {
   maitama: {
     base_url: process.env.MAITAMA_BASE_URL,
@@ -124,14 +63,12 @@ const VTU_PROVIDERS = {
     }
   },
   cheapdatahub: {
-    data_url: process.env.CHEAPDATAHUB_DATA_URL,
-    airtime_url: process.env.CHEAPDATAHUB_AIRTIME_URL,
-    token: process.env.CHEAPDATAHUB_TOKEN,
-    userid: process.env.CHEAPDATAHUB_USERID
+    base_url: "https://www.cheapdatahub.ng/api/v1/resellers",
+    api_key: process.env.CHEAPDATAHUB_API_KEY
   },
   subpadi: {
-    base_url: process.env.SUBPADI_BASE_URL,
-    api_key: process.env.SUBPADI_KEY
+    base_url: "https://api.subpadi.com",
+    token: process.env.SUBPADI_TOKEN
   }
 };
 
@@ -150,22 +87,6 @@ const fundInitLimiter = rateLimit({
   message: { message: "Too many funding requests. Try again in 1 minute." },
   standardHeaders: true,
   legacyHeaders: false,
-});
-
-/* ================= MIDDLEWARE ================= */
-app.use(cors({ origin: "*" }));
-app.use((req, res, next) => {
-  if (req.originalUrl === "/api/paystack/webhook") {
-    express.raw({ type: "application/json" })(req, res, next);
-  } else {
-    express.json()(req, res, next);
-  }
-});
-
-/* ================= DATABASE ================= */
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
 });
 
 /* ================= HELPERS ================= */
@@ -239,11 +160,79 @@ async function createDedicatedAccount(user) {
   }
 }
 
-/* ================= VTU API CALLS - MAITAMA FIXED ================= */
+/* ================= PUSH NOTIFICATION ================= */
+// SQL to run once in Neon:
+/*
+CREATE TABLE push_subscriptions (
+  id SERIAL PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  subscription JSONB NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(company_id, user_id)
+);
+*/
+
+app.post('/api/save-push-sub', async (req, res) => {
+  try {
+    const {company_id, user_id, subscription} = req.body;
+    if (!company_id ||!user_id ||!subscription) {
+      return res.status(400).json({success: false, error: 'Missing data'});
+    }
+
+    await pool.query(
+      `INSERT INTO push_subscriptions (company_id, user_id, subscription)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (company_id, user_id)
+       DO UPDATE SET subscription = $3, updated_at = NOW()`,
+      [company_id, user_id, subscription]
+    );
+    res.json({success: true});
+  } catch (err) {
+    console.error('Save push sub error:', err);
+    res.status(500).json({success: false});
+  }
+});
+
+async function sendPushNotification(company_id, user_id, payload) {
+  try {
+    const result = await pool.query(
+      'SELECT subscription FROM push_subscriptions WHERE company_id = $1 AND user_id = $2',
+      [company_id, user_id]
+    );
+    if (result.rows.length === 0) return false;
+
+    await webpush.sendNotification(
+      result.rows[0].subscription,
+      JSON.stringify(payload)
+    );
+    return true;
+  } catch (err) {
+    console.error(`Push failed for ${company_id}:`, err.message);
+    if (err.statusCode === 410 || err.statusCode === 404) {
+      await pool.query(
+        'DELETE FROM push_subscriptions WHERE company_id = $1 AND user_id = $2',
+        [company_id, user_id]
+      );
+    }
+    return false;
+  }
+}
+
+app.post('/api/test-push', async (req, res) => {
+  const {company_id, user_id} = req.body;
+  await sendPushNotification(company_id, user_id, {
+    title: `${company_id.toUpperCase()} Test`,
+    body: 'Push notifications are working!',
+    url: '/dashboard.html'
+  });
+  res.json({sent: true});
+});
+
+/* ================= VTU API CALLS ================= */
 async function callMaitamaData(phone, network_id, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.maitama;
   const api_token = tokens[company];
-
   if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
 
   const payload = {
@@ -252,57 +241,71 @@ async function callMaitamaData(phone, network_id, api_plan_id, company) {
     network: Number(network_id)
   };
 
-  console.log(`[Maitama] ${company} REQUEST:`, {
-    url: `${base_url}/api/data`,
+  console.log(`[Maitama] ${company} REQUEST:`, { url: `${base_url}/api/data`, payload });
+
+  const res = await axios.post(
+    `${base_url}/api/data`,
     payload,
-    token_exists:!!api_token
-  });
-
-  try {
-    const res = await axios.post(
-      `${base_url}/api/data`,
-      payload,
-      {
-        headers: {
-          "Accept": "application/json",
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${api_token}`
-        },
-        timeout: 30000
-      }
-    );
-
-    console.log(`[Maitama] ${company} SUCCESS:`, res.data);
-
-    const status = res.data.Status || res.data.status;
-    if (status?.toLowerCase()!== "successful" && status?.toLowerCase()!== "success") {
-      throw new Error(res.data.api_response || res.data.message || "Maitama purchase failed");
+    {
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${api_token}`
+      },
+      timeout: 30000
     }
+  );
 
-    return res.data;
-  } catch (err) {
-    console.log(`[Maitama] ${company} ERROR:`, err.response?.status, err.response?.data);
-    throw new Error(err.response?.data?.api_response || err.response?.data?.message || err.message || "Maitama API error");
+  const status = res.data.Status || res.data.status;
+  if (status?.toLowerCase()!== "successful" && status?.toLowerCase()!== "success") {
+    throw new Error(res.data.api_response || res.data.message || "Maitama purchase failed");
   }
+  return res.data;
 }
 
 async function callCheapDataHubData(phone, network_id, api_plan_id) {
-  const { data_url, token, userid } = VTU_PROVIDERS.cheapdatahub;
+  const { base_url, api_key } = VTU_PROVIDERS.cheapdatahub;
   const res = await axios.post(
-    data_url,
-    { network: network_id, plan: api_plan_id, mobile_number: phone, Ported_number: true, userid, api_token: token }
+    `${base_url}/data/purchase/`,
+    {
+      provider_id: network_id,
+      phone_number: phone,
+      bundle_id: api_plan_id
+    },
+    { headers: { Authorization: `Bearer ${api_key}` } }
   );
-  if (res.data.status!== "successful") throw new Error(res.data.message || "CheapDataHub failed");
+  if (res.data.status!== "true") throw new Error(res.data.message || "CheapDataHub failed");
+  return res.data;
+}
+
+async function callCheapDataHubAirtime(phone, network_id, amount) {
+  const { base_url, api_key } = VTU_PROVIDERS.cheapdatahub;
+  const res = await axios.post(
+    `${base_url}/airtime/purchase/`,
+    {
+      provider_id: network_id,
+      phone_number: phone,
+      amount: amount
+    },
+    { headers: { Authorization: `Bearer ${api_key}` } }
+  );
+  if (res.data.status!== "true") throw new Error(res.data.message || "CheapDataHub failed");
   return res.data;
 }
 
 async function callSubPadiData(phone, network_id, api_plan_id) {
-  const { base_url, api_key } = VTU_PROVIDERS.subpadi;
+  const { base_url, token } = VTU_PROVIDERS.subpadi;
   const res = await axios.post(
-    `${base_url}/data`,
-    { network: network_id, plan: api_plan_id, phone, api_key }
+    `${base_url}/v1/data/`,
+    {
+      mobile_number: phone,
+      network: network_id,
+      plan: api_plan_id,
+      Ported_number: false
+    },
+    { headers: { Authorization: `Token ${token}` } }
   );
-  if (!res.data.status) throw new Error(res.data.message || "SubPadi failed");
+  if (res.data.Status!== "successful") throw new Error(res.data.message || "SubPadi failed");
   return res.data;
 }
 
@@ -348,29 +351,22 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= TEMP HASH GENERATOR - DELETE AFTER USE ================= */
+/* ================= TEMP HASH GENERATOR ================= */
 app.get('/api/generate-hash', async (req, res) => {
   const hash = await bcrypt.hash('admin123', 10);
-  res.json({
-    password: 'admin123',
-    hash: hash
-  });
+  res.json({ password: 'admin123', hash: hash });
 });
 
-/* ================= DVA ROUTE - FIXED ================= */
+/* ================= DVA ROUTE ================= */
 app.post('/api/wallet/create-dva', auth, async (req, res) => {
   try {
     const userId = req.user.id;
-
-    const userResult = await pool.query(
-      'SELECT email, username, phone FROM users WHERE id = $1',
-      [userId]
-    );
+    const userResult = await pool.query('SELECT email, username, phone FROM users WHERE id = $1', [userId]);
     const user = userResult.rows[0];
-
     if (!user) return res.status(404).json({ error: 'User not found' });
     if (!user.phone) return res.status(400).json({ error: 'Phone number missing. Update profile first.' });
 
+    const paystackSecret = getPaystackKey(req.user.company, "secret");
     const response = await axios.post('https://api.paystack.co/dedicated_account', {
       customer: user.email,
       preferred_bank: 'wema-bank',
@@ -379,19 +375,14 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       last_name: 'VTU'
     }, {
       headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        Authorization: `Bearer ${paystackSecret}`,
         'Content-Type': 'application/json'
       }
     });
 
     const account = response.data.data;
-
     await pool.query(
-      `UPDATE users SET
-        dva_account_number = $1,
-        dva_bank_name = $2,
-        dva_account_name = $3
-       WHERE id = $4`,
+      `UPDATE users SET dva_account_number = $1, dva_bank_name = $2, dva_account_name = $3 WHERE id = $4`,
       [account.account_number, account.bank.name, account.account_name, userId]
     );
 
@@ -401,7 +392,6 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       bank_name: account.bank.name,
       account_name: account.account_name
     });
-
   } catch (error) {
     console.error('DVA Error:', error.response?.data || error.message);
     res.status(500).json({ error: error.response?.data?.message || 'Failed to create virtual account' });
@@ -501,7 +491,7 @@ app.get("/api/transactions", auth, async (req, res) => {
   res.json(tx.rows);
 });
 
-/* ================= PLANS - INSTANT TOP USER PRICING ================= */
+/* ================= PLANS - Company isolated ================= */
 app.get("/api/plans", auth, async (req, res) => {
   const user = await pool.query("SELECT is_top_user, company FROM users WHERE id=$1", [req.user.id]);
   const { is_top_user, company } = user.rows[0];
@@ -518,7 +508,7 @@ app.get("/api/plans", auth, async (req, res) => {
   res.json(result);
 });
 
-/* ================= BUY DATA - WITH VTU ROUTING ================= */
+/* ================= BUY DATA - Multi-provider ================= */
 app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -548,6 +538,12 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     if (!plan.provider ||!plan.network_id ||!plan.api_plan_id) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
+    }
+
+    // CheapDataHub + SubPadi only for MAYCONNECT
+    if ((plan.provider === "cheapdatahub" || plan.provider === "subpadi") && user.company!== "mayconnect") {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ message: "This provider is only available for Mayconnect" });
     }
 
     const price = user.is_top_user? (plan.top_price || plan.price) : plan.price;
@@ -598,6 +594,13 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
 
     await client.query("COMMIT");
     sendWalletUpdate(user.id, newBalance);
+
+    await sendPushNotification(user.company, user.id, {
+      title: `${user.company.toUpperCase()} - Data Purchase`,
+      body: `Your ${plan.name} purchase for ${phone} was successful`,
+      url: '/dashboard.html'
+    });
+
     res.json({ success: true, reference: ref, balance: newBalance });
   } catch (e) {
     await client.query("ROLLBACK");
@@ -608,7 +611,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   }
 });
 
-/* ================= BUY AIRTIME ================= */
+/* ================= BUY AIRTIME - CheapDataHub only for MAYCONNECT ================= */
 app.post("/api/buy-airtime", auth, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -620,7 +623,7 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
 
     if (user.company!== "mayconnect") {
       await client.query("ROLLBACK");
-      return res.status(403).json({ message: "Airtime disabled for your company" });
+      return res.status(403).json({ message: "Airtime only available for Mayconnect" });
     }
     if (!await bcrypt.compare(pin, user.pin)) {
       await client.query("ROLLBACK");
@@ -636,6 +639,15 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
 
     const ref = "AIRTIME-" + uuidv4();
     const cost = Number(amount) * 0.98;
+
+    try {
+      await callCheapDataHubAirtime(phone, network, amount);
+    } catch (vtuErr) {
+      console.log("VTU API ERROR:", vtuErr.message);
+      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [amount, user.id]);
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Purchase failed: " + vtuErr.message });
+    }
 
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status)
@@ -656,6 +668,13 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
 
     await client.query("COMMIT");
     sendWalletUpdate(user.id, newBalance);
+
+    await sendPushNotification(user.company, user.id, {
+      title: `${user.company.toUpperCase()} - Airtime Purchase`,
+      body: `Your ₦${amount} airtime for ${phone} was successful`,
+      url: '/dashboard.html'
+    });
+
     res.json({ success: true, reference: ref, balance: newBalance });
   } catch (e) {
     await client.query("ROLLBACK");
@@ -742,6 +761,12 @@ app.post("/api/paystack/webhook", async (req, res) => {
 
         await client.query("COMMIT");
         sendWalletUpdate(user_id, newBalance);
+
+        await sendPushNotification(userRes.rows[0].company, user_id, {
+          title: `${userRes.rows[0].company.toUpperCase()} - Wallet Funded`,
+          body: `Your wallet was credited with ₦${amount}`,
+          url: '/dashboard.html'
+        });
       } catch (e) {
         await client.query("ROLLBACK");
         console.log("WEBHOOK TX ERROR:", e.message);
@@ -813,7 +838,7 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
   });
 });
 
-/* ================= ADMIN: TOP USERS - WITH WS BROADCAST ================= */
+/* ================= ADMIN: TOP USERS ================= */
 app.get("/admin/top-users", auth, adminOnly, async (req, res) => {
   const users = await pool.query(
     `SELECT u.id,u.username,u.email,u.company,u.is_top_user,
@@ -839,7 +864,6 @@ app.post("/admin/top-users/add", auth, adminOnly, async (req, res) => {
   if (!result.rows.length) return res.status(404).json({ message: "User not found in your company" });
 
   broadcastTopUserUpdate(req.user.company);
-
   res.json({ message: "Top user added", user: result.rows[0] });
 });
 
@@ -852,11 +876,10 @@ app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
   if (!result.rows.length) return res.status(404).json({ message: "User not found in your company" });
 
   broadcastTopUserUpdate(req.user.company);
-
   res.json({ message: "Top user removed" });
 });
 
-/* ================= ADMIN: PLANS MANAGER ================= */
+/* ================= ADMIN: PLANS MANAGER - Company isolated ================= */
 app.get("/admin/plans", auth, adminOnly, async (req, res) => {
   const plans = await pool.query(
     "SELECT * FROM plans WHERE company=$1 ORDER BY network, price",
@@ -864,7 +887,6 @@ app.get("/admin/plans", auth, adminOnly, async (req, res) => {
   );
   res.json(plans.rows);
 });
-
 app.post("/admin/plans", auth, adminOnly, async (req, res) => {
   const { plan_id, network, name, price, top_price, cost, validity, restricted, provider, network_id, api_plan_id } = req.body;
   if (!plan_id ||!network ||!name ||!price ||!cost ||!provider ||!network_id ||!api_plan_id) {
@@ -967,8 +989,6 @@ app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
   res.json({ message: "User updated", user: result.rows[0] });
 });
 
-
-
 /* ================= ADMIN: WITHDRAWALS ================= */
 app.get("/admin/withdrawals", auth, adminOnly, async (req, res) => {
   const wds = await pool.query(
@@ -1031,6 +1051,13 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
     if (tx.rows[0].status === "REVERSED") throw new Error("Already reversed");
 
     const t = tx.rows[0];
+
+    // Ensure reversal only within same company
+    const txUser = await client.query("SELECT company FROM users WHERE id=$1", [t.user_id]);
+    if (txUser.rows[0].company!== req.user.company) {
+      throw new Error("Cannot reverse transaction from another company");
+    }
+
     await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [t.amount, t.user_id]);
     await client.query("UPDATE transactions SET status='REVERSED' WHERE id=$1", [t.id]);
 
@@ -1053,10 +1080,12 @@ app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
   }
 });
 
-// Add this for UptimeRobot
+// Health check for UptimeRobot
 app.get("/", (req, res) => {
   res.send("MAYCONNECT API Live");
 });
+
 /* ================= START ================= */
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on ${PORT}`));
+
