@@ -16,7 +16,101 @@ app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+const express = require('express');
+const { Pool } = require('pg');
+const webpush = require('web-push');
+const cors = require('cors');
 
+const app = express();
+app.use(express.json());
+app.use(cors());
+
+// Neon DB
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// VAPID - Same keys for all 4 companies
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC;
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE;
+webpush.setVapidDetails('mailto:support@teeversh.com', VAPID_PUBLIC, VAPID_PRIVATE);
+
+// SQL to run once in Neon:
+/*
+CREATE TABLE push_subscriptions (
+  id SERIAL PRIMARY KEY,
+  company_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  subscription JSONB NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(company_id, user_id)
+);
+*/
+
+// Save subscription
+app.post('/api/save-push-sub', async (req, res) => {
+  try {
+    const {company_id, user_id, subscription} = req.body;
+    if (!company_id ||!user_id ||!subscription) {
+      return res.status(400).json({success: false, error: 'Missing data'});
+    }
+
+    await pool.query(
+      `INSERT INTO push_subscriptions (company_id, user_id, subscription)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (company_id, user_id)
+       DO UPDATE SET subscription = $3, updated_at = NOW()`,
+      [company_id, user_id, subscription]
+    );
+    res.json({success: true});
+  } catch (err) {
+    console.error('Save push sub error:', err);
+    res.status(500).json({success: false});
+  }
+});
+
+// Send push - call this from your wallet/data/airtime endpoints
+async function sendPushNotification(company_id, user_id, payload) {
+  try {
+    const result = await pool.query(
+      'SELECT subscription FROM push_subscriptions WHERE company_id = $1 AND user_id = $2',
+      [company_id, user_id]
+    );
+    if (result.rows.length === 0) return false;
+
+    await webpush.sendNotification(
+      result.rows[0].subscription,
+      JSON.stringify(payload)
+    );
+    return true;
+  } catch (err) {
+    console.error(`Push failed for ${company_id}:`, err.message);
+    if (err.statusCode === 410 || err.statusCode === 404) {
+      await pool.query(
+        'DELETE FROM push_subscriptions WHERE company_id = $1 AND user_id = $2',
+        [company_id, user_id]
+      );
+    }
+    return false;
+  }
+}
+
+// Example: Trigger push after funding
+app.post('/api/test-push', async (req, res) => {
+  const {company_id, user_id} = req.body;
+  await sendPushNotification(company_id, user_id, {
+    title: `${company_id.toUpperCase()} Test`,
+    body: 'Push notifications are working!',
+    url: '/dashboard.html'
+  });
+  res.json({sent: true});
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+
+module.exports = { app, sendPushNotification };
 /* ================= CONFIG ================= */
 const ADMIN_EMAILS = [
   "abubakarmubarak3456@gmail.com",
