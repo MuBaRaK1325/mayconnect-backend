@@ -357,6 +357,12 @@ app.get('/api/generate-hash', async (req, res) => {
   res.json({ password: 'admin123', hash: hash });
 });
 
+
+app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
+  const creds = await pool.query('SELECT id FROM webauthn_credentials WHERE user_id=$1', [req.user.id]);
+  res.json({ enabled: creds.rows.length > 0 });
+});
+
 /* ================= DVA ROUTE ================= */
 app.post('/api/wallet/create-dva', auth, async (req, res) => {
   try {
