@@ -362,7 +362,7 @@ app.get('/api/generate-hash', async (req, res) => {
 
 /* ================= WEBAUTHN - BIOMETRIC ================= */
 const rpName = 'MAYCONNECT VTU';
-const rpID = process.env.NODE_ENV === 'production'? 'mayconnect-backend-1.onrender.com' : 'localhost';
+const rpID = process.env.NODE_ENV === 'production'? 'onrender.com' : 'localhost';
 
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   const creds = await pool.query('SELECT id FROM webauthn_credentials WHERE user_id=$1', [req.user.id]);
@@ -371,14 +371,12 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   const user = await getUser(req.user.id);
-
-  // v13+ requires Uint8Array for userID
   const userID = new TextEncoder().encode(user.id.toString());
 
   const options = await generateRegistrationOptions({
     rpName,
     rpID,
-    userID: userID, // was user.id.toString()
+    userID: userID,
     userName: user.email,
     attestationType: 'none',
     authenticatorSelection: {
