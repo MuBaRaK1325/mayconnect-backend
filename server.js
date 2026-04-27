@@ -390,7 +390,12 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     authenticatorSelection: {
       authenticatorAttachment: 'platform',
       userVerification: 'required'
-    }
+    },
+    // ADD THIS - fixes "missing default algorithm" warning
+    pubKeyCredParams: [
+      { type: 'public-key', alg: -7 },  // ES256
+      { type: 'public-key', alg: -257 } // RS256
+    ]
   });
 
   await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
