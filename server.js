@@ -362,7 +362,14 @@ app.get('/api/generate-hash', async (req, res) => {
 
 /* ================= WEBAUTHN - BIOMETRIC ================= */
 const rpName = 'MAYCONNECT VTU';
-const rpID = process.env.NODE_ENV === 'production'? 'onrender.com' : 'localhost';
+
+// Helper to get rpID from request origin
+function getRpID(req) {
+  if (process.env.NODE_ENV!== 'production') return 'localhost';
+  const origin = req.headers.origin; // https://teeversh-frontend.onrender.com
+  const url = new URL(origin);
+  return url.hostname; // teeversh-frontend.onrender.com
+}
 
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   const creds = await pool.query('SELECT id FROM webauthn_credentials WHERE user_id=$1', [req.user.id]);
@@ -372,6 +379,7 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   const user = await getUser(req.user.id);
   const userID = new TextEncoder().encode(user.id.toString());
+  const rpID = getRpID(req);
 
   const options = await generateRegistrationOptions({
     rpName,
@@ -391,6 +399,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
+  const rpID = getRpID(req);
 
   try {
     const verification = await verifyRegistrationResponse({
@@ -428,6 +437,8 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
   const creds = await pool.query('SELECT credential_id FROM webauthn_credentials WHERE user_id=$1', [user.rows[0].id]);
   if (!creds.rows.length) return res.status(400).json({ error: 'Biometric not enabled for this user' });
 
+  const rpID = getRpID(req);
+
   const options = await generateAuthenticationOptions({
     rpID,
     userVerification: 'required',
@@ -445,6 +456,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   const { email } = req.body;
   const userRes = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
   const user = userRes.rows[0];
+  const rpID = getRpID(req);
 
   const cred = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2',
     [req.body.id, user.id]);
@@ -488,6 +500,8 @@ app.post('/api/auth/webauthn/verify-purchase', auth, async (req, res) => {
   const creds = await pool.query('SELECT credential_id FROM webauthn_credentials WHERE user_id=$1', [user.id]);
   if (!creds.rows.length) return res.status(400).json({ error: 'Biometric not enabled' });
 
+  const rpID = getRpID(req);
+
   const options = await generateAuthenticationOptions({
     rpID,
     userVerification: 'required',
@@ -503,6 +517,7 @@ app.post('/api/auth/webauthn/verify-purchase', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
+  const rpID = getRpID(req);
   const cred = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2',
     [req.body.id, user.id]);
 
