@@ -11,26 +11,30 @@ const axios = require("axios");
 const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 const webpush = require("web-push");
+const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
 
 const app = express();
 app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+
+// 1. CORS MUST BE FIRST - BEFORE ANYTHING ELSE
 app.use(cors({
   origin: [
     'https://teeversh-frontend.onrender.com',
     'https://mayconnect-frontend.onrender.com',
-    'https://sadeeq-frontend.onrender.com', 
+    'https://sadeeq-frontend.onrender.com',
     'https://bnhabeeb-frontend.onrender.com',
     'http://localhost:3000',
-    'http://localhost:5173' // vite default
+    'http://localhost:5173'
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-// Middleware
+
+// 2. Body parser - special case for webhook
 app.use((req, res, next) => {
   if (req.originalUrl === "/api/paystack/webhook") {
     express.raw({ type: "application/json" })(req, res, next);
@@ -38,7 +42,8 @@ app.use((req, res, next) => {
     express.json()(req, res, next);
   }
 });
-app.use(cors({ origin: "*" }));
+
+// DELETE THIS LINE - IT OVERRIDES YOUR CONFIG: app.use(cors({ origin: "*" }));
 
 /* ================= DATABASE ================= */
 const pool = new Pool({
@@ -173,18 +178,6 @@ async function createDedicatedAccount(user) {
 }
 
 /* ================= PUSH NOTIFICATION ================= */
-// SQL to run once in Neon:
-/*
-CREATE TABLE push_subscriptions (
-  id SERIAL PRIMARY KEY,
-  company_id TEXT NOT NULL,
-  user_id TEXT NOT NULL,
-  subscription JSONB NOT NULL,
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(company_id, user_id)
-);
-*/
-
 app.post('/api/save-push-sub', async (req, res) => {
   try {
     const {company_id, user_id, subscription} = req.body;
@@ -369,10 +362,177 @@ app.get('/api/generate-hash', async (req, res) => {
   res.json({ password: 'admin123', hash: hash });
 });
 
+/* ================= WEBAUTHN - BIOMETRIC ================= */
+const rpName = 'MAYCONNECT VTU';
+const rpID = process.env.NODE_ENV === 'production'? 'mayconnect-backend-1.onrender.com' : 'localhost';
+const origin = process.env.NODE_ENV === 'production'? `https://${rpID}` : 'http://localhost:3000';
 
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   const creds = await pool.query('SELECT id FROM webauthn_credentials WHERE user_id=$1', [req.user.id]);
   res.json({ enabled: creds.rows.length > 0 });
+});
+
+app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
+  const user = await getUser(req.user.id);
+
+  const options = await generateRegistrationOptions({
+    rpName,
+    rpID,
+    userID: user.id.toString(),
+    userName: user.email,
+    attestationType: 'none',
+    authenticatorSelection: {
+      authenticatorAttachment: 'platform',
+      userVerification: 'required'
+    }
+  });
+
+  await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
+  res.json(options);
+});
+
+app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
+  const user = await getUser(req.user.id);
+
+  try {
+    const verification = await verifyRegistrationResponse({
+      response: req.body,
+      expectedChallenge: user.webauthn_challenge,
+      expectedOrigin: req.headers.origin,
+      expectedRPID: rpID
+    });
+
+    if (verification.verified) {
+      const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+
+      await pool.query(
+        `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
+        [user.id, Buffer.from(credentialID).toString('base64url'), Buffer.from(credentialPublicKey).toString('base64url'), counter]
+      );
+
+      await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
+      res.json({ verified: true });
+    } else {
+      res.status(400).json({ verified: false });
+    }
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/auth/webauthn/login-start', async (req, res) => {
+  const { email } = req.body;
+  const user = await pool.query('SELECT id FROM users WHERE email=$1', [email]);
+  if (!user.rows.length) return res.status(400).json({ error: 'User not found' });
+
+  const creds = await pool.query('SELECT credential_id FROM webauthn_credentials WHERE user_id=$1', [user.rows[0].id]);
+  if (!creds.rows.length) return res.status(400).json({ error: 'Biometric not enabled for this user' });
+
+  const options = await generateAuthenticationOptions({
+    rpID,
+    userVerification: 'required',
+    allowCredentials: creds.rows.map(c => ({
+      id: c.credential_id,
+      type: 'public-key'
+    }))
+  });
+
+  await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.rows[0].id]);
+  res.json(options);
+});
+
+app.post('/api/auth/webauthn/login-finish', async (req, res) => {
+  const { email } = req.body;
+  const userRes = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
+  const user = userRes.rows[0];
+
+  const cred = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2',
+    [req.body.id, user.id]);
+
+  if (!cred.rows.length) return res.status(400).json({ error: 'Credential not found' });
+
+  try {
+    const verification = await verifyAuthenticationResponse({
+      response: req.body,
+      expectedChallenge: user.webauthn_challenge,
+      expectedOrigin: req.headers.origin,
+      expectedRPID: rpID,
+      authenticator: {
+        credentialID: Buffer.from(cred.rows[0].credential_id, 'base64url'),
+        credentialPublicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
+        counter: cred.rows[0].counter
+      }
+    });
+
+    if (verification.verified) {
+      await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE id=$2',
+        [verification.authenticationInfo.newCounter, cred.rows[0].id]);
+
+      await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
+
+      const token = jwt.sign(
+        { id: user.id, username: user.username, is_admin: user.is_admin, company: user.company },
+        process.env.JWT_SECRET
+      );
+      res.json({ token });
+    } else {
+      res.status(400).json({ verified: false });
+    }
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/auth/webauthn/verify-purchase', auth, async (req, res) => {
+  const user = await getUser(req.user.id);
+  const creds = await pool.query('SELECT credential_id FROM webauthn_credentials WHERE user_id=$1', [user.id]);
+  if (!creds.rows.length) return res.status(400).json({ error: 'Biometric not enabled' });
+
+  const options = await generateAuthenticationOptions({
+    rpID,
+    userVerification: 'required',
+    allowCredentials: creds.rows.map(c => ({
+      id: c.credential_id,
+      type: 'public-key'
+    }))
+  });
+
+  await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
+  res.json(options);
+});
+
+app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => {
+  const user = await getUser(req.user.id);
+  const cred = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2',
+    [req.body.id, user.id]);
+
+  if (!cred.rows.length) return res.status(400).json({ verified: false });
+
+  try {
+    const verification = await verifyAuthenticationResponse({
+      response: req.body,
+      expectedChallenge: user.webauthn_challenge,
+      expectedOrigin: req.headers.origin,
+      expectedRPID: rpID,
+      authenticator: {
+        credentialID: Buffer.from(cred.rows[0].credential_id, 'base64url'),
+        credentialPublicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
+        counter: cred.rows[0].counter
+      }
+    });
+
+    if (verification.verified) {
+      await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE id=$2',
+        [verification.authenticationInfo.newCounter, cred.rows[0].id]);
+      res.json({ verified: true });
+    } else {
+      res.status(400).json({ verified: false });
+    }
+  } catch (e) {
+    res.status(400).json({ verified: false, error: e.message });
+  }
 });
 
 /* ================= DVA ROUTE ================= */
@@ -520,31 +680,13 @@ app.get("/api/plans", auth, async (req, res) => {
   );
 
   const result = plans.rows.map(p => ({
-   ...p,
+  ...p,
     price: is_top_user? (p.top_price || p.price) : p.price
   }));
   res.json(result);
 });
 
-/* ================= BUY DATA - Multi-provider ================= */
-app.post("/api/buy-data", auth, async (req, res) => {
-  const { phone, plan_id, pin } = req.body;
-  const userId = req.user.id;
-
-  try {
-    // SKIP PIN CHECK IF BIOMETRIC VERIFIED
-    if (pin!== 'biometric_verified') {
-      const userResult = await db.query('SELECT pin FROM users WHERE id = $1', [userId]);
-      if (userResult.rows[0].pin!== pin) {
-        return res.status(400).json({ message: "Invalid PIN" });
-      }
-    }
-
-    //... rest of your existing buy-data code
-  } catch (err) {
-    res.status(500).json({ message: "Server error" });
-  }
-});
+/* ================= BUY DATA - Multi-provider + BIOMETRIC ================= */
 app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -554,12 +696,13 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
     const user = userRes.rows[0];
 
+    // BIOMETRIC BYPASS: Skip PIN check if biometric_verified
     if (pin!== 'biometric_verified') {
-  if (!await bcrypt.compare(pin, user.pin)) {
-    await client.query("ROLLBACK");
-    return res.status(400).json({ message: "Invalid PIN" });
-  }
-}
+      if (!await bcrypt.compare(pin, user.pin)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "Invalid PIN" });
+      }
+    }
 
     const planRes = await client.query("SELECT * FROM plans WHERE id=$1 AND is_active=TRUE", [plan_id]);
     if (!planRes.rows.length) {
@@ -568,6 +711,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     }
     const plan = planRes.rows[0];
 
+    // COMPANY ISOLATION: User can only buy plans from their company or unrestricted plans
     if (plan.restricted && plan.company!== user.company) {
       await client.query("ROLLBACK");
       return res.status(403).json({ message: "Plan restricted to company users" });
@@ -578,7 +722,6 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
     }
 
-    // CheapDataHub + SubPadi only for MAYCONNECT
     if ((plan.provider === "cheapdatahub" || plan.provider === "subpadi") && user.company!== "mayconnect") {
       await client.query("ROLLBACK");
       return res.status(403).json({ message: "This provider is only available for Mayconnect" });
@@ -649,7 +792,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   }
 });
 
-/* ================= BUY AIRTIME - CheapDataHub only for MAYCONNECT ================= */
+/* ================= BUY AIRTIME - CheapDataHub only for MAYCONNECT + BIOMETRIC ================= */
 app.post("/api/buy-airtime", auth, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -663,10 +806,15 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
       await client.query("ROLLBACK");
       return res.status(403).json({ message: "Airtime only available for Mayconnect" });
     }
-    if (!await bcrypt.compare(pin, user.pin)) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Invalid PIN" });
+
+    // BIOMETRIC BYPASS
+    if (pin!== 'biometric_verified') {
+      if (!await bcrypt.compare(pin, user.pin)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "Invalid PIN" });
+      }
     }
+
     if (Number(user.wallet_balance) < Number(amount)) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Insufficient balance" });
@@ -722,6 +870,7 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
     client.release();
   }
 });
+
 
 /* ================= FUND INIT ================= */
 app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
