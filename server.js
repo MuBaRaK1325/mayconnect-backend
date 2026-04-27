@@ -372,10 +372,13 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   const user = await getUser(req.user.id);
 
+  // v13+ requires Uint8Array for userID
+  const userID = new TextEncoder().encode(user.id.toString());
+
   const options = await generateRegistrationOptions({
     rpName,
     rpID,
-    userID: user.id.toString(),
+    userID: userID, // was user.id.toString()
     userName: user.email,
     attestationType: 'none',
     authenticatorSelection: {
