@@ -515,6 +515,24 @@ app.get("/api/plans", auth, async (req, res) => {
 });
 
 /* ================= BUY DATA - Multi-provider ================= */
+app.post("/api/buy-data", auth, async (req, res) => {
+  const { phone, plan_id, pin } = req.body;
+  const userId = req.user.id;
+
+  try {
+    // SKIP PIN CHECK IF BIOMETRIC VERIFIED
+    if (pin!== 'biometric_verified') {
+      const userResult = await db.query('SELECT pin FROM users WHERE id = $1', [userId]);
+      if (userResult.rows[0].pin!== pin) {
+        return res.status(400).json({ message: "Invalid PIN" });
+      }
+    }
+
+    //... rest of your existing buy-data code
+  } catch (err) {
+    res.status(500).json({ message: "Server error" });
+  }
+});
 app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
