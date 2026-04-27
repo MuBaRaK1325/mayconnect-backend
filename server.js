@@ -17,7 +17,19 @@ app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-
+app.use(cors({
+  origin: [
+    'https://teeversh-frontend.onrender.com',
+    'https://mayconnect-frontend.onrender.com',
+    'https://sadeeq-frontend.onrender.com', 
+    'https://bnhabeeb-frontend.onrender.com',
+    'http://localhost:3000',
+    'http://localhost:5173' // vite default
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 // Middleware
 app.use((req, res, next) => {
   if (req.originalUrl === "/api/paystack/webhook") {
