@@ -363,12 +363,37 @@ app.get('/api/generate-hash', async (req, res) => {
 /* ================= WEBAUTHN - BIOMETRIC ================= */
 const rpName = 'MAYCONNECT VTU';
 
-// Helper to get rpID from request origin
+// Whitelist of allowed frontend domains
+const ALLOWED_FRONTENDS = [
+  'mayconnect-frontend.onrender.com',
+  'teeversh-frontend.onrender.com',
+  'bnhabeeb-frontend.onrender.com',
+  'sadeeq-frontend.onrender.com',
+  'localhost'
+];
+
+// Helper to get rpID from request origin with validation
 function getRpID(req) {
   if (process.env.NODE_ENV!== 'production') return 'localhost';
-  const origin = req.headers.origin; // https://teeversh-frontend.onrender.com
-  const url = new URL(origin);
-  return url.hostname; // teeversh-frontend.onrender.com
+
+  const origin = req.headers.origin || req.headers.referer;
+  if (!origin) throw new Error('No origin header');
+
+  const hostname = new URL(origin).hostname;
+
+  // Security: only allow whitelisted frontends
+  if (!ALLOWED_FRONTENDS.includes(hostname)) {
+    throw new Error(`Unauthorized origin: ${hostname}`);
+  }
+
+  return hostname;
+}
+
+// Helper to get origin for verification - must match browser's origin exactly
+function getExpectedOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) throw new Error('No origin header');
+  return origin;
 }
 
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
@@ -391,9 +416,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       authenticatorAttachment: 'platform',
       userVerification: 'required'
     },
-    // ADD THIS - fixes "missing default algorithm" warning
     pubKeyCredParams: [
-      { type: 'public-key', alg: -7 },  // ES256
+      { type: 'public-key', alg: -7 }, // ES256
       { type: 'public-key', alg: -257 } // RS256
     ]
   });
@@ -405,12 +429,15 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
   const rpID = getRpID(req);
+  const expectedOrigin = getExpectedOrigin(req);
+
+  console.log('Register finish:', { rpID, expectedOrigin, hasChallenge:!!user.webauthn_challenge });
 
   try {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: user.webauthn_challenge,
-      expectedOrigin: req.headers.origin,
+      expectedOrigin: expectedOrigin,
       expectedRPID: rpID
     });
 
@@ -418,10 +445,10 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
 
       await pool.query(
-        `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
-        [user.id, Buffer.from(credentialID).toString('base64url'), Buffer.from(credentialPublicKey).toString('base64url'), counter]
+        `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4, rp_id=$5`,
+        [user.id, Buffer.from(credentialID).toString('base64url'), Buffer.from(credentialPublicKey).toString('base64url'), counter, rpID]
       );
 
       await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
@@ -430,6 +457,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       res.status(400).json({ verified: false });
     }
   } catch (e) {
+    console.error('WebAuthn register error:', e.message);
     res.status(400).json({ error: e.message });
   }
 });
@@ -462,6 +490,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   const userRes = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
   const user = userRes.rows[0];
   const rpID = getRpID(req);
+  const expectedOrigin = getExpectedOrigin(req);
 
   const cred = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2',
     [req.body.id, user.id]);
@@ -472,7 +501,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: user.webauthn_challenge,
-      expectedOrigin: req.headers.origin,
+      expectedOrigin: expectedOrigin,
       expectedRPID: rpID,
       authenticator: {
         credentialID: Buffer.from(cred.rows[0].credential_id, 'base64url'),
@@ -496,6 +525,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       res.status(400).json({ verified: false });
     }
   } catch (e) {
+    console.error('WebAuthn login error:', e.message);
     res.status(400).json({ error: e.message });
   }
 });
@@ -523,6 +553,8 @@ app.post('/api/auth/webauthn/verify-purchase', auth, async (req, res) => {
 app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
   const rpID = getRpID(req);
+  const expectedOrigin = getExpectedOrigin(req);
+
   const cred = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2',
     [req.body.id, user.id]);
 
@@ -532,7 +564,7 @@ app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => 
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: user.webauthn_challenge,
-      expectedOrigin: req.headers.origin,
+      expectedOrigin: expectedOrigin,
       expectedRPID: rpID,
       authenticator: {
         credentialID: Buffer.from(cred.rows[0].credential_id, 'base64url'),
@@ -549,10 +581,10 @@ app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => 
       res.status(400).json({ verified: false });
     }
   } catch (e) {
+    console.error('WebAuthn purchase verify error:', e.message);
     res.status(400).json({ verified: false, error: e.message });
   }
 });
-
 /* ================= DVA ROUTE ================= */
 app.post('/api/wallet/create-dva', auth, async (req, res) => {
   try {
