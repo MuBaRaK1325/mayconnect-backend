@@ -43,8 +43,6 @@ app.use((req, res, next) => {
   }
 });
 
-// DELETE THIS LINE - IT OVERRIDES YOUR CONFIG: app.use(cors({ origin: "*" }));
-
 /* ================= DATABASE ================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -365,7 +363,6 @@ app.get('/api/generate-hash', async (req, res) => {
 /* ================= WEBAUTHN - BIOMETRIC ================= */
 const rpName = 'MAYCONNECT VTU';
 const rpID = process.env.NODE_ENV === 'production'? 'mayconnect-backend-1.onrender.com' : 'localhost';
-const origin = process.env.NODE_ENV === 'production'? `https://${rpID}` : 'http://localhost:3000';
 
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   const creds = await pool.query('SELECT id FROM webauthn_credentials WHERE user_id=$1', [req.user.id]);
@@ -680,7 +677,7 @@ app.get("/api/plans", auth, async (req, res) => {
   );
 
   const result = plans.rows.map(p => ({
-  ...p,
+ ...p,
     price: is_top_user? (p.top_price || p.price) : p.price
   }));
   res.json(result);
@@ -871,7 +868,6 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
   }
 });
 
-
 /* ================= FUND INIT ================= */
 app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
   const { amount } = req.body;
@@ -900,6 +896,7 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
     res.status(500).json({ message: "Unable to initialize payment" });
   }
 });
+
 
 /* ================= PAYSTACK WEBHOOK ================= */
 app.post("/api/paystack/webhook", async (req, res) => {
