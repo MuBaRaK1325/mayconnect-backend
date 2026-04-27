@@ -1270,7 +1270,6 @@ app.get("/", (req, res) => {
 });
 /* ================= WEBAUTHN - BIOMETRIC ================= */
 // Add this import at the top with other requires
-const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
 
 // Run this SQL once in Neon:
 /*
