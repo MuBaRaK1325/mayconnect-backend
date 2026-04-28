@@ -406,10 +406,15 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   const userID = Buffer.from(user.id.toString());
   const rpID = getRpID(req);
 
-  console.log('=== REGISTER START DEBUG ===');
-  console.log('Request origin:', req.headers.origin);
-  console.log('Calculated rpID:', rpID);
-  console.log('===========================');
+  // Check if user already has a credential for this rpID
+  const existingCreds = await pool.query(
+    'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', 
+    [user.id, rpID]
+  );
+
+  if (existingCreds.rows.length > 0) {
+    return res.status(400).json({ error: 'Biometric already enabled for this device' });
+  }
 
   const options = await generateRegistrationOptions({
     rpName,
@@ -417,6 +422,10 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     userID: userID,
     userName: user.email,
     attestationType: 'none',
+    excludeCredentials: existingCreds.rows.map(c => ({
+      id: c.credential_id,
+      type: 'public-key'
+    })),
     authenticatorSelection: {
       authenticatorAttachment: 'platform',
       userVerification: 'preferred',
