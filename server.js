@@ -573,32 +573,24 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
 
   try {
     const verification = await verifyAuthenticationResponse({
-      response: {
-        id: authResponse.id,
-        rawId: authResponse.rawId,
-        response: {
-          authenticatorData: authResponse.response.authenticatorData,
-          clientDataJSON: authResponse.response.clientDataJSON,
-          signature: authResponse.response.signature,
-          userHandle: authResponse.response.userHandle,
-        },
-        type: authResponse.type,
-        clientExtensionResults: authResponse.clientExtensionResults || {}
-      },
+      response: authResponse, // v9+ accepts whole body
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
       expectedRPID: rpId,
-      authenticator: {
-        credentialID: Buffer.from(cred.rows[0].credential_id, 'base64url'),
-        credentialPublicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
+      credential: {
+        id: cred.rows[0].credential_id,
+        publicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
         counter: cred.rows[0].counter
       },
       requireUserVerification: false
     });
 
     if (verification.verified) {
+      // FIX: v9 puts counter in authenticationInfo.newCounter
+      const { authenticationInfo } = verification;
+
       await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE id=$2',
-        [verification.authenticationInfo.newCounter, cred.rows[0].id]);
+        [authenticationInfo.newCounter, cred.rows[0].id]);
 
       await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
 
@@ -608,7 +600,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       );
       res.json({ token });
     } else {
-      res.status(400).json({ verified: false });
+      res.status(400).json({ verified: false, error: 'Authentication failed' });
     }
   } catch (e) {
     console.error('WebAuthn login error:', e.message);
@@ -663,32 +655,25 @@ app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => 
 
   try {
     const verification = await verifyAuthenticationResponse({
-      response: {
-        id: req.body.id,
-        rawId: req.body.rawId,
-        response: {
-          authenticatorData: req.body.response.authenticatorData,
-          clientDataJSON: req.body.response.clientDataJSON,
-          signature: req.body.response.signature,
-          userHandle: req.body.response.userHandle,
-        },
-        type: req.body.type,
-        clientExtensionResults: req.body.clientExtensionResults || {}
-      },
+      response: req.body, // v9+ accepts whole body
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
       expectedRPID: rpId,
-      authenticator: {
-        credentialID: Buffer.from(cred.rows[0].credential_id, 'base64url'),
-        credentialPublicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
+      credential: {
+        id: cred.rows[0].credential_id,
+        publicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
         counter: cred.rows[0].counter
       },
       requireUserVerification: false
     });
 
     if (verification.verified) {
+      const { authenticationInfo } = verification;
+
       await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE id=$2',
-        [verification.authenticationInfo.newCounter, cred.rows[0].id]);
+        [authenticationInfo.newCounter, cred.rows[0].id]);
+
+      await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
       res.json({ verified: true });
     } else {
       res.status(400).json({ verified: false });
