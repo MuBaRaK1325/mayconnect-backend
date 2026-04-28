@@ -424,18 +424,35 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const userID = new TextEncoder().encode(user.id.toString());
     const rpId = getRpID(req);
 
+    const existingCreds = await pool.query(
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
+      [user.id, rpId]
+    );
+
+    if (existingCreds.rows.length > 0) {
+      return res.status(400).json({ error: 'Biometric already enabled for this device' });
+    }
+
     const options = await generateRegistrationOptions({
       rpName,
       rpId,
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
-      attestationType: 'none'
-      // Removed authenticatorSelection entirely for testing
+      attestationType: 'none',
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform', // Keep this - phone only
+        userVerification: 'preferred', // CHANGED: back to preferred
+        residentKey: 'preferred' // CHANGED: back to preferred
+        // Removed requireResidentKey: true
+      },
+      pubKeyCredParams: [
+        { type: 'public-key', alg: -7 },
+        { type: 'public-key', alg: -257 }
+      ]
     });
 
     options.rpId = rpId;
-    delete options.excludeCredentials; // Force remove it
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
     res.json(options);
