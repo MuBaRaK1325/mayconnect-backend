@@ -432,8 +432,20 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const expectedOrigin = getExpectedOrigin(req);
 
   try {
+    // Convert base64url strings to Buffers for the lib
+    const responseForLib = {
+     ...req.body,
+      rawId: Buffer.from(req.body.rawId, 'base64url'),
+      response: {
+        clientDataJSON: Buffer.from(req.body.response.clientDataJSON, 'base64url'),
+        attestationObject: Buffer.from(req.body.response.attestationObject, 'base64url'),
+      }
+    };
+
+    console.log('Converted response rawId type:', responseForLib.rawId instanceof Buffer);
+
     const verification = await verifyRegistrationResponse({
-      response: req.body,
+      response: responseForLib,
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
       expectedRPID: rpID
@@ -447,10 +459,10 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4, rp_id=$5`,
         [
-          user.id, 
-          Buffer.from(credentialID).toString('base64url'), 
-          Buffer.from(credentialPublicKey).toString('base64url'), 
-          counter, 
+          user.id,
+          Buffer.from(credentialID).toString('base64url'),
+          Buffer.from(credentialPublicKey).toString('base64url'),
+          counter,
           rpID
         ]
       );
@@ -458,7 +470,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
       res.json({ verified: true });
     } else {
-      console.log('Verification failed or missing registrationInfo');
       res.status(400).json({ verified: false, error: 'Verification failed' });
     }
   } catch (e) {
