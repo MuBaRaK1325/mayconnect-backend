@@ -425,30 +425,28 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
   res.json(options);
 });
-
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
   const rpID = getRpID(req);
   const expectedOrigin = getExpectedOrigin(req);
 
   try {
-    // Convert base64url strings to Buffers for the lib
-    const responseForLib = {
-     ...req.body,
-      rawId: Buffer.from(req.body.rawId, 'base64url'),
-      response: {
-        clientDataJSON: Buffer.from(req.body.response.clientDataJSON, 'base64url'),
-        attestationObject: Buffer.from(req.body.response.attestationObject, 'base64url'),
-      }
-    };
-
-    console.log('Converted response rawId type:', responseForLib.rawId instanceof Buffer);
-
+    // v13 expects this exact structure - don't modify req.body
     const verification = await verifyRegistrationResponse({
-      response: responseForLib,
+      response: {
+        id: req.body.id,
+        rawId: req.body.rawId,
+        response: {
+          attestationObject: req.body.response.attestationObject,
+          clientDataJSON: req.body.response.clientDataJSON,
+        },
+        type: req.body.type,
+        clientExtensionResults: req.body.clientExtensionResults || {}
+      },
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
-      expectedRPID: rpID
+      expectedRPID: rpID,
+      requireUserVerification: true
     });
 
     if (verification.verified && verification.registrationInfo) {
@@ -474,7 +472,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     }
   } catch (e) {
     console.error('WebAuthn register error:', e.message);
-    console.error('Stack:', e.stack);
+    console.error('Full error:', e);
     res.status(400).json({ error: e.message });
   }
 });
