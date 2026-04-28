@@ -403,8 +403,13 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   const user = await getUser(req.user.id);
-  const userID = Buffer.from(user.id.toString()); // Use Buffer instead of TextEncoder for consistency
+  const userID = Buffer.from(user.id.toString());
   const rpID = getRpID(req);
+
+  console.log('=== REGISTER START DEBUG ===');
+  console.log('Request origin:', req.headers.origin);
+  console.log('Calculated rpID:', rpID);
+  console.log('===========================');
 
   const options = await generateRegistrationOptions({
     rpName,
@@ -414,12 +419,12 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     attestationType: 'none',
     authenticatorSelection: {
       authenticatorAttachment: 'platform',
-      userVerification: 'preferred', // FIX: 'required' breaks Android, use 'preferred'
+      userVerification: 'preferred',
       residentKey: 'preferred'
     },
     pubKeyCredParams: [
-      { type: 'public-key', alg: -7 }, // ES256
-      { type: 'public-key', alg: -257 } // RS256
+      { type: 'public-key', alg: -7 },
+      { type: 'public-key', alg: -257 }
     ]
   });
 
