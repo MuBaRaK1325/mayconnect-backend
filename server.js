@@ -469,26 +469,18 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
   try {
     const verification = await verifyRegistrationResponse({
-      response: {
-        id: req.body.id,
-        rawId: req.body.rawId,
-        response: {
-          attestationObject: req.body.response.attestationObject,
-          clientDataJSON: req.body.response.clientDataJSON,
-        },
-        type: req.body.type,
-        clientExtensionResults: req.body.clientExtensionResults || {}
-      },
+      response: req.body, // v9+ accepts the whole body directly
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
       expectedRPID: rpId,
       requireUserVerification: false
     });
 
-    if (verification.verified && verification.registrationInfo) {
-      const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
-
-      if (!credentialID ||!credentialPublicKey) {
+    if (verification.verified) {
+      // v9+ structure: verification.registrationInfo.credential
+      const { credential } = verification.registrationInfo;
+      
+      if (!credential || !credential.id || !credential.publicKey) {
         console.error('RegistrationInfo missing fields:', verification.registrationInfo);
         return res.status(400).json({ verified: false, error: 'Incomplete credential data' });
       }
@@ -499,9 +491,9 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
          ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4, rp_id=$5`,
         [
           user.id,
-          Buffer.from(credentialID).toString('base64url'),
-          Buffer.from(credentialPublicKey).toString('base64url'),
-          counter,
+          credential.id, // Already base64url string in v9+
+          credential.publicKey, // Already base64url string in v9+
+          credential.counter,
           rpId
         ]
       );
