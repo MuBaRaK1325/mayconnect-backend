@@ -421,18 +421,8 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
-    // FIX 1: Use TextEncoder instead of Buffer - Android Chrome requires Uint8Array
     const userID = new TextEncoder().encode(user.id.toString());
     const rpId = getRpID(req);
-
-    const existingCreds = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
-      [user.id, rpId]
-    );
-
-    if (existingCreds.rows.length > 0) {
-      return res.status(400).json({ error: 'Biometric already enabled for this device' });
-    }
 
     const options = await generateRegistrationOptions({
       rpName,
@@ -440,29 +430,12 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
-      attestationType: 'none',
-      authenticatorSelection: {
-        authenticatorAttachment: 'platform',
-        userVerification: 'preferred',
-        residentKey: 'preferred'
-      },
-      pubKeyCredParams: [
-        { type: 'public-key', alg: -7 },
-        { type: 'public-key', alg: -257 }
-      ]
+      attestationType: 'none'
+      // Removed authenticatorSelection entirely for testing
     });
 
-    // FIX 2: Only add excludeCredentials if there are any
-    if (existingCreds.rows.length > 0) {
-      options.excludeCredentials = existingCreds.rows.map(c => ({
-        id: c.credential_id,
-        type: 'public-key',
-        transports: ['internal']
-      }));
-    }
-
-    // CRITICAL FIX: Ensure rpId is in the response
     options.rpId = rpId;
+    delete options.excludeCredentials; // Force remove it
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
     res.json(options);
