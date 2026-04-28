@@ -486,14 +486,14 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
         return res.status(400).json({ verified: false, error: 'Incomplete credential data' });
       }
 
-      // FIX: Force convert to base64url string regardless of input type
+      // FIX: Use Buffer to convert ArrayBuffer to base64url - works in all Node versions
       const credentialID = typeof credential.id === 'string' 
         ? credential.id 
-        : isoBase64URL.fromBuffer(credential.id);
+        : Buffer.from(credential.id).toString('base64url');
       
       const publicKey = typeof credential.publicKey === 'string'
         ? credential.publicKey
-        : isoBase64URL.fromBuffer(credential.publicKey);
+        : Buffer.from(credential.publicKey).toString('base64url');
 
       await pool.query(
         `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id)
