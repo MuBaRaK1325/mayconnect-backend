@@ -403,7 +403,7 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   const user = await getUser(req.user.id);
-  const userID = new TextEncoder().encode(user.id.toString());
+  const userID = Buffer.from(user.id.toString()); // Use Buffer instead of TextEncoder for consistency
   const rpID = getRpID(req);
 
   const options = await generateRegistrationOptions({
@@ -414,7 +414,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     attestationType: 'none',
     authenticatorSelection: {
       authenticatorAttachment: 'platform',
-      userVerification: 'required'
+      userVerification: 'preferred', // FIX: 'required' breaks Android, use 'preferred'
+      residentKey: 'preferred'
     },
     pubKeyCredParams: [
       { type: 'public-key', alg: -7 }, // ES256
@@ -425,13 +426,13 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
   res.json(options);
 });
+
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
   const rpID = getRpID(req);
   const expectedOrigin = getExpectedOrigin(req);
 
   try {
-    // v13 expects this exact structure - don't modify req.body
     const verification = await verifyRegistrationResponse({
       response: {
         id: req.body.id,
@@ -446,11 +447,17 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
       expectedRPID: rpID,
-      requireUserVerification: true
+      requireUserVerification: false // FIX: Must match 'preferred' above
     });
 
     if (verification.verified && verification.registrationInfo) {
       const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+
+      // Extra safety check
+      if (!credentialID ||!credentialPublicKey) {
+        console.error('RegistrationInfo missing fields:', verification.registrationInfo);
+        return res.status(400).json({ verified: false, error: 'Incomplete credential data' });
+      }
 
       await pool.query(
         `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id)
@@ -472,7 +479,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     }
   } catch (e) {
     console.error('WebAuthn register error:', e.message);
-    console.error('Full error:', e);
     res.status(400).json({ error: e.message });
   }
 });
@@ -489,7 +495,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 
   const options = await generateAuthenticationOptions({
     rpID,
-    userVerification: 'required',
+    userVerification: 'preferred', // FIX: Changed from 'required'
     allowCredentials: creds.rows.map(c => ({
       id: c.credential_id,
       type: 'public-key'
@@ -501,20 +507,33 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 });
 
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
-  const { email } = req.body;
+  const { email,...authResponse } = req.body;
   const userRes = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
   const user = userRes.rows[0];
+  if (!user) return res.status(400).json({ error: 'User not found' });
+
   const rpID = getRpID(req);
   const expectedOrigin = getExpectedOrigin(req);
 
   const cred = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2',
-    [req.body.id, user.id]);
+    [authResponse.id, user.id]);
 
   if (!cred.rows.length) return res.status(400).json({ error: 'Credential not found' });
 
   try {
     const verification = await verifyAuthenticationResponse({
-      response: req.body,
+      response: {
+        id: authResponse.id,
+        rawId: authResponse.rawId,
+        response: {
+          authenticatorData: authResponse.response.authenticatorData,
+          clientDataJSON: authResponse.response.clientDataJSON,
+          signature: authResponse.response.signature,
+          userHandle: authResponse.response.userHandle,
+        },
+        type: authResponse.type,
+        clientExtensionResults: authResponse.clientExtensionResults || {}
+      },
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
       expectedRPID: rpID,
@@ -522,7 +541,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
         credentialID: Buffer.from(cred.rows[0].credential_id, 'base64url'),
         credentialPublicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
         counter: cred.rows[0].counter
-      }
+      },
+      requireUserVerification: false // FIX: Match 'preferred'
     });
 
     if (verification.verified) {
@@ -554,7 +574,7 @@ app.post('/api/auth/webauthn/verify-purchase', auth, async (req, res) => {
 
   const options = await generateAuthenticationOptions({
     rpID,
-    userVerification: 'required',
+    userVerification: 'preferred', // FIX
     allowCredentials: creds.rows.map(c => ({
       id: c.credential_id,
       type: 'public-key'
@@ -577,7 +597,18 @@ app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => 
 
   try {
     const verification = await verifyAuthenticationResponse({
-      response: req.body,
+      response: {
+        id: req.body.id,
+        rawId: req.body.rawId,
+        response: {
+          authenticatorData: req.body.response.authenticatorData,
+          clientDataJSON: req.body.response.clientDataJSON,
+          signature: req.body.response.signature,
+          userHandle: req.body.response.userHandle,
+        },
+        type: req.body.type,
+        clientExtensionResults: req.body.clientExtensionResults || {}
+      },
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
       expectedRPID: rpID,
@@ -585,7 +616,8 @@ app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => 
         credentialID: Buffer.from(cred.rows[0].credential_id, 'base64url'),
         credentialPublicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
         counter: cred.rows[0].counter
-      }
+      },
+      requireUserVerification: false // FIX
     });
 
     if (verification.verified) {
