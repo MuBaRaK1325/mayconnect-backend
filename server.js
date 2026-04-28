@@ -367,9 +367,6 @@ app.get('/api/generate-hash', async (req, res) => {
 });
 
 /* ================= WEBAUTHN - BIOMETRIC ================= */
-// DELETE THIS BLOCK - ALREADY IMPORTED AT TOP
-// const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
-
 const rpName = 'TEEVERSH';
 
 // Whitelist of allowed frontend domains
@@ -424,7 +421,8 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
-    const userID = Buffer.from(user.id.toString());
+    // FIX 1: Use TextEncoder instead of Buffer - Android Chrome requires Uint8Array
+    const userID = new TextEncoder().encode(user.id.toString());
     const rpId = getRpID(req);
 
     const existingCreds = await pool.query(
@@ -441,11 +439,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       rpId,
       userID: userID,
       userName: user.email,
+      userDisplayName: user.username || user.email,
       attestationType: 'none',
-      excludeCredentials: existingCreds.rows.map(c => ({
-        id: c.credential_id,
-        type: 'public-key'
-      })),
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
         userVerification: 'preferred',
@@ -456,6 +451,15 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
         { type: 'public-key', alg: -257 }
       ]
     });
+
+    // FIX 2: Only add excludeCredentials if there are any
+    if (existingCreds.rows.length > 0) {
+      options.excludeCredentials = existingCreds.rows.map(c => ({
+        id: c.credential_id,
+        type: 'public-key',
+        transports: ['internal']
+      }));
+    }
 
     // CRITICAL FIX: Ensure rpId is in the response
     options.rpId = rpId;
@@ -543,7 +547,8 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       userVerification: 'preferred',
       allowCredentials: creds.rows.map(c => ({
         id: c.credential_id,
-        type: 'public-key'
+        type: 'public-key',
+        transports: ['internal']
       }))
     });
 
@@ -636,7 +641,8 @@ app.post('/api/auth/webauthn/verify-purchase', auth, async (req, res) => {
       userVerification: 'preferred',
       allowCredentials: creds.rows.map(c => ({
         id: c.credential_id,
-        type: 'public-key'
+        type: 'public-key',
+        transports: ['internal']
       }))
     });
 
