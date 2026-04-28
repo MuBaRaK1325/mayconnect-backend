@@ -438,18 +438,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       rpId,
       userID: userID,
       userName: user.email,
-      userDisplayName: user.username || user.email,
-      attestationType: 'none',
-      authenticatorSelection: {
-        authenticatorAttachment: 'platform', // Keep this - phone only
-        userVerification: 'preferred', // CHANGED: back to preferred
-        residentKey: 'preferred' // CHANGED: back to preferred
-        // Removed requireResidentKey: true
-      },
-      pubKeyCredParams: [
-        { type: 'public-key', alg: -7 },
-        { type: 'public-key', alg: -257 }
-      ]
+      // REMOVED authenticatorSelection entirely - let browser pick
+      attestationType: 'none'
     });
 
     options.rpId = rpId;
