@@ -1,4 +1,3 @@
-require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -11,7 +10,14 @@ const axios = require("axios");
 const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 const webpush = require("web-push");
-const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
+
+// KEEP ONLY THIS ONE IMPORT - DELETE THE OTHER ONE BELOW
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} = require('@simplewebauthn/server');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -361,12 +367,8 @@ app.get('/api/generate-hash', async (req, res) => {
 });
 
 /* ================= WEBAUTHN - BIOMETRIC ================= */
-const {
-  generateRegistrationOptions,
-  verifyRegistrationResponse,
-  generateAuthenticationOptions,
-  verifyAuthenticationResponse,
-} = require('@simplewebauthn/server');
+// DELETE THIS BLOCK - ALREADY IMPORTED AT TOP
+// const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
 
 const rpName = 'TEEVERSH';
 
