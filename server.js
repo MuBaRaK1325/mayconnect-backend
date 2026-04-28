@@ -361,7 +361,14 @@ app.get('/api/generate-hash', async (req, res) => {
 });
 
 /* ================= WEBAUTHN - BIOMETRIC ================= */
-const rpName = 'TEEVERSH'; // Changed from MAYCONNECT
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} = require('@simplewebauthn/server');
+
+const rpName = 'TEEVERSH';
 
 // Whitelist of allowed frontend domains
 const ALLOWED_FRONTENDS = [
@@ -377,16 +384,18 @@ function getRpID(req) {
   if (process.env.NODE_ENV!== 'production') return 'localhost';
 
   const origin = req.headers.origin || req.headers.referer;
-  if (!origin) throw new Error('No origin header');
 
-  const hostname = new URL(origin).hostname;
-
-  // Security: only allow whitelisted frontends
-  if (!ALLOWED_FRONTENDS.includes(hostname)) {
+  if (origin) {
+    const hostname = new URL(origin).hostname;
+    if (ALLOWED_FRONTENDS.includes(hostname)) return hostname;
     throw new Error(`Unauthorized origin: ${hostname}`);
   }
 
-  return hostname;
+  // Fallback for Render: use host header
+  const host = req.headers.host;
+  if (host && ALLOWED_FRONTENDS.includes(host)) return host;
+
+  throw new Error('No origin or valid host header');
 }
 
 // Helper to get origin for verification - must match browser's origin exactly
@@ -397,53 +406,70 @@ function getExpectedOrigin(req) {
 }
 
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
-  const creds = await pool.query('SELECT id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [req.user.id, getRpID(req)]);
-  res.json({ enabled: creds.rows.length > 0 });
+  try {
+    const rpId = getRpID(req);
+    const creds = await pool.query(
+      'SELECT id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
+      [req.user.id, rpId]
+    );
+    res.json({ enabled: creds.rows.length > 0 });
+  } catch (e) {
+    console.error('Check enabled error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
-  const user = await getUser(req.user.id);
-  const userID = Buffer.from(user.id.toString());
-  const rpId = getRpID(req); // FIX: lowercase 'd'
+  try {
+    const user = await getUser(req.user.id);
+    const userID = Buffer.from(user.id.toString());
+    const rpId = getRpID(req);
 
-  // Check if user already has a credential for this rpID
-  const existingCreds = await pool.query(
-    'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
-    [user.id, rpId]
-  );
+    const existingCreds = await pool.query(
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
+      [user.id, rpId]
+    );
 
-  if (existingCreds.rows.length > 0) {
-    return res.status(400).json({ error: 'Biometric already enabled for this device' });
+    if (existingCreds.rows.length > 0) {
+      return res.status(400).json({ error: 'Biometric already enabled for this device' });
+    }
+
+    const options = await generateRegistrationOptions({
+      rpName,
+      rpId,
+      userID: userID,
+      userName: user.email,
+      attestationType: 'none',
+      excludeCredentials: existingCreds.rows.map(c => ({
+        id: c.credential_id,
+        type: 'public-key'
+      })),
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        userVerification: 'preferred',
+        residentKey: 'preferred'
+      },
+      pubKeyCredParams: [
+        { type: 'public-key', alg: -7 },
+        { type: 'public-key', alg: -257 }
+      ]
+    });
+
+    // CRITICAL FIX: Ensure rpId is in the response
+    options.rpId = rpId;
+
+    await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
+    res.json(options);
+
+  } catch (e) {
+    console.error('Register start error:', e.message);
+    res.status(500).json({ error: e.message });
   }
-
-  const options = await generateRegistrationOptions({
-    rpName,
-    rpId, // FIX: lowercase 'd'
-    userID: userID,
-    userName: user.email,
-    attestationType: 'none',
-    excludeCredentials: existingCreds.rows.map(c => ({
-      id: c.credential_id,
-      type: 'public-key'
-    })),
-    authenticatorSelection: {
-      authenticatorAttachment: 'platform',
-      userVerification: 'preferred',
-      residentKey: 'preferred'
-    },
-    pubKeyCredParams: [
-      { type: 'public-key', alg: -7 },
-      { type: 'public-key', alg: -257 }
-    ]
-  });
-
-  await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
-  res.json(options);
 });
 
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
-  const rpId = getRpID(req); // FIX: lowercase 'd'
+  const rpId = getRpID(req);
   const expectedOrigin = getExpectedOrigin(req);
 
   try {
@@ -460,7 +486,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       },
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
-      expectedRPID: rpId, // verifyRegistrationResponse uses expectedRPID with capital D - keep this
+      expectedRPID: rpId,
       requireUserVerification: false
     });
 
@@ -481,7 +507,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
           Buffer.from(credentialID).toString('base64url'),
           Buffer.from(credentialPublicKey).toString('base64url'),
           counter,
-          rpId // FIX: lowercase 'd'
+          rpId
         ]
       );
 
@@ -497,26 +523,38 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 });
 
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
-  const { email } = req.body;
-  const user = await pool.query('SELECT id FROM users WHERE email=$1', [email]);
-  if (!user.rows.length) return res.status(400).json({ error: 'User not found' });
+  try {
+    const { email } = req.body;
+    const user = await pool.query('SELECT id FROM users WHERE email=$1', [email]);
+    if (!user.rows.length) return res.status(400).json({ error: 'User not found' });
 
-  const rpId = getRpID(req); // FIX: lowercase 'd'
+    const rpId = getRpID(req);
 
-  const creds = await pool.query('SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [user.rows[0].id, rpId]);
-  if (!creds.rows.length) return res.status(400).json({ error: 'Biometric not enabled for this user' });
+    const creds = await pool.query(
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
+      [user.rows[0].id, rpId]
+    );
+    if (!creds.rows.length) return res.status(400).json({ error: 'Biometric not enabled for this user' });
 
-  const options = await generateAuthenticationOptions({
-    rpId, // FIX: lowercase 'd'
-    userVerification: 'preferred',
-    allowCredentials: creds.rows.map(c => ({
-      id: c.credential_id,
-      type: 'public-key'
-    }))
-  });
+    const options = await generateAuthenticationOptions({
+      rpId,
+      userVerification: 'preferred',
+      allowCredentials: creds.rows.map(c => ({
+        id: c.credential_id,
+        type: 'public-key'
+      }))
+    });
 
-  await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.rows[0].id]);
-  res.json(options);
+    // CRITICAL FIX: Ensure rpId is in the response
+    options.rpId = rpId;
+
+    await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.rows[0].id]);
+    res.json(options);
+
+  } catch (e) {
+    console.error('Login start error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
@@ -525,11 +563,13 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   const user = userRes.rows[0];
   if (!user) return res.status(400).json({ error: 'User not found' });
 
-  const rpId = getRpID(req); // FIX: lowercase 'd'
+  const rpId = getRpID(req);
   const expectedOrigin = getExpectedOrigin(req);
 
-  const cred = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2 AND rp_id=$3',
-    [authResponse.id, user.id, rpId]);
+  const cred = await pool.query(
+    'SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2 AND rp_id=$3',
+    [authResponse.id, user.id, rpId]
+  );
 
   if (!cred.rows.length) return res.status(400).json({ error: 'Credential not found' });
 
@@ -549,7 +589,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       },
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
-      expectedRPID: rpId, // verifyAuthenticationResponse uses expectedRPID - keep capital D
+      expectedRPID: rpId,
       authenticator: {
         credentialID: Buffer.from(cred.rows[0].credential_id, 'base64url'),
         credentialPublicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
@@ -579,32 +619,46 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
 });
 
 app.post('/api/auth/webauthn/verify-purchase', auth, async (req, res) => {
-  const user = await getUser(req.user.id);
-  const rpId = getRpID(req); // FIX: lowercase 'd'
+  try {
+    const user = await getUser(req.user.id);
+    const rpId = getRpID(req);
 
-  const creds = await pool.query('SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [user.id, rpId]);
-  if (!creds.rows.length) return res.status(400).json({ error: 'Biometric not enabled' });
+    const creds = await pool.query(
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
+      [user.id, rpId]
+    );
+    if (!creds.rows.length) return res.status(400).json({ error: 'Biometric not enabled' });
 
-  const options = await generateAuthenticationOptions({
-    rpId, // FIX: lowercase 'd'
-    userVerification: 'preferred',
-    allowCredentials: creds.rows.map(c => ({
-      id: c.credential_id,
-      type: 'public-key'
-    }))
-  });
+    const options = await generateAuthenticationOptions({
+      rpId,
+      userVerification: 'preferred',
+      allowCredentials: creds.rows.map(c => ({
+        id: c.credential_id,
+        type: 'public-key'
+      }))
+    });
 
-  await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
-  res.json(options);
+    // CRITICAL FIX: Ensure rpId is in the response
+    options.rpId = rpId;
+
+    await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
+    res.json(options);
+
+  } catch (e) {
+    console.error('Verify purchase error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
-  const rpId = getRpID(req); // FIX: lowercase 'd'
+  const rpId = getRpID(req);
   const expectedOrigin = getExpectedOrigin(req);
 
-  const cred = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2 AND rp_id=$3',
-    [req.body.id, user.id, rpId]);
+  const cred = await pool.query(
+    'SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2 AND rp_id=$3',
+    [req.body.id, user.id, rpId]
+  );
 
   if (!cred.rows.length) return res.status(400).json({ verified: false });
 
@@ -624,7 +678,7 @@ app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => 
       },
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
-      expectedRPID: rpId, // verifyAuthenticationResponse uses expectedRPID - keep capital D
+      expectedRPID: rpId,
       authenticator: {
         credentialID: Buffer.from(cred.rows[0].credential_id, 'base64url'),
         credentialPublicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
