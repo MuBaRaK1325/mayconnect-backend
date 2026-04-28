@@ -18,7 +18,7 @@ const {
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
-
+const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 const app = express();
 app.set('trust proxy', 1);
 
@@ -462,6 +462,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   }
 });
 
+const { isoBase64URL } = require('@simplewebauthn/server/helpers');
+
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
   const rpId = getRpID(req);
@@ -469,7 +471,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
   try {
     const verification = await verifyRegistrationResponse({
-      response: req.body, // v9+ accepts the whole body directly
+      response: req.body,
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
       expectedRPID: rpId,
@@ -477,7 +479,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     });
 
     if (verification.verified) {
-      // v9+ structure: verification.registrationInfo.credential
       const { credential } = verification.registrationInfo;
       
       if (!credential || !credential.id || !credential.publicKey) {
@@ -485,14 +486,23 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
         return res.status(400).json({ verified: false, error: 'Incomplete credential data' });
       }
 
+      // FIX: Force convert to base64url string regardless of input type
+      const credentialID = typeof credential.id === 'string' 
+        ? credential.id 
+        : isoBase64URL.fromBuffer(credential.id);
+      
+      const publicKey = typeof credential.publicKey === 'string'
+        ? credential.publicKey
+        : isoBase64URL.fromBuffer(credential.publicKey);
+
       await pool.query(
         `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4, rp_id=$5`,
         [
           user.id,
-          credential.id, // Already base64url string in v9+
-          credential.publicKey, // Already base64url string in v9+
+          credentialID,
+          publicKey,
           credential.counter,
           rpId
         ]
