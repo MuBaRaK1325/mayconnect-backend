@@ -431,14 +431,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const rpID = getRpID(req);
   const expectedOrigin = getExpectedOrigin(req);
 
-  console.log('=== REGISTER FINISH BODY ===');
-  console.log('Full body:', JSON.stringify(req.body));
-  console.log('id:', req.body.id);
-  console.log('rawId:', req.body.rawId);
-  console.log('attestationObject:', req.body.response?.attestationObject);
-  console.log('clientDataJSON:', req.body.response?.clientDataJSON);
-  console.log('===========================');
-
   try {
     const verification = await verifyRegistrationResponse({
       response: req.body,
@@ -447,20 +439,27 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       expectedRPID: rpID
     });
 
-    if (verification.verified) {
+    if (verification.verified && verification.registrationInfo) {
       const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
 
       await pool.query(
         `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4, rp_id=$5`,
-        [user.id, Buffer.from(credentialID).toString('base64url'), Buffer.from(credentialPublicKey).toString('base64url'), counter, rpID]
+        [
+          user.id, 
+          Buffer.from(credentialID).toString('base64url'), 
+          Buffer.from(credentialPublicKey).toString('base64url'), 
+          counter, 
+          rpID
+        ]
       );
 
       await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
       res.json({ verified: true });
     } else {
-      res.status(400).json({ verified: false });
+      console.log('Verification failed or missing registrationInfo');
+      res.status(400).json({ verified: false, error: 'Verification failed' });
     }
   } catch (e) {
     console.error('WebAuthn register error:', e.message);
