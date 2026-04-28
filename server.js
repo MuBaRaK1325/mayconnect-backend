@@ -431,7 +431,13 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const rpID = getRpID(req);
   const expectedOrigin = getExpectedOrigin(req);
 
-  console.log('Register finish:', { rpID, expectedOrigin, hasChallenge:!!user.webauthn_challenge });
+  console.log('=== REGISTER FINISH BODY ===');
+  console.log('Full body:', JSON.stringify(req.body));
+  console.log('id:', req.body.id);
+  console.log('rawId:', req.body.rawId);
+  console.log('attestationObject:', req.body.response?.attestationObject);
+  console.log('clientDataJSON:', req.body.response?.clientDataJSON);
+  console.log('===========================');
 
   try {
     const verification = await verifyRegistrationResponse({
@@ -458,6 +464,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     }
   } catch (e) {
     console.error('WebAuthn register error:', e.message);
+    console.error('Stack:', e.stack);
     res.status(400).json({ error: e.message });
   }
 });
