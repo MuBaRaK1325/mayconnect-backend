@@ -833,7 +833,7 @@ app.get("/api/plans", auth, async (req, res) => {
 });
 
 /* ================= BUY DATA - Multi-provider + BIOMETRIC ================= */
-app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
+app.post("/api/buy-data", auth,  async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
