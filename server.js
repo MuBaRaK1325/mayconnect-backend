@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const { Pool } = require("pg"); // ADD THIS BACK
 const http = require("http");
 const crypto = require("crypto");
 
@@ -9,7 +10,13 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-console.log('BUILD: 2026-04-28-PING-FIX'); // ADD THIS TO VERIFY DEPLOY
+console.log('BUILD: 2026-04-28-PING-FIX');
+
+// Postgres connection - add this if you use DB
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 // 1. CORS
 app.use(cors({
@@ -29,7 +36,7 @@ app.use((req, res, next) => {
   }
 });
 
-// 3. TEST ROUTE - MUST WORK
+// 3. TEST ROUTE
 app.get('/api/ping', (req, res) => {
   console.log('PING HIT');
   res.send('pong');
@@ -62,7 +69,7 @@ app.post('/api/webhook', (req, res) => {
   }
 });
 
-// 5. START SERVER - LAST LINE
+// 5. START SERVER - LAST
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
