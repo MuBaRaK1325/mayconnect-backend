@@ -1058,67 +1058,436 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
   }
 });
 
-
-/* ================= PAYSTACK WEBHOOK ================= */
+/* ================= PAYSTACK WEBHOOK - FIXED ================= */
 app.post("/api/paystack/webhook", async (req, res) => {
   try {
     const rawBody = req.body;
     const signature = req.headers["x-paystack-signature"];
 
+    // 1. Verify signature
     let isValid = false;
+    let matchedCompany = null;
     for (const company of Object.keys(PAYSTACK_KEYS)) {
       const secret = PAYSTACK_KEYS[company]?.secret;
       if (!secret) continue;
       const hash = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
       if (hash === signature) {
         isValid = true;
+        matchedCompany = company;
         break;
       }
     }
     if (!isValid) return res.sendStatus(400);
 
     const event = JSON.parse(rawBody);
-    if (event.event === "charge.success") {
-      const { user_id } = event.data.metadata || {};
-      const amount = event.data.amount / 100;
-      const reference = event.data.reference;
+    if (event.event!== "charge.success") return res.sendStatus(200);
 
-      if (!user_id) return res.sendStatus(200);
+    const { user_id } = event.data.metadata || {};
+    const amount = event.data.amount / 100;
+    const reference = event.data.reference;
 
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [user_id]);
-        if (!userRes.rows.length) {
-          await client.query("ROLLBACK");
-          return res.sendStatus(200);
-        }
+    if (!user_id) return res.sendStatus(200);
 
-        const newBalance = Number(userRes.rows[0].wallet_balance) + amount;
-        await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user_id]);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
 
-        await client.query(
-          `INSERT INTO transactions(user_id,type,amount,reference,status,description)
-           VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS','Wallet funding via Paystack')
-           ON CONFLICT (reference) DO NOTHING`,
-          [user_id, amount, reference]
-        );
-
-        await client.query("COMMIT");
-        sendWalletUpdate(user_id, newBalance);
-
-        await sendPushNotification(userRes.rows[0].company, user_id, {
-          title: `${userRes.rows[0].company.toUpperCase()} - Wallet Funded`,
-          body: `Your wallet was credited with ₦${amount}`,
-          url: '/dashboard.html'
-        });
-      } catch (e) {
+      // 2. IDEMPOTENCY CHECK FIRST - if exists, skip everything
+      const existing = await client.query(
+        "SELECT id FROM transactions WHERE reference=$1 FOR UPDATE",
+        [reference]
+      );
+      if (existing.rows.length > 0) {
         await client.query("ROLLBACK");
-        console.log("WEBHOOK TX ERROR:", e.message);
-      } finally {
-        client.release();
+        console.log(`Duplicate webhook ignored: ${reference}`);
+        return res.sendStatus(200);
+      }
+
+      const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [user_id]);
+      if (!userRes.rows.length) {
+        await client.query("ROLLBACK");
+        return res.sendStatus(200);
+      }
+
+      // 3. ATOMIC INCREMENT - not read then write
+      const updateRes = await client.query(
+        "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
+        [amount, user_id]
+      );
+      const newBalance = updateRes.rows[0].wallet_balance;
+
+      // 4. Insert transaction - if this fails, whole thing rolls back
+      await client.query(
+        `INSERT INTO transactions(user_id,type,amount,reference,status,description)
+         VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS','Wallet funding via Paystack')`,
+        [user_id, amount, reference]
+      );
+
+      await client.query("COMMIT");
+      sendWalletUpdate(user_id, Number(newBalance));
+
+      await sendPushNotification(userRes.rows[0].company, user_id, {
+        title: `${userRes.rows[0].company.toUpperCase()} - Wallet Funded`,
+        body: `Your wallet was credited with ₦${amount}`,
+        url: '/dashboard.html'
+      });
+
+      console.log(`Webhook processed: ${reference} - ₦${amount} to user ${user_id}`);
+    } catch (e) {
+      await client.query("ROLLBACK");
+      console.log("WEBHOOK TX ERROR:", e.message);
+    } finally {
+      client.release();
+    }
+
+    res.sendStatus(200);
+  } catch (e) {
+    console.log("WEBHOOK ERROR:", e.message);
+    res.sendStatus(500);
+  }
+});/* ================= PAYSTACK WEBHOOK - FIXED ================= */
+app.post("/api/paystack/webhook", async (req, res) => {
+  try {
+    const rawBody = req.body;
+    const signature = req.headers["x-paystack-signature"];
+
+    // 1. Verify signature
+    let isValid = false;
+    let matchedCompany = null;
+    for (const company of Object.keys(PAYSTACK_KEYS)) {
+      const secret = PAYSTACK_KEYS[company]?.secret;
+      if (!secret) continue;
+      const hash = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
+      if (hash === signature) {
+        isValid = true;
+        matchedCompany = company;
+        break;
       }
     }
+    if (!isValid) return res.sendStatus(400);
+
+    const event = JSON.parse(rawBody);
+    if (event.event!== "charge.success") return res.sendStatus(200);
+
+    const { user_id } = event.data.metadata || {};
+    const amount = event.data.amount / 100;
+    const reference = event.data.reference;
+
+    if (!user_id) return res.sendStatus(200);
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // 2. IDEMPOTENCY CHECK FIRST - if exists, skip everything
+      const existing = await client.query(
+        "SELECT id FROM transactions WHERE reference=$1 FOR UPDATE",
+        [reference]
+      );
+      if (existing.rows.length > 0) {
+        await client.query("ROLLBACK");
+        console.log(`Duplicate webhook ignored: ${reference}`);
+        return res.sendStatus(200);
+      }
+
+      const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [user_id]);
+      if (!userRes.rows.length) {
+        await client.query("ROLLBACK");
+        return res.sendStatus(200);
+      }
+
+      // 3. ATOMIC INCREMENT - not read then write
+      const updateRes = await client.query(
+        "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
+        [amount, user_id]
+      );
+      const newBalance = updateRes.rows[0].wallet_balance;
+
+      // 4. Insert transaction - if this fails, whole thing rolls back
+      await client.query(
+        `INSERT INTO transactions(user_id,type,amount,reference,status,description)
+         VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS','Wallet funding via Paystack')`,
+        [user_id, amount, reference]
+      );
+
+      await client.query("COMMIT");
+      sendWalletUpdate(user_id, Number(newBalance));
+
+      await sendPushNotification(userRes.rows[0].company, user_id, {
+        title: `${userRes.rows[0].company.toUpperCase()} - Wallet Funded`,
+        body: `Your wallet was credited with ₦${amount}`,
+        url: '/dashboard.html'
+      });
+
+      console.log(`Webhook processed: ${reference} - ₦${amount} to user ${user_id}`);
+    } catch (e) {
+      await client.query("ROLLBACK");
+      console.log("WEBHOOK TX ERROR:", e.message);
+    } finally {
+      client.release();
+    }
+
+    res.sendStatus(200);
+  } catch (e) {
+    console.log("WEBHOOK ERROR:", e.message);
+    res.sendStatus(500);
+  }
+});/* ================= PAYSTACK WEBHOOK - FIXED ================= */
+app.post("/api/paystack/webhook", async (req, res) => {
+  try {
+    const rawBody = req.body;
+    const signature = req.headers["x-paystack-signature"];
+
+    // 1. Verify signature
+    let isValid = false;
+    let matchedCompany = null;
+    for (const company of Object.keys(PAYSTACK_KEYS)) {
+      const secret = PAYSTACK_KEYS[company]?.secret;
+      if (!secret) continue;
+      const hash = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
+      if (hash === signature) {
+        isValid = true;
+        matchedCompany = company;
+        break;
+      }
+    }
+    if (!isValid) return res.sendStatus(400);
+
+    const event = JSON.parse(rawBody);
+    if (event.event!== "charge.success") return res.sendStatus(200);
+
+    const { user_id } = event.data.metadata || {};
+    const amount = event.data.amount / 100;
+    const reference = event.data.reference;
+
+    if (!user_id) return res.sendStatus(200);
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // 2. IDEMPOTENCY CHECK FIRST - if exists, skip everything
+      const existing = await client.query(
+        "SELECT id FROM transactions WHERE reference=$1 FOR UPDATE",
+        [reference]
+      );
+      if (existing.rows.length > 0) {
+        await client.query("ROLLBACK");
+        console.log(`Duplicate webhook ignored: ${reference}`);
+        return res.sendStatus(200);
+      }
+
+      const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [user_id]);
+      if (!userRes.rows.length) {
+        await client.query("ROLLBACK");
+        return res.sendStatus(200);
+      }
+
+      // 3. ATOMIC INCREMENT - not read then write
+      const updateRes = await client.query(
+        "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
+        [amount, user_id]
+      );
+      const newBalance = updateRes.rows[0].wallet_balance;
+
+      // 4. Insert transaction - if this fails, whole thing rolls back
+      await client.query(
+        `INSERT INTO transactions(user_id,type,amount,reference,status,description)
+         VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS','Wallet funding via Paystack')`,
+        [user_id, amount, reference]
+      );
+
+      await client.query("COMMIT");
+      sendWalletUpdate(user_id, Number(newBalance));
+
+      await sendPushNotification(userRes.rows[0].company, user_id, {
+        title: `${userRes.rows[0].company.toUpperCase()} - Wallet Funded`,
+        body: `Your wallet was credited with ₦${amount}`,
+        url: '/dashboard.html'
+      });
+
+      console.log(`Webhook processed: ${reference} - ₦${amount} to user ${user_id}`);
+    } catch (e) {
+      await client.query("ROLLBACK");
+      console.log("WEBHOOK TX ERROR:", e.message);
+    } finally {
+      client.release();
+    }
+
+    res.sendStatus(200);
+  } catch (e) {
+    console.log("WEBHOOK ERROR:", e.message);
+    res.sendStatus(500);
+  }
+});/* ================= PAYSTACK WEBHOOK - FIXED ================= */
+app.post("/api/paystack/webhook", async (req, res) => {
+  try {
+    const rawBody = req.body;
+    const signature = req.headers["x-paystack-signature"];
+
+    // 1. Verify signature
+    let isValid = false;
+    let matchedCompany = null;
+    for (const company of Object.keys(PAYSTACK_KEYS)) {
+      const secret = PAYSTACK_KEYS[company]?.secret;
+      if (!secret) continue;
+      const hash = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
+      if (hash === signature) {
+        isValid = true;
+        matchedCompany = company;
+        break;
+      }
+    }
+    if (!isValid) return res.sendStatus(400);
+
+    const event = JSON.parse(rawBody);
+    if (event.event!== "charge.success") return res.sendStatus(200);
+
+    const { user_id } = event.data.metadata || {};
+    const amount = event.data.amount / 100;
+    const reference = event.data.reference;
+
+    if (!user_id) return res.sendStatus(200);
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // 2. IDEMPOTENCY CHECK FIRST - if exists, skip everything
+      const existing = await client.query(
+        "SELECT id FROM transactions WHERE reference=$1 FOR UPDATE",
+        [reference]
+      );
+      if (existing.rows.length > 0) {
+        await client.query("ROLLBACK");
+        console.log(`Duplicate webhook ignored: ${reference}`);
+        return res.sendStatus(200);
+      }
+
+      const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [user_id]);
+      if (!userRes.rows.length) {
+        await client.query("ROLLBACK");
+        return res.sendStatus(200);
+      }
+
+      // 3. ATOMIC INCREMENT - not read then write
+      const updateRes = await client.query(
+        "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
+        [amount, user_id]
+      );
+      const newBalance = updateRes.rows[0].wallet_balance;
+
+      // 4. Insert transaction - if this fails, whole thing rolls back
+      await client.query(
+        `INSERT INTO transactions(user_id,type,amount,reference,status,description)
+         VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS','Wallet funding via Paystack')`,
+        [user_id, amount, reference]
+      );
+
+      await client.query("COMMIT");
+      sendWalletUpdate(user_id, Number(newBalance));
+
+      await sendPushNotification(userRes.rows[0].company, user_id, {
+        title: `${userRes.rows[0].company.toUpperCase()} - Wallet Funded`,
+        body: `Your wallet was credited with ₦${amount}`,
+        url: '/dashboard.html'
+      });
+
+      console.log(`Webhook processed: ${reference} - ₦${amount} to user ${user_id}`);
+    } catch (e) {
+      await client.query("ROLLBACK");
+      console.log("WEBHOOK TX ERROR:", e.message);
+    } finally {
+      client.release();
+    }
+
+    res.sendStatus(200);
+  } catch (e) {
+    console.log("WEBHOOK ERROR:", e.message);
+    res.sendStatus(500);
+  }
+});/* ================= PAYSTACK WEBHOOK - FIXED ================= */
+app.post("/api/paystack/webhook", async (req, res) => {
+  try {
+    const rawBody = req.body;
+    const signature = req.headers["x-paystack-signature"];
+
+    // 1. Verify signature
+    let isValid = false;
+    let matchedCompany = null;
+    for (const company of Object.keys(PAYSTACK_KEYS)) {
+      const secret = PAYSTACK_KEYS[company]?.secret;
+      if (!secret) continue;
+      const hash = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
+      if (hash === signature) {
+        isValid = true;
+        matchedCompany = company;
+        break;
+      }
+    }
+    if (!isValid) return res.sendStatus(400);
+
+    const event = JSON.parse(rawBody);
+    if (event.event!== "charge.success") return res.sendStatus(200);
+
+    const { user_id } = event.data.metadata || {};
+    const amount = event.data.amount / 100;
+    const reference = event.data.reference;
+
+    if (!user_id) return res.sendStatus(200);
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // 2. IDEMPOTENCY CHECK FIRST - if exists, skip everything
+      const existing = await client.query(
+        "SELECT id FROM transactions WHERE reference=$1 FOR UPDATE",
+        [reference]
+      );
+      if (existing.rows.length > 0) {
+        await client.query("ROLLBACK");
+        console.log(`Duplicate webhook ignored: ${reference}`);
+        return res.sendStatus(200);
+      }
+
+      const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [user_id]);
+      if (!userRes.rows.length) {
+        await client.query("ROLLBACK");
+        return res.sendStatus(200);
+      }
+
+      // 3. ATOMIC INCREMENT - not read then write
+      const updateRes = await client.query(
+        "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
+        [amount, user_id]
+      );
+      const newBalance = updateRes.rows[0].wallet_balance;
+
+      // 4. Insert transaction - if this fails, whole thing rolls back
+      await client.query(
+        `INSERT INTO transactions(user_id,type,amount,reference,status,description)
+         VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS','Wallet funding via Paystack')`,
+        [user_id, amount, reference]
+      );
+
+      await client.query("COMMIT");
+      sendWalletUpdate(user_id, Number(newBalance));
+
+      await sendPushNotification(userRes.rows[0].company, user_id, {
+        title: `${userRes.rows[0].company.toUpperCase()} - Wallet Funded`,
+        body: `Your wallet was credited with ₦${amount}`,
+        url: '/dashboard.html'
+      });
+
+      console.log(`Webhook processed: ${reference} - ₦${amount} to user ${user_id}`);
+    } catch (e) {
+      await client.query("ROLLBACK");
+      console.log("WEBHOOK TX ERROR:", e.message);
+    } finally {
+      client.release();
+    }
+
     res.sendStatus(200);
   } catch (e) {
     console.log("WEBHOOK ERROR:", e.message);
