@@ -10,7 +10,8 @@ const axios = require("axios");
 const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 const webpush = require("web-push");
-
+const PORT = process.env.PORT || 5000;
+console.log('BUILD VERSION: 2026-04-28-TEST');
 const {
   generateRegistrationOptions,
   verifyRegistrationResponse,
