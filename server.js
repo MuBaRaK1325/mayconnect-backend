@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const http = require("http");
 const { Pool } = require("pg");
-const crypto = require("crypto");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
 const server = http.createServer(app);
@@ -13,21 +13,15 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-console.log('ADDED WEBHOOK: 2026-04-28');
-
-app.use(cors({
-  origin: ['https://bnhabeeb-frontend.onrender.com'],
-  credentials: true
-}));
-
-// CRITICAL: Raw body for Paystack, JSON for everything else
-app.use((req, res, next) => {
-  if (req.originalUrl === "/api/webhook") {
-    express.raw({ type: "application/json" })(req, res, next);
-  } else {
-    express.json()(req, res, next);
-  }
+const buyDataLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100
 });
+
+console.log('SAFE BUILD: 2026-04-28');
+
+app.use(cors());
+app.use(express.json());
 
 app.get('/api/ping', async (req, res) => {
   try {
@@ -38,19 +32,8 @@ app.get('/api/ping', async (req, res) => {
   }
 });
 
-// PAYSTACK WEBHOOK
-app.post('/api/webhook', (req, res) => {
-  console.log('PAYSTACK WEBHOOK HIT');
-  const hash = crypto.createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
-                     .update(req.body)
-                     .digest('hex');
-  
-  if (hash !== req.headers['x-paystack-signature']) {
-    return res.status(400).send('Invalid signature');
-  }
-  
-  console.log('Webhook verified');
-  res.status(200).send('ok');
+app.get('/api/health', (req, res) => {
+  res.send('ok');
 });
 
 server.listen(PORT, () => {
