@@ -10,11 +10,7 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// ONLY ONE POOL DECLARATION - DELETE ALL OTHERS
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+
 
 console.log('BUILD: 2026-04-28-FINAL');
 
