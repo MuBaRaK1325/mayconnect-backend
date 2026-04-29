@@ -1,22 +1,61 @@
 const express = require("express");
 const cors = require("cors");
+const { Pool } = require("pg");
 const http = require("http");
+const crypto = require("crypto");
+const webpush = require("web-push");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
+app.set('trust proxy', 1);
+
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-console.log('WORKING BUILD: 2026-04-28');
+// SINGLE DECLARATIONS ONLY
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
-app.use(cors());
-app.use(express.json());
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY;
+
+if (VAPID_PUBLIC && VAPID_PRIVATE) {
+  webpush.setVapidDetails('mailto:support@teeversh.com', VAPID_PUBLIC, VAPID_PRIVATE);
+}
+
+const buyDataLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100
+});
+
+console.log('FINAL FIX: 2026-04-28');
+
+app.use(cors({
+  origin: ['https://bnhabeeb-frontend.onrender.com'],
+  credentials: true
+}));
+
+app.use((req, res, next) => {
+  if (req.originalUrl === "/api/webhook") {
+    express.raw({ type: "application/json" })(req, res, next);
+  } else {
+    express.json()(req, res, next);
+  }
+});
 
 app.get('/api/ping', (req, res) => {
+  console.log('PING HIT');
   res.send('pong');
 });
 
+app.post('/api/webhook', (req, res) => {
+  res.status(200).send('ok');
+});
+
 server.listen(PORT, () => {
-  console.log(`Server running on ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
 
 /* ================= CONFIG ================= */
