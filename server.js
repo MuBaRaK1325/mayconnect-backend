@@ -58,10 +58,7 @@ server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
 
-/* ================= VAPID - 1 Firebase for all 4 companies ================= */
-const VAPID_PUBLIC = process.env.VAPID_PUBLIC;
-const VAPID_PRIVATE = process.env.VAPID_PRIVATE;
-webpush.setVapidDetails('mailto:support@teeversh.com', VAPID_PUBLIC, VAPID_PRIVATE);
+
 
 /* ================= CONFIG ================= */
 const ADMIN_EMAILS = [
