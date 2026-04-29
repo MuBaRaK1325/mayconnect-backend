@@ -1407,6 +1407,17 @@ app.post("/api/paystack/webhook", async (req, res) => {
     res.sendStatus(500);
   }
 });/* ================= PAYSTACK WEBHOOK - FIXED ================= */
+app.post("/api/paystack/webhook", express.raw({type: 'application/json'}), async (req, res) => {
+  console.log("PAYSTACK WEBHOOK HIT"); // <-- ONLY add this line
+  try {
+    const rawBody = req.body;
+    const hash = crypto.createHmac('sha512', secret).update(rawBody).digest('hex');
+    // ... rest of your existing code
+  } catch (e) {
+    console.error('Webhook processing error:', e);
+    res.sendStatus(500);
+  }
+}); // <-- make sure this closing }); exists
 app.post("/api/paystack/webhook", async (req, res) => {
   try {
     const rawBody = req.body;
