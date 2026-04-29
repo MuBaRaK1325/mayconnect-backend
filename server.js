@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const http = require("http");
 const { Pool } = require("pg");
-const rateLimit = require("express-rate-limit");
+const { WebSocketServer } = require("ws");
 
 const app = express();
 const server = http.createServer(app);
@@ -13,15 +13,19 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const buyDataLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100
-});
+// ADD WEBSOCKET - DECLARED ONCE
+const wss = new WebSocketServer({ server });
 
-console.log('SAFE BUILD: 2026-04-28');
+console.log('ADDED WEBSOCKET: 2026-04-28');
 
 app.use(cors());
 app.use(express.json());
+
+wss.on("connection", (ws, req) => {
+  console.log('WebSocket client connected');
+  ws.send('connected to server');
+  ws.on('close', () => console.log('Client disconnected'));
+});
 
 app.get('/api/ping', async (req, res) => {
   try {
@@ -30,10 +34,6 @@ app.get('/api/ping', async (req, res) => {
   } catch (err) {
     res.send('pong but db failed');
   }
-});
-
-app.get('/api/health', (req, res) => {
-  res.send('ok');
 });
 
 server.listen(PORT, () => {
