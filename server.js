@@ -18,7 +18,7 @@ const {
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
 
-const { isoBase64URL } = require('@simplewebauthn/server/helpers');
+
 
 const app = express();
 app.set('trust proxy', 1);
