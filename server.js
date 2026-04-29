@@ -4,7 +4,7 @@ const { Pool } = require("pg");
 const http = require("http");
 const crypto = require("crypto");
 const webpush = require("web-push");
-const rateLimit = require("express-rate-limit"); // ADD THIS BACK
+const rateLimit = require("express-rate-limit");
 
 const app = express();
 app.set('trust proxy', 1);
@@ -12,6 +12,7 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
+// === DECLARE EACH THING EXACTLY ONCE ===
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -24,15 +25,15 @@ if (VAPID_PUBLIC && VAPID_PRIVATE) {
   webpush.setVapidDetails('mailto:support@teeversh.com', VAPID_PUBLIC, VAPID_PRIVATE);
 }
 
-// RATE LIMITER - NOW IT WILL WORK
 const buyDataLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 100,
   message: 'Too many requests from this IP'
 });
 
-console.log('CLEAN BUILD: 2026-04-28');
+console.log('NO DUPLICATES BUILD: 2026-04-28');
 
+// === MIDDLEWARE ===
 app.use(cors({
   origin: ['https://bnhabeeb-frontend.onrender.com'],
   credentials: true
@@ -46,6 +47,7 @@ app.use((req, res, next) => {
   }
 });
 
+// === ROUTES ===
 app.get('/api/ping', (req, res) => {
   console.log('PING HIT');
   res.send('pong');
@@ -56,9 +58,7 @@ app.post('/api/webhook', (req, res) => {
   res.status(200).send('ok');
 });
 
-// Example: use the limiter on a route
-// app.post('/api/buy-data', buyDataLimiter, (req, res) => { ... });
-
+// === START SERVER - LAST LINE ===
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
