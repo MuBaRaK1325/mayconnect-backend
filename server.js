@@ -23,6 +23,7 @@ app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+const PORT = process.env.PORT || 3000;
 
 // 1. CORS
 app.use(cors({
@@ -39,7 +40,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// 2. Body parser - MUST match route below
+// 2. Body parser - use /api/webhook to match most Paystack setups
 app.use((req, res, next) => {
   if (req.originalUrl === "/api/webhook") {
     express.raw({ type: "application/json" })(req, res, next);
@@ -48,7 +49,13 @@ app.use((req, res, next) => {
   }
 });
 
-// 3. WEBHOOK ROUTE - MUST MATCH PAYSTACK URL
+// 3. TEST ROUTE - ADD THIS FIRST
+app.get('/api/ping', (req, res) => {
+  console.log('PING HIT');
+  res.send('pong');
+});
+
+// 4. PAYSTACK WEBHOOK ROUTE
 app.post('/api/webhook', (req, res) => {
   console.log('PAYSTACK WEBHOOK HIT:', new Date().toISOString());
   res.status(200).send('ok');
@@ -77,13 +84,12 @@ app.post('/api/webhook', (req, res) => {
   }
 });
 
-// 4. TEST ROUTE - ADD THIS TO DEBUG
-app.get('/api/ping', (req, res) => {
-  console.log('PING HIT');
-  res.send('pong');
-});
+// ... rest of your routes go here
 
-// ... rest of your routes
+// 5. START SERVER - THIS WAS LIKELY MISSING
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
 /* ================= DATABASE ================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
