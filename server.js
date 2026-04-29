@@ -1047,7 +1047,10 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
         email: user.email,
         amount: Number(amount) * 100,
         reference,
-        metadata: { user_id: user.id, company: user.company }
+        metadata: { 
+          user_id: user.id, // <-- THIS WAS MISSING
+          company: user.company 
+        }
       },
       { headers: { Authorization: `Bearer ${paystackSecret}` } }
     );
