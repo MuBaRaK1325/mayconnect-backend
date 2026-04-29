@@ -25,10 +25,7 @@ if (VAPID_PUBLIC && VAPID_PRIVATE) {
   webpush.setVapidDetails('mailto:support@teeversh.com', VAPID_PUBLIC, VAPID_PRIVATE);
 }
 
-const buyDataLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100
-});
+ 
 
 console.log('FINAL FIX: 2026-04-28');
 
