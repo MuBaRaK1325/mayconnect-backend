@@ -3,7 +3,7 @@ const cors = require("cors");
 const { Pool } = require("pg");
 const http = require("http");
 const crypto = require("crypto");
-const webpush = require("web-push"); // ADD THIS LINE BACK
+const webpush = require("web-push");
 
 const app = express();
 app.set('trust proxy', 1);
@@ -11,28 +11,29 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// ONLY ONE POOL
+// DATABASE - DECLARE ONCE
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// VAPID KEYS - ADD THESE TO RENDER ENV VARS
+// VAPID - DECLARE ONCE
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY;
 
-// ONLY CALL THIS ONCE
 if (VAPID_PUBLIC && VAPID_PRIVATE) {
   webpush.setVapidDetails('mailto:support@teeversh.com', VAPID_PUBLIC, VAPID_PRIVATE);
 }
 
-console.log('FINAL BUILD: 2026-04-28');
+console.log('CLEAN BUILD: 2026-04-28');
 
+// CORS
 app.use(cors({
   origin: ['https://bnhabeeb-frontend.onrender.com'],
   credentials: true
 }));
 
+// BODY PARSER
 app.use((req, res, next) => {
   if (req.originalUrl === "/api/webhook") {
     express.raw({ type: "application/json" })(req, res, next);
@@ -41,6 +42,7 @@ app.use((req, res, next) => {
   }
 });
 
+// ROUTES
 app.get('/api/ping', (req, res) => {
   console.log('PING HIT');
   res.send('pong');
@@ -51,6 +53,7 @@ app.post('/api/webhook', (req, res) => {
   res.status(200).send('ok');
 });
 
+// START SERVER - LAST LINE
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
