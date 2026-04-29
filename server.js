@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const express = require("express"); // you were missing this import
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
@@ -11,7 +12,6 @@ const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 const webpush = require("web-push");
 
-// KEEP ONLY THIS ONE IMPORT - DELETE THE OTHER ONE BELOW
 const {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -49,6 +49,38 @@ app.use((req, res, next) => {
   }
 });
 
+// 3. PAYSTACK WEBHOOK ROUTE - ADD THIS RIGHT HERE
+app.post('/api/paystack/webhook', (req, res) => {
+  console.log('PAYSTACK WEBHOOK HIT:', new Date().toISOString());
+  res.status(200).send('ok'); // Respond immediately so Paystack doesn't retry
+
+  try {
+    const hash = crypto.createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
+      .update(req.body)
+      .digest('hex');
+      
+    if (hash !== req.headers['x-paystack-signature']) {
+      console.log('Invalid Paystack signature');
+      return;
+    }
+    
+    const event = JSON.parse(req.body.toString());
+    console.log('Event type:', event.event);
+    
+    if (event.event === 'charge.success') {
+      const { reference, amount, customer } = event.data;
+      const amountInNaira = amount / 100;
+      console.log(`SUCCESS: Credit ${customer.email} with NGN ${amountInNaira}, ref: ${reference}`);
+      
+      // TODO: Update user wallet balance in DB here
+      // Example: await pool.query('UPDATE users SET balance = balance + $1 WHERE email = $2', [amountInNaira, customer.email]);
+    }
+  } catch (err) {
+    console.log('Webhook processing error:', err.message);
+  }
+});
+
+// ... rest of your routes go below
 /* ================= DATABASE ================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
