@@ -3,6 +3,7 @@ const cors = require("cors");
 const { Pool } = require("pg");
 const http = require("http");
 const crypto = require("crypto");
+const webpush = require("web-push"); // ADD THIS LINE BACK
 
 const app = express();
 app.set('trust proxy', 1);
@@ -10,20 +11,28 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
+// ONLY ONE POOL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
+// VAPID KEYS - ADD THESE TO RENDER ENV VARS
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY;
 
-console.log('BUILD: 2026-04-28-FINAL');
+// ONLY CALL THIS ONCE
+if (VAPID_PUBLIC && VAPID_PRIVATE) {
+  webpush.setVapidDetails('mailto:support@teeversh.com', VAPID_PUBLIC, VAPID_PRIVATE);
+}
 
-// 1. CORS
+console.log('FINAL BUILD: 2026-04-28');
+
 app.use(cors({
-  origin: [
-    'https://bnhabeeb-frontend.onrender.com',
-    'http://localhost:3000'
-  ],
+  origin: ['https://bnhabeeb-frontend.onrender.com'],
   credentials: true
 }));
 
-// 2. Body parser
 app.use((req, res, next) => {
   if (req.originalUrl === "/api/webhook") {
     express.raw({ type: "application/json" })(req, res, next);
@@ -32,47 +41,18 @@ app.use((req, res, next) => {
   }
 });
 
-// 3. TEST ROUTE
 app.get('/api/ping', (req, res) => {
   console.log('PING HIT');
   res.send('pong');
 });
 
-// 4. PAYSTACK WEBHOOK
 app.post('/api/webhook', (req, res) => {
-  console.log('PAYSTACK WEBHOOK HIT:', new Date().toISOString());
+  console.log('PAYSTACK WEBHOOK HIT');
   res.status(200).send('ok');
-  
-  try {
-    const hash = crypto.createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
-      .update(req.body)
-      .digest('hex');
-      
-    if (hash !== req.headers['x-paystack-signature']) {
-      console.log('Invalid Paystack signature');
-      return;
-    }
-    
-    const event = JSON.parse(req.body.toString());
-    console.log('Event type:', event.event);
-    
-    if (event.event === 'charge.success') {
-      const { reference, amount, customer } = event.data;
-      console.log(`SUCCESS: Credit ${customer.email} with ${amount/100} NGN`);
-    }
-  } catch (err) {
-    console.log('Webhook error:', err.message);
-  }
 });
 
-// 5. START SERVER - MUST BE LAST
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-});
-/* ================= DATABASE ================= */
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
 });
 
 /* ================= VAPID - 1 Firebase for all 4 companies ================= */
