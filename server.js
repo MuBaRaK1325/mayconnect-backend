@@ -1,7 +1,8 @@
 const express = require("express");
 const cors = require("cors");
-const { Pool } = require("pg");
 const http = require("http");
+const { WebSocketServer } = require("ws"); // ADD THIS FOR wss
+const { Pool } = require("pg");
 const crypto = require("crypto");
 const webpush = require("web-push");
 const rateLimit = require("express-rate-limit");
@@ -12,12 +13,16 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// SINGLE DECLARATIONS ONLY
+// WEBSOCKET - DECLARE ONCE
+const wss = new WebSocketServer({ server });
+
+// DB - DECLARE ONCE  
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
+// VAPID - DECLARE ONCE
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY;
 
@@ -25,9 +30,13 @@ if (VAPID_PUBLIC && VAPID_PRIVATE) {
   webpush.setVapidDetails('mailto:support@teeversh.com', VAPID_PUBLIC, VAPID_PRIVATE);
 }
 
- 
+// RATE LIMIT - DECLARE ONCE
+const buyDataLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100
+});
 
-console.log('FINAL FIX: 2026-04-28');
+console.log('ALL IMPORTS FIXED: 2026-04-28');
 
 app.use(cors({
   origin: ['https://bnhabeeb-frontend.onrender.com'],
@@ -42,12 +51,20 @@ app.use((req, res, next) => {
   }
 });
 
+// WEBSOCKET CONNECTION
+wss.on("connection", (ws, req) => {
+  console.log('WebSocket client connected');
+  ws.on('close', () => console.log('Client disconnected'));
+});
+
+// ROUTES
 app.get('/api/ping', (req, res) => {
   console.log('PING HIT');
   res.send('pong');
 });
 
 app.post('/api/webhook', (req, res) => {
+  console.log('PAYSTACK WEBHOOK HIT');
   res.status(200).send('ok');
 });
 
