@@ -1,44 +1,23 @@
 const express = require("express");
 const cors = require("cors");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const { Pool } = require("pg");
 const http = require("http");
-const WebSocket = require("ws");
-const { v4: uuidv4 } = require("uuid");
-const axios = require("axios");
 const crypto = require("crypto");
-const rateLimit = require("express-rate-limit");
-const webpush = require("web-push");
-const PORT = process.env.PORT || 5000;
-console.log('BUILD VERSION: 2026-04-28-TEST');
-const {
-  generateRegistrationOptions,
-  verifyRegistrationResponse,
-  generateAuthenticationOptions,
-  verifyAuthenticationResponse,
-} = require('@simplewebauthn/server');
 
 const app = express();
 app.set('trust proxy', 1);
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-const PORT = process.env.PORT || 3000; // DECLARE PORT HERE - BEFORE ANY server.listen()
+const PORT = process.env.PORT || 3000;
+
+console.log('BUILD: 2026-04-28-PING-FIX'); // ADD THIS TO VERIFY DEPLOY
 
 // 1. CORS
 app.use(cors({
   origin: [
-    'https://teeversh-frontend.onrender.com',
-    'https://mayconnect-frontend.onrender.com',
-    'https://sadeeq-frontend.onrender.com',
     'https://bnhabeeb-frontend.onrender.com',
-    'http://localhost:3000',
-    'http://localhost:5173'
+    'http://localhost:3000'
   ],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  credentials: true
 }));
 
 // 2. Body parser
@@ -50,7 +29,7 @@ app.use((req, res, next) => {
   }
 });
 
-// 3. TEST ROUTE
+// 3. TEST ROUTE - MUST WORK
 app.get('/api/ping', (req, res) => {
   console.log('PING HIT');
   res.send('pong');
@@ -76,17 +55,14 @@ app.post('/api/webhook', (req, res) => {
     
     if (event.event === 'charge.success') {
       const { reference, amount, customer } = event.data;
-      const amountInNaira = amount / 100;
-      console.log(`SUCCESS: Credit ${customer.email} with NGN ${amountInNaira}, ref: ${reference}`);
+      console.log(`SUCCESS: Credit ${customer.email} with ${amount/100} NGN`);
     }
   } catch (err) {
     console.log('Webhook error:', err.message);
   }
 });
 
-// ... all your other routes go here
-
-// 5. START SERVER - MUST BE AT THE VERY BOTTOM OF THE FILE
+// 5. START SERVER - LAST LINE
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
