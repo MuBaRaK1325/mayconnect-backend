@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const { Pool } = require("pg"); // ADD THIS BACK
+const { Pool } = require("pg");
 const http = require("http");
 const crypto = require("crypto");
 
@@ -10,13 +10,13 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-console.log('BUILD: 2026-04-28-PING-FIX');
-
-// Postgres connection - add this if you use DB
+// ONLY ONE POOL DECLARATION - DELETE ALL OTHERS
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
+console.log('BUILD: 2026-04-28-FINAL');
 
 // 1. CORS
 app.use(cors({
@@ -69,7 +69,7 @@ app.post('/api/webhook', (req, res) => {
   }
 });
 
-// 5. START SERVER - LAST
+// 5. START SERVER - MUST BE LAST
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
