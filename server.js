@@ -1,6 +1,6 @@
 const express = require("express");
+// KEEP YOUR EXISTING IMPORTS - DON'T ADD express AGAIN
 const cors = require("cors");
-const express = require("express"); // you were missing this import
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
@@ -19,7 +19,7 @@ const {
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
 
-const app = express();
+const app = express(); // this line already exists in your file
 app.set('trust proxy', 1);
 
 const server = http.createServer(app);
@@ -49,11 +49,11 @@ app.use((req, res, next) => {
   }
 });
 
-// 3. PAYSTACK WEBHOOK ROUTE - ADD THIS RIGHT HERE
+// 3. ADD ONLY THIS WEBHOOK ROUTE
 app.post('/api/paystack/webhook', (req, res) => {
   console.log('PAYSTACK WEBHOOK HIT:', new Date().toISOString());
-  res.status(200).send('ok'); // Respond immediately so Paystack doesn't retry
-
+  res.status(200).send('ok');
+  
   try {
     const hash = crypto.createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
       .update(req.body)
@@ -71,16 +71,14 @@ app.post('/api/paystack/webhook', (req, res) => {
       const { reference, amount, customer } = event.data;
       const amountInNaira = amount / 100;
       console.log(`SUCCESS: Credit ${customer.email} with NGN ${amountInNaira}, ref: ${reference}`);
-      
-      // TODO: Update user wallet balance in DB here
-      // Example: await pool.query('UPDATE users SET balance = balance + $1 WHERE email = $2', [amountInNaira, customer.email]);
+      // TODO: await pool.query('UPDATE users SET balance = balance + $1 WHERE email = $2', [amountInNaira, customer.email]);
     }
   } catch (err) {
-    console.log('Webhook processing error:', err.message);
+    console.log('Webhook error:', err.message);
   }
 });
 
-// ... rest of your routes go below
+// ... rest of your routes
 /* ================= DATABASE ================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
