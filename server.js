@@ -1,5 +1,4 @@
 const express = require("express");
-// KEEP YOUR EXISTING IMPORTS - DON'T ADD express AGAIN
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -19,13 +18,13 @@ const {
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
 
-const app = express(); // this line already exists in your file
+const app = express();
 app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// 1. CORS MUST BE FIRST - BEFORE ANYTHING ELSE
+// 1. CORS
 app.use(cors({
   origin: [
     'https://teeversh-frontend.onrender.com',
@@ -40,17 +39,17 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// 2. Body parser - special case for webhook
+// 2. Body parser - MUST match route below
 app.use((req, res, next) => {
-  if (req.originalUrl === "/api/paystack/webhook") {
+  if (req.originalUrl === "/api/webhook") {
     express.raw({ type: "application/json" })(req, res, next);
   } else {
     express.json()(req, res, next);
   }
 });
 
-// 3. ADD ONLY THIS WEBHOOK ROUTE
-app.post('/api/paystack/webhook', (req, res) => {
+// 3. WEBHOOK ROUTE - MUST MATCH PAYSTACK URL
+app.post('/api/webhook', (req, res) => {
   console.log('PAYSTACK WEBHOOK HIT:', new Date().toISOString());
   res.status(200).send('ok');
   
@@ -76,6 +75,12 @@ app.post('/api/paystack/webhook', (req, res) => {
   } catch (err) {
     console.log('Webhook error:', err.message);
   }
+});
+
+// 4. TEST ROUTE - ADD THIS TO DEBUG
+app.get('/api/ping', (req, res) => {
+  console.log('PING HIT');
+  res.send('pong');
 });
 
 // ... rest of your routes
