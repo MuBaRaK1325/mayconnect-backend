@@ -23,7 +23,7 @@ app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-// DON'T ADD const PORT HERE - USE THE ONE YOU ALREADY HAVE
+const PORT = process.env.PORT || 3000; // DECLARE PORT HERE - BEFORE ANY server.listen()
 
 // 1. CORS
 app.use(cors({
@@ -40,7 +40,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// 2. Body parser - MUST match webhook path
+// 2. Body parser
 app.use((req, res, next) => {
   if (req.originalUrl === "/api/webhook") {
     express.raw({ type: "application/json" })(req, res, next);
@@ -77,18 +77,15 @@ app.post('/api/webhook', (req, res) => {
       const { reference, amount, customer } = event.data;
       const amountInNaira = amount / 100;
       console.log(`SUCCESS: Credit ${customer.email} with NGN ${amountInNaira}, ref: ${reference}`);
-      // TODO: await pool.query('UPDATE users SET balance = balance + $1 WHERE email = $2', [amountInNaira, customer.email]);
     }
   } catch (err) {
     console.log('Webhook error:', err.message);
   }
 });
 
-// ... rest of your routes
+// ... all your other routes go here
 
-// 5. START SERVER - USE YOUR EXISTING PORT VARIABLE
-// Find your existing server.listen() at the bottom and keep it
-// If you don't have one, add this at the very bottom:
+// 5. START SERVER - MUST BE AT THE VERY BOTTOM OF THE FILE
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
