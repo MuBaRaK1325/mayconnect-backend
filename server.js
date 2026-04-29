@@ -1035,10 +1035,18 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
   if (!amount || amount < 100) return res.status(400).json({ message: "Minimum funding is ₦100" });
 
   const user = await getUser(req.user.id);
+  console.log("FUND INIT USER:", { id: user.id, email: user.email, company: user.company }); // ADD THIS
+  
   const paystackSecret = getPaystackKey(user.company, "secret");
   if (!paystackSecret) return res.status(500).json({ message: "Payment not configured for your company" });
 
   const reference = "FUND-" + uuidv4();
+  const metadata = { 
+    user_id: user.id, 
+    company: user.company 
+  };
+  
+  console.log("PAYSTACK INIT METADATA:", metadata); // ADD THIS
 
   try {
     const response = await axios.post(
@@ -1047,10 +1055,7 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
         email: user.email,
         amount: Number(amount) * 100,
         reference,
-        metadata: { 
-          user_id: user.id, // <-- THIS WAS MISSING
-          company: user.company 
-        }
+        metadata: metadata
       },
       { headers: { Authorization: `Bearer ${paystackSecret}` } }
     );
@@ -1065,7 +1070,7 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
 app.post("/api/paystack/webhook", express.raw({type: 'application/json'}), async (req, res) => {
   console.log("PAYSTACK WEBHOOK HIT");
   try {
-    const rawBody = req.body; // This is now a Buffer
+    const rawBody = req.body;
     const signature = req.headers["x-paystack-signature"];
 
     // 1. Verify signature
@@ -1086,15 +1091,38 @@ app.post("/api/paystack/webhook", express.raw({type: 'application/json'}), async
       return res.sendStatus(400);
     }
 
-    const event = JSON.parse(rawBody.toString()); // Convert Buffer to string first
+    const event = JSON.parse(rawBody.toString());
     if (event.event!== "charge.success") return res.sendStatus(200);
 
-    const { user_id } = event.data.metadata || {};
     const amount = event.data.amount / 100;
     const reference = event.data.reference;
+    let user_id = event.data.metadata?.user_id; // For inline payments
+
+    // FALLBACK FOR DVA PAYMENTS
+    if (!user_id) {
+      console.log("No user_id in metadata, checking DVA...");
+      const customerEmail = event.data.customer?.email;
+      const accountNumber = event.data.metadata?.receiver_account_number || event.data.authorization?.receiver_bank_account_number;
+
+      if (customerEmail) {
+        const userRes = await pool.query("SELECT id FROM users WHERE email=$1", [customerEmail]);
+        if (userRes.rows.length) {
+          user_id = userRes.rows[0].id;
+          console.log(`Found user by email: ${user_id}`);
+        }
+      }
+
+      if (!user_id && accountNumber) {
+        const userRes = await pool.query("SELECT id FROM users WHERE account_number=$1", [accountNumber]);
+        if (userRes.rows.length) {
+          user_id = userRes.rows[0].id;
+          console.log(`Found user by account_number: ${user_id}`);
+        }
+      }
+    }
 
     if (!user_id) {
-      console.log("No user_id in metadata");
+      console.log("Could not identify user from webhook:", reference);
       return res.sendStatus(200);
     }
 
@@ -1127,7 +1155,7 @@ app.post("/api/paystack/webhook", express.raw({type: 'application/json'}), async
 
       await client.query(
         `INSERT INTO transactions(user_id,type,amount,reference,status,description)
-         VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS','Wallet funding via Paystack')`,
+         VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS','Wallet funding via Paystack DVA')`,
         [user_id, amount, reference]
       );
 
