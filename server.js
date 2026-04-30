@@ -213,11 +213,11 @@ app.post('/api/save-push-sub', async (req, res) => {
   }
 });
 
-async function sendPushNotification(company_id, user_id, payload) {
+async function sendPushNotification(company, user_id, payload) {
   try {
     const result = await pool.query(
-      'SELECT subscription FROM push_subscriptions WHERE company_id = $1 AND user_id = $2',
-      [company_id, user_id]
+      'SELECT subscription FROM push_subscriptions WHERE company = $1 AND user_id = $2',
+      [company, user_id]
     );
     if (result.rows.length === 0) return false;
 
@@ -227,17 +227,16 @@ async function sendPushNotification(company_id, user_id, payload) {
     );
     return true;
   } catch (err) {
-    console.error(`Push failed for ${company_id}:`, err.message);
+    console.error(`Push failed for ${company}:`, err.message);
     if (err.statusCode === 410 || err.statusCode === 404) {
       await pool.query(
-        'DELETE FROM push_subscriptions WHERE company_id = $1 AND user_id = $2',
-        [company_id, user_id]
+        'DELETE FROM push_subscriptions WHERE company = $1 AND user_id = $2',
+        [company, user_id]
       );
     }
     return false;
   }
 }
-
 app.post('/api/test-push', async (req, res) => {
   const {company_id, user_id} = req.body;
   await sendPushNotification(company_id, user_id, {
