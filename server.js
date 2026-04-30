@@ -374,7 +374,28 @@ app.get('/api/generate-hash', async (req, res) => {
   const hash = await bcrypt.hash('admin123', 10);
   res.json({ password: 'admin123', hash: hash });
 });
-
+app.post('/api/admin/gen-credentials', async (req, res) => {
+  try {
+    const { password, pin } = req.body;
+    
+    if (!password || !pin) {
+      return res.status(400).json({ error: 'Need password and pin' });
+    }
+    
+    const passwordHash = await bcrypt.hash(password, 10);
+    const pinHash = await bcrypt.hash(pin, 10);
+    
+    res.json({ 
+      password,
+      passwordHash,
+      pin,
+      pinHash,
+      sql: `UPDATE users SET password='${passwordHash}', pin_hash='${pinHash}' WHERE email='${req.body.email}';`
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 /* ================= WEBAUTHN - BIOMETRIC ================= */
 const rpName = 'TEEVERSH';
 
