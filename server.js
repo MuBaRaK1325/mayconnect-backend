@@ -12,8 +12,10 @@ const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 const webpush = require("web-push");
 
-const app = express(); // create app after all requires
-app.use(express.static('public')); // now app exists, so this works
+const app = express(); // ONLY ONE TIME
+app.use(express.static('public'));
+app.use(cors());
+app.use(express.json());
 
 const {
   generateRegistrationOptions,
