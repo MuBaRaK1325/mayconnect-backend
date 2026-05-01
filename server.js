@@ -1,7 +1,5 @@
 const express = require("express");
 const path = require('path');
-const app = express();
-app.use(express.static('public')); 
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -13,6 +11,9 @@ const axios = require("axios");
 const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 const webpush = require("web-push");
+
+const app = express(); // create app after all requires
+app.use(express.static('public')); // now app exists, so this works
 
 const {
   generateRegistrationOptions,
