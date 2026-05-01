@@ -1384,25 +1384,85 @@ app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
 
   res.json({ message: "User updated", user: result.rows[0] });
 });
-
 /* ================= ADMIN: WITHDRAWALS ================= */
+
+// 1. BANK CODES - Add at top of server.js or in separate file
+const BANK_CODES = {
+    // Commercial Banks
+    "Access Bank": "044",
+    "Citibank": "023",
+    "Ecobank": "050",
+    "Fidelity Bank": "070",
+    "First Bank": "011",
+    "FCMB": "214",
+    "GTBank": "058",
+    "GT Bank": "058",
+    "Heritage Bank": "030",
+    "Keystone Bank": "082",
+    "Polaris Bank": "076",
+    "Stanbic IBTC": "221",
+    "Standard Chartered": "068",
+    "Sterling Bank": "232",
+    "Union Bank": "032",
+    "UBA": "033",
+    "Unity Bank": "215",
+    "Wema Bank": "035",
+    "Zenith Bank": "057",
+    // Microfinance/Fintech
+    "Kuda": "50211",
+    "Opay": "999992",
+    "Palmpay": "999991",
+    "Moniepoint": "50515",
+    "VFD Microfinance": "566",
+    "Carbon": "565",
+    "Rubies MFB": "125",
+    "Sparkle": "51310"
+};
+
+function getBankCode(bankName) {
+    if (!bankName) return null;
+    const cleanName = bankName.trim();
+    const lowerName = cleanName.toLowerCase();
+
+    // Handle common variations
+    if (lowerName.includes("gtb") || lowerName.includes("gtbank")) return "058";
+    if (lowerName.includes("firstbank")) return "011";
+    if (lowerName.includes("zenith")) return "057";
+    if (lowerName.includes("access")) return "044";
+    if (lowerName.includes("uba")) return "033";
+    if (lowerName.includes("stanbic")) return "221";
+
+    return BANK_CODES[cleanName] || null;
+}
+
+// 2. LIST WITHDRAWALS - unchanged but added transfer_code
 app.get("/admin/withdrawals", auth, adminOnly, async (req, res) => {
   const wds = await pool.query(
-    "SELECT * FROM withdrawals WHERE admin_id=$1 ORDER BY created_at DESC",
+    "SELECT reference, amount, bank_name, account_number, account_name, status, transfer_code, created_at FROM withdrawals WHERE admin_id=$1 ORDER BY created_at DESC",
     [req.user.id]
   );
   res.json(wds.rows);
 });
 
+// 3. REQUEST WITHDRAWAL - add minimum check
 app.post("/admin/withdraw-request", auth, adminOnly, async (req, res) => {
   const { amount, bank_name, account_number, account_name } = req.body;
   if (!amount ||!bank_name ||!account_number ||!account_name) {
     return res.status(400).json({ message: "All fields required" });
   }
 
+  if (Number(amount) < 100) {
+    return res.status(400).json({ message: "Minimum withdrawal is ₦100" });
+  }
+
   const user = await getUser(req.user.id);
   if (Number(user.admin_wallet) < Number(amount)) {
     return res.status(400).json({ message: "Insufficient admin wallet balance" });
+  }
+
+  const bankCode = getBankCode(bank_name);
+  if (!bankCode) {
+    return res.status(400).json({ message: `Unsupported bank: ${bank_name}` });
   }
 
   const reference = "WD-" + uuidv4();
@@ -1414,9 +1474,9 @@ app.post("/admin/withdraw-request", auth, adminOnly, async (req, res) => {
        VALUES($1,$2,$3,$4,$5,$6,'PENDING')`,
       [req.user.id, amount, bank_name, account_number, account_name, reference]
     );
-    await client.query("UPDATE users SET admin_wallet = admin_wallet - $1 WHERE id=$2", [amount, req.user.id]);
+    // Don't deduct wallet yet - only on successful transfer
     await client.query("COMMIT");
-    res.json({ message: "Withdrawal request submitted", reference });
+    res.json({ message: "Withdrawal request created", reference });
   } catch (e) {
     await client.query("ROLLBACK");
     console.log("WITHDRAW ERROR:", e.message);
@@ -1426,14 +1486,115 @@ app.post("/admin/withdraw-request", auth, adminOnly, async (req, res) => {
   }
 });
 
+// 4. APPROVE WITHDRAWAL - NOW WITH PAYSTACK TRANSFER
 app.post("/admin/withdraw/approve", auth, adminOnly, async (req, res) => {
   const { reference } = req.body;
-  const result = await pool.query(
-    "UPDATE withdrawals SET status='PAID' WHERE reference=$1 AND admin_id=$2 RETURNING *",
-    [reference, req.user.id]
-  );
-  if (!result.rows.length) return res.status(404).json({ message: "Withdrawal not found" });
-  res.json({ message: "Marked as paid" });
+  const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
+
+  if (!PAYSTACK_SECRET) {
+    return res.status(500).json({ message: "Paystack key not configured" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Get withdrawal + lock row
+    const wdRes = await client.query(
+      "SELECT * FROM withdrawals WHERE reference=$1 AND admin_id=$2 FOR UPDATE",
+      [reference, req.user.id]
+    );
+
+    if (!wdRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Withdrawal not found" });
+    }
+
+    const wd = wdRes.rows[0];
+    if (wd.status!== 'PENDING') {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: `Already ${wd.status}` });
+    }
+
+    // Check admin wallet again
+    const user = await getUser(req.user.id);
+    if (Number(user.admin_wallet) < Number(wd.amount)) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Insufficient admin wallet balance" });
+    }
+
+    const bankCode = getBankCode(wd.bank_name);
+    if (!bankCode) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Unsupported bank code" });
+    }
+
+    // Step 1: Create Paystack recipient
+    const recipientRes = await fetch("https://api.paystack.co/transferrecipient", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${PAYSTACK_SECRET}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        type: "nuban",
+        name: wd.account_name,
+        account_number: wd.account_number,
+        bank_code: bankCode,
+        currency: "NGN"
+      })
+    });
+    const recipientData = await recipientRes.json();
+
+    if (!recipientData.status) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Bank validation failed: " + recipientData.message });
+    }
+
+    // Step 2: Initiate transfer
+    const transferRes = await fetch("https://api.paystack.co/transfer", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${PAYSTACK_SECRET}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        source: "balance",
+        amount: Math.round(Number(wd.amount) * 100), // kobo
+        recipient: recipientData.data.recipient_code,
+        reason: `MayConnect Admin Payout ${reference}`
+      })
+    });
+    const transferData = await transferRes.json();
+
+    if (!transferData.status) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Transfer failed: " + transferData.message });
+    }
+
+    // Step 3: Only update DB if Paystack succeeded
+    await client.query(
+      "UPDATE withdrawals SET status='PAID', transfer_code=$1, paid_at=NOW() WHERE reference=$2",
+      [transferData.data.transfer_code, reference]
+    );
+    await client.query(
+      "UPDATE users SET admin_wallet = admin_wallet - $1 WHERE id=$2",
+      [wd.amount, req.user.id]
+    );
+
+    await client.query("COMMIT");
+    res.json({
+      message: `₦${wd.amount} sent to ${wd.bank_name} ✅`,
+      transfer_code: transferData.data.transfer_code
+    });
+
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.log("APPROVE WITHDRAW ERROR:", e);
+    res.status(500).json({ message: "Server error during transfer" });
+  } finally {
+    client.release();
+  }
 });
 
 /* ================= ADMIN: REVERSE ================= */
