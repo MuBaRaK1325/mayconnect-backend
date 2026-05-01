@@ -12,7 +12,7 @@ const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 const webpush = require("web-push");
 
-const app = express();
+const app = express(); // KEEP ONLY THIS ONE
 app.use(express.static('public'));
 app.use(cors());
 app.use(express.json());
@@ -24,9 +24,7 @@ const {
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
 
-
-
-const app = express();
+// const app = express(); // DELETED THIS DUPLICATE
 app.set('trust proxy', 1);
 
 const server = http.createServer(app);
