@@ -852,9 +852,18 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
     const user = userRes.rows[0];
 
-    // BIOMETRIC BYPASS: Skip PIN check if biometric_verified
+    // BIOMETRIC BYPASS + NULL PIN CHECK - FIXED
     if (pin!== 'biometric_verified') {
-      if (!await bcrypt.compare(pin, user.pin)) {
+      if (!user.pin) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ 
+          message: "Transaction PIN not set. Please set your PIN in Profile first.",
+          needPin: true 
+        });
+      }
+      
+      const validPin = await bcrypt.compare(String(pin), String(user.pin));
+      if (!validPin) {
         await client.query("ROLLBACK");
         return res.status(400).json({ message: "Invalid PIN" });
       }
