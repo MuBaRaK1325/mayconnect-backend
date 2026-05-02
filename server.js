@@ -1042,21 +1042,33 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
 /* ================= FUND INIT ================= */
 app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
   const { amount } = req.body;
-  if (!amount || amount < 100) return res.status(400).json({ message: "Minimum funding is ₦100" });
+
+  if (!amount || Number(amount) < 100) {
+    return res.status(400).json({ message: "Minimum funding is ₦100" });
+  }
 
   const user = await getUser(req.user.id);
-  console.log("FUND INIT USER:", { id: user.id, email: user.email, company: user.company }); // ADD THIS
-  
+
+  console.log("FUND INIT USER:", {
+    id: user.id,
+    email: user.email,
+    company: user.company
+  });
+
   const paystackSecret = getPaystackKey(user.company, "secret");
-  if (!paystackSecret) return res.status(500).json({ message: "Payment not configured for your company" });
+
+  if (!paystackSecret) {
+    return res.status(500).json({ message: "Payment not configured for your company" });
+  }
 
   const reference = "FUND-" + uuidv4();
-  const metadata = { 
-    user_id: user.id, 
-    company: user.company 
+
+  const metadata = {
+    user_id: user.id,
+    company: user.company
   };
-  
-  console.log("PAYSTACK INIT METADATA:", metadata); // ADD THIS
+
+  console.log("PAYSTACK INIT METADATA:", metadata);
 
   try {
     const response = await axios.post(
@@ -1065,133 +1077,173 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
         email: user.email,
         amount: Number(amount) * 100,
         reference,
-        metadata: metadata
+        metadata
       },
-      { headers: { Authorization: `Bearer ${paystackSecret}` } }
+      {
+        headers: {
+          Authorization: `Bearer ${paystackSecret}`
+        }
+      }
     );
-    res.json({ url: response.data.data.authorization_url, reference });
+
+    res.json({
+      url: response.data.data.authorization_url,
+      reference
+    });
+
   } catch (e) {
     console.log("FUND INIT ERROR:", e.response?.data || e.message);
     res.status(500).json({ message: "Unable to initialize payment" });
   }
 });
-
 /* ================= PAYSTACK WEBHOOK ================= */
-app.post("/api/paystack/webhook", express.raw({type: 'application/json'}), async (req, res) => {
-  console.log("PAYSTACK WEBHOOK HIT");
-  try {
-    const rawBody = req.body;
-    const signature = req.headers["x-paystack-signature"];
+app.post("/api/paystack/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
 
-    // 1. Verify signature
-    let isValid = false;
-    let matchedCompany = null;
-    for (const company of Object.keys(PAYSTACK_KEYS)) {
-      const secret = PAYSTACK_KEYS[company]?.secret;
-      if (!secret) continue;
-      const hash = crypto.createHmac("sha512", secret).update(rawBody).digest("hex");
-      if (hash === signature) {
-        isValid = true;
-        matchedCompany = company;
-        break;
-      }
-    }
-    if (!isValid) {
-      console.log("Invalid signature");
-      return res.sendStatus(400);
-    }
+    console.log("PAYSTACK WEBHOOK HIT");
 
-    const event = JSON.parse(rawBody.toString());
-    if (event.event!== "charge.success") return res.sendStatus(200);
-
-    const amount = event.data.amount / 100;
-    const reference = event.data.reference;
-    let user_id = event.data.metadata?.user_id; // For inline payments
-
-    // FALLBACK FOR DVA PAYMENTS
-    if (!user_id) {
-      console.log("No user_id in metadata, checking DVA...");
-      const customerEmail = event.data.customer?.email;
-      const accountNumber = event.data.metadata?.receiver_account_number || event.data.authorization?.receiver_bank_account_number;
-
-      if (customerEmail) {
-        const userRes = await pool.query("SELECT id FROM users WHERE email=$1", [customerEmail]);
-        if (userRes.rows.length) {
-          user_id = userRes.rows[0].id;
-          console.log(`Found user by email: ${user_id}`);
-        }
-      }
-
-      if (!user_id && accountNumber) {
-        const userRes = await pool.query("SELECT id FROM users WHERE account_number=$1", [accountNumber]);
-        if (userRes.rows.length) {
-          user_id = userRes.rows[0].id;
-          console.log(`Found user by account_number: ${user_id}`);
-        }
-      }
-    }
-
-    if (!user_id) {
-      console.log("Could not identify user from webhook:", reference);
-      return res.sendStatus(200);
-    }
-
-    const client = await pool.connect();
     try {
-      await client.query("BEGIN");
+      const rawBody = req.body; // MUST BE BUFFER
+      const signature = req.headers["x-paystack-signature"];
 
-      const existing = await client.query(
-        "SELECT id FROM transactions WHERE reference=$1 FOR UPDATE",
-        [reference]
-      );
-      if (existing.rows.length > 0) {
-        await client.query("ROLLBACK");
-        console.log(`Duplicate webhook ignored: ${reference}`);
+      if (!rawBody || !signature) {
+        console.log("Missing rawBody or signature");
+        return res.sendStatus(400);
+      }
+
+      /* ================= VERIFY SIGNATURE ================= */
+      let isValid = false;
+      let matchedCompany = null;
+
+      for (const company of Object.keys(PAYSTACK_KEYS)) {
+        const secret = PAYSTACK_KEYS[company]?.secret;
+        if (!secret) continue;
+
+        const hash = crypto
+          .createHmac("sha512", secret)
+          .update(rawBody) // ✅ BUFFER ONLY
+          .digest("hex");
+
+        if (hash === signature) {
+          isValid = true;
+          matchedCompany = company;
+          break;
+        }
+      }
+
+      if (!isValid) {
+        console.log("❌ Invalid signature");
+        return res.sendStatus(400);
+      }
+
+      /* ================= PARSE EVENT ================= */
+      const event = JSON.parse(rawBody.toString());
+
+      console.log("EVENT:", event.event);
+
+      if (event.event !== "charge.success") {
         return res.sendStatus(200);
       }
 
-      const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [user_id]);
-      if (!userRes.rows.length) {
-        await client.query("ROLLBACK");
-        console.log(`User not found: ${user_id}`);
+      const amount = event.data.amount / 100;
+      const reference = event.data.reference;
+
+      let user_id = event.data.metadata?.user_id;
+
+      /* ================= FALLBACK (DVA) ================= */
+      if (!user_id) {
+        console.log("No metadata user_id, fallback...");
+
+        const email = event.data.customer?.email;
+        const accountNumber =
+          event.data.metadata?.receiver_account_number ||
+          event.data.authorization?.receiver_bank_account_number;
+
+        if (email) {
+          const u = await pool.query("SELECT id FROM users WHERE email=$1", [email]);
+          if (u.rows.length) {
+            user_id = u.rows[0].id;
+            console.log("Found by email:", user_id);
+          }
+        }
+
+        if (!user_id && accountNumber) {
+          const u = await pool.query("SELECT id FROM users WHERE account_number=$1", [accountNumber]);
+          if (u.rows.length) {
+            user_id = u.rows[0].id;
+            console.log("Found by account number:", user_id);
+          }
+        }
+      }
+
+      if (!user_id) {
+        console.log("❌ User not found for:", reference);
         return res.sendStatus(200);
       }
 
-      const updateRes = await client.query(
-        "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
-        [amount, user_id]
-      );
-      const newBalance = updateRes.rows[0].wallet_balance;
+      /* ================= TRANSACTION SAFE ================= */
+      const client = await pool.connect();
 
-      await client.query(
-        `INSERT INTO transactions(user_id,type,amount,reference,status,description)
-         VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS','Wallet funding via Paystack DVA')`,
-        [user_id, amount, reference]
-      );
+      try {
+        await client.query("BEGIN");
 
-      await client.query("COMMIT");
-      sendWalletUpdate(user_id, Number(newBalance));
+        const existing = await client.query(
+          "SELECT id FROM transactions WHERE reference=$1 FOR UPDATE",
+          [reference]
+        );
 
-      await sendPushNotification(userRes.rows[0].company, user_id, {
-        title: `${userRes.rows[0].company.toUpperCase()} - Wallet Funded`,
-        body: `Your wallet was credited with ₦${amount}`,
-        url: '/dashboard.html'
-      });
+        if (existing.rows.length > 0) {
+          await client.query("ROLLBACK");
+          console.log("Duplicate webhook ignored:", reference);
+          return res.sendStatus(200);
+        }
 
-      console.log(`Webhook processed: ${reference} - ₦${amount} to user ${user_id}`);
+        const userRes = await client.query(
+          "SELECT * FROM users WHERE id=$1 FOR UPDATE",
+          [user_id]
+        );
+
+        if (!userRes.rows.length) {
+          await client.query("ROLLBACK");
+          console.log("User not found:", user_id);
+          return res.sendStatus(200);
+        }
+
+        const update = await client.query(
+          "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
+          [amount, user_id]
+        );
+
+        const newBalance = update.rows[0].wallet_balance;
+
+        await client.query(
+          `INSERT INTO transactions(user_id,type,amount,reference,status)
+           VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS')`,
+          [user_id, amount, reference]
+        );
+
+        await client.query("COMMIT");
+
+        sendWalletUpdate(user_id, Number(newBalance));
+
+        console.log(`✅ Wallet funded: ₦${amount} -> user ${user_id}`);
+
+      } catch (e) {
+        await client.query("ROLLBACK");
+        console.log("WEBHOOK TX ERROR:", e.message);
+      } finally {
+        client.release();
+      }
+
+      res.sendStatus(200);
+
     } catch (e) {
-      await client.query("ROLLBACK");
-      console.log("WEBHOOK TX ERROR:", e.message);
-    } finally {
-      client.release();
+      console.log("WEBHOOK ERROR:", e.message);
+      res.sendStatus(500);
     }
-
-    res.sendStatus(200);
-  } catch (e) {
-    console.log("WEBHOOK ERROR:", e.message);
-    res.sendStatus(500);
   }
-});
+);
 
 /* ================= CHANGE PASSWORD/PIN ================= */
 app.post("/api/change-password", auth, async (req, res) => {
