@@ -691,24 +691,7 @@ app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => 
     res.status(400).json({ verified: false, error: e.message });
   }
 });
-// TEMP - GENERATE & SET PIN IN ONE SHOT
-app.post('/api/admin/force-set-pin', async (req, res) => {
-  if (req.headers['x-admin-key'] !== 'temppin123') return res.status(403).send('Forbidden');
-  
-  const { email, pin } = req.body;
-  const hash = await bcrypt.hash(String(pin), 10);
-  await pool.query('UPDATE users SET pin = $1 WHERE email = $2', [hash, email]);
-  
-  // Test it immediately
-  const test = await bcrypt.compare(String(pin), hash);
-  res.json({ 
-    message: 'PIN set', 
-    email, 
-    pin,
-    hashSet: hash,
-    testWorks: true 
-  });
-});
+
 
 
 /* ================= DVA ROUTE ================= */
