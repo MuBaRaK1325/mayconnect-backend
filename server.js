@@ -691,6 +691,26 @@ app.post('/api/auth/webauthn/verify-purchase-finish', auth, async (req, res) => 
     res.status(400).json({ verified: false, error: e.message });
   }
 });
+// TEMP - GENERATE & SET PIN IN ONE SHOT
+app.post('/api/admin/force-set-pin', async (req, res) => {
+  if (req.headers['x-admin-key'] !== 'temppin123') return res.status(403).send('Forbidden');
+  
+  const { email, pin } = req.body;
+  const hash = await bcrypt.hash(String(pin), 10);
+  await pool.query('UPDATE users SET pin = $1 WHERE email = $2', [hash, email]);
+  
+  // Test it immediately
+  const test = await bcrypt.compare(String(pin), hash);
+  res.json({ 
+    message: 'PIN set', 
+    email, 
+    pin,
+    hashSet: hash,
+    testWorks: true 
+  });
+});
+
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 /* ================= DVA ROUTE ================= */
 app.post('/api/wallet/create-dva', auth, async (req, res) => {
   try {
@@ -1231,12 +1251,7 @@ app.post("/api/change-pin", auth, async (req, res) => {
     res.status(500).json({ message: "Failed to update PIN" });
   }
 });
-// TEMP DEBUG ROUTE - DELETE AFTER
-app.get('/api/test-pin', async (req, res) => {
-  const testHash = '$2a$10$CwTycUXWue0Thq9StjUM0uA6aGOEc7dyZbVYS1zKg.GsQ9xOQ8/3K';
-  const result = await bcrypt.compare('1234', testHash);
-  res.json({ hashWorks: result });
-});
+
 /* ================= ADMIN: PROFIT ================= */
 app.get("/admin/profit", auth, adminOnly, async (req, res) => {
   const { from, to, company } = req.query;
