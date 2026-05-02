@@ -1231,7 +1231,12 @@ app.post("/api/change-pin", auth, async (req, res) => {
     res.status(500).json({ message: "Failed to update PIN" });
   }
 });
-
+// TEMP DEBUG ROUTE - DELETE AFTER
+app.get('/api/test-pin', async (req, res) => {
+  const testHash = '$2a$10$CwTycUXWue0Thq9StjUM0uA6aGOEc7dyZbVYS1zKg.GsQ9xOQ8/3K';
+  const result = await bcrypt.compare('1234', testHash);
+  res.json({ hashWorks: result });
+});
 /* ================= ADMIN: PROFIT ================= */
 app.get("/admin/profit", auth, adminOnly, async (req, res) => {
   const { from, to, company } = req.query;
