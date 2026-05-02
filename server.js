@@ -710,7 +710,7 @@ app.post('/api/admin/force-set-pin', async (req, res) => {
   });
 });
 
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+
 /* ================= DVA ROUTE ================= */
 app.post('/api/wallet/create-dva', auth, async (req, res) => {
   try {
