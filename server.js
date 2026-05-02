@@ -1201,12 +1201,35 @@ app.post("/api/change-password", auth, async (req, res) => {
 });
 
 app.post("/api/change-pin", auth, async (req, res) => {
-  const { oldPin, newPin } = req.body;
-  const user = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
-  if (!await bcrypt.compare(oldPin, user.rows[0].pin)) return res.status(400).json({ message: "Wrong old PIN" });
-  const hash = await bcrypt.hash(newPin, 10);
-  await pool.query("UPDATE users SET pin=$1 WHERE id=$2", [hash, user.rows[0].id]);
-  res.json({ message: "PIN updated" });
+  try {
+    const { oldPin, newPin } = req.body;
+
+    if (!newPin || String(newPin).length < 4) {
+      return res.status(400).json({ message: "New PIN must be at least 4 digits" });
+    }
+
+    const userRes = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
+    const user = userRes.rows[0];
+
+    // If user has a PIN, verify oldPin first
+    if (user.pin) {
+      if (!oldPin) {
+        return res.status(400).json({ message: "Enter your current PIN" });
+      }
+      const validOldPin = await bcrypt.compare(String(oldPin), String(user.pin));
+      if (!validOldPin) {
+        return res.status(400).json({ message: "Wrong old PIN" });
+      }
+    }
+    // If user.pin is NULL, skip oldPin check - allow setting for first time
+
+    const hash = await bcrypt.hash(String(newPin), 10);
+    await pool.query("UPDATE users SET pin=$1 WHERE id=$2", [hash, user.id]);
+    res.json({ message: "PIN updated successfully" });
+  } catch (e) {
+    console.log("CHANGE PIN ERROR:", e.message);
+    res.status(500).json({ message: "Failed to update PIN" });
+  }
 });
 
 /* ================= ADMIN: PROFIT ================= */
