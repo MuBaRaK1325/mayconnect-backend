@@ -949,9 +949,8 @@ app.get("/api/plans", auth, async (req, res) => {
     const { company } = userRes.rows[0];
     const userId = req.user.id;
 
-    // Check user tier: TOP > REGULAR > DEFAULT
     const [topCheck, regularCheck] = await Promise.all([
-      pool.query("SELECT 1 FROM top_users WHERE user_id = $1", [userId]),
+      pool.query("SELECT 1 FROM top_users WHERE id = $1", [userId]),
       pool.query("SELECT 1 FROM regular_users WHERE user_id = $1", [userId])
     ]);
 
@@ -967,15 +966,14 @@ app.get("/api/plans", auth, async (req, res) => {
            WHEN $2 = 'top' THEN COALESCE(top_price, regular_price, price)
            WHEN $2 = 'regular' THEN COALESCE(regular_price, price)
            ELSE price
-         END as price
+         END as price,
+         price as default_price,
+         regular_price,
+         top_price
        FROM plans
        WHERE company = $1
          AND is_active = true
-         AND (
-           restricted = false OR
-           $2 = 'top' OR
-           ($2 = 'regular' AND restricted = false)
-         )
+         AND (restricted = false OR $2 = 'top')
        ORDER BY network ASC, price ASC`,
       [company, userTier]
     );
@@ -1260,6 +1258,7 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
     total: result.rows.reduce((sum, r) => sum + Number(r.total_profit), 0)
   });
 });
+
 /* ================= ADMIN: USERS + TIERS ================= */
 app.get("/admin/users", auth, adminOnly, async (req, res) => {
   try {
@@ -1310,7 +1309,8 @@ app.post("/admin/users/set-tier", auth, adminOnly, async (req, res) => {
 
     if (tier === 'top') {
       await pool.query(
-        "INSERT INTO top_users(id, username, email, wallet_balance) SELECT id, username, email, wallet_balance FROM users WHERE id = $1",
+        `INSERT INTO top_users(id, username, email, wallet_balance) 
+         SELECT id, username, email, wallet_balance FROM users WHERE id = $1`,
         [user_id]
       );
     } else if (tier === 'regular') {
@@ -1380,7 +1380,12 @@ app.post("/admin/top-users/add", auth, adminOnly, async (req, res) => {
     if (!user.rows.length) return res.status(404).json({ message: "User not found in your company" });
 
     await pool.query(
-      "INSERT INTO top_users(id, username, email, wallet_balance) VALUES($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
+      `INSERT INTO top_users(id, username, email, wallet_balance) 
+       VALUES($1, $2, $3, $4) 
+       ON CONFLICT (id) DO UPDATE SET 
+         username = EXCLUDED.username,
+         email = EXCLUDED.email,
+         wallet_balance = EXCLUDED.wallet_balance`,
       [user.rows[0].id, user.rows[0].username, user.rows[0].email, user.rows[0].wallet_balance]
     );
     await pool.query("DELETE FROM regular_users WHERE user_id = $1", [user.rows[0].id]);
@@ -1402,7 +1407,8 @@ app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
     );
     if (!user.rows.length) return res.status(404).json({ message: "User not found in your company" });
 
-    await pool.query("DELETE FROM top_users WHERE id = $1", [user.rows[0].id]);
+    const result = await pool.query("DELETE FROM top_users WHERE id = $1", [user.rows[0].id]);
+    if (result.rowCount === 0) return res.status(404).json({ message: "User is not a top user" });
 
     broadcastTopUserUpdate(req.user.company);
     res.json({ message: "Top user removed" });
@@ -1476,6 +1482,7 @@ app.delete("/admin/regular-users/remove", auth, adminOnly, async (req, res) => {
     res.status(500).json({ message: "Failed to remove regular user" });
   }
 });
+
 
 /* ================= ADMIN: PLANS MANAGER - 3 Tier Pricing ================= */
 app.get("/admin/plans", auth, adminOnly, async (req, res) => {
