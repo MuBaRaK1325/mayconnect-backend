@@ -940,23 +940,52 @@ app.get("/api/transactions", auth, async (req, res) => {
   res.json(tx.rows);
 });
 
-/* ================= PLANS - Company isolated ================= */
+/* ================= PLANS - Company isolated with 3 tiers ================= */
 app.get("/api/plans", auth, async (req, res) => {
-  const user = await pool.query("SELECT is_top_user, company FROM users WHERE id=$1", [req.user.id]);
-  const { is_top_user, company } = user.rows[0];
+  try {
+    const userRes = await pool.query("SELECT company FROM users WHERE id = $1", [req.user.id]);
+    if (!userRes.rows.length) return res.status(404).json({ message: "User not found" });
 
-  const plans = await pool.query(
-    `SELECT * FROM plans WHERE is_active = TRUE AND (restricted = FALSE OR company = $1) ORDER BY network, price ASC`,
-    [company]
-  );
+    const { company } = userRes.rows[0];
+    const userId = req.user.id;
 
-  const result = plans.rows.map(p => ({
- ...p,
-    price: is_top_user? (p.top_price || p.price) : p.price
-  }));
-  res.json(result);
+    // Check user tier: TOP > REGULAR > DEFAULT
+    const [topCheck, regularCheck] = await Promise.all([
+      pool.query("SELECT 1 FROM top_users WHERE user_id = $1", [userId]),
+      pool.query("SELECT 1 FROM regular_users WHERE user_id = $1", [userId])
+    ]);
+
+    let userTier = 'default';
+    if (topCheck.rows.length > 0) userTier = 'top';
+    else if (regularCheck.rows.length > 0) userTier = 'regular';
+
+    const plans = await pool.query(
+      `SELECT
+         id, company, network, provider, name, validity,
+         api_plan_id, network_id, cost, is_active, restricted,
+         CASE
+           WHEN $2 = 'top' THEN COALESCE(top_price, regular_price, price)
+           WHEN $2 = 'regular' THEN COALESCE(regular_price, price)
+           ELSE price
+         END as price
+       FROM plans
+       WHERE company = $1
+         AND is_active = true
+         AND (
+           restricted = false OR
+           $2 = 'top' OR
+           ($2 = 'regular' AND restricted = false)
+         )
+       ORDER BY network ASC, price ASC`,
+      [company, userTier]
+    );
+
+    res.json(plans.rows);
+  } catch (err) {
+    console.error("Plans error:", err);
+    res.status(500).json({ message: "Failed to fetch plans" });
+  }
 });
-
 /* ================= BUY DATA - Multi-provider + BIOMETRIC ================= */
 app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
@@ -1231,17 +1260,83 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
     total: result.rows.reduce((sum, r) => sum + Number(r.total_profit), 0)
   });
 });
+/* ================= ADMIN: USERS + TIERS ================= */
+app.get("/admin/users", auth, adminOnly, async (req, res) => {
+  const { search } = req.query;
+  let query = `
+    SELECT
+      u.id, u.username, u.email, u.wallet_balance, u.company, u.created_at, u.phone,
+      CASE
+        WHEN t.user_id IS NOT NULL THEN 'top'
+        WHEN r.user_id IS NOT NULL THEN 'regular'
+        ELSE 'default'
+      END as user_tier
+    FROM users u
+    LEFT JOIN top_users t ON t.user_id = u.id
+    LEFT JOIN regular_users r ON r.user_id = u.id
+    WHERE u.company = $1
+  `;
+  const params = [req.user.company];
+  if (search) {
+    params.push(`%${search}%`);
+    query += ` AND (u.username ILIKE $${params.length} OR u.email ILIKE $${params.length})`;
+  }
+  query += ` ORDER BY u.created_at DESC LIMIT 100`;
+  const users = await pool.query(query, params);
+  res.json(users.rows);
+});
 
-/* ================= ADMIN: TOP USERS ================= */
+app.post("/admin/users/set-tier", auth, adminOnly, async (req, res) => {
+  const { user_id, tier } = req.body; // 'default', 'regular', 'top'
+
+  if (!['default', 'regular', 'top'].includes(tier)) {
+    return res.status(400).json({ message: "Invalid tier" });
+  }
+
+  // Remove from both tables first
+  await pool.query("DELETE FROM top_users WHERE user_id = $1", [user_id]);
+  await pool.query("DELETE FROM regular_users WHERE user_id = $1", [user_id]);
+
+  // Insert into correct table
+  if (tier === 'top') {
+    await pool.query("INSERT INTO top_users(user_id) VALUES($1)", [user_id]);
+  } else if (tier === 'regular') {
+    await pool.query("INSERT INTO regular_users(user_id) VALUES($1)", [user_id]);
+  }
+  // 'default' = not in either table
+
+  broadcastTopUserUpdate(req.user.company);
+  res.json({ success: true, tier });
+});
+
+app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
+  const { id } = req.params;
+  const { wallet_balance } = req.body;
+
+  if (wallet_balance === undefined) {
+    return res.status(400).json({ message: "No fields to update" });
+  }
+
+  const result = await pool.query(
+    `UPDATE users SET wallet_balance=$1 WHERE id=$2 AND company=$3 RETURNING id,username,email,wallet_balance,company`,
+    [wallet_balance, id, req.user.company]
+  );
+  if (!result.rows.length) return res.status(404).json({ message: "User not found" });
+
+  res.json({ message: "User updated", user: result.rows[0] });
+});
+
+/* ================= ADMIN: TOP USERS LIST ================= */
 app.get("/admin/top-users", auth, adminOnly, async (req, res) => {
   const users = await pool.query(
-    `SELECT u.id,u.username,u.email,u.company,u.is_top_user,
-            COALESCE(SUM(t.amount),0) as total_spent,
-            COALESCE(SUM(p.amount),0) as total_profit_generated
+    `SELECT u.id, u.username, u.email, u.company,
+            COALESCE(SUM(t.amount), 0) as total_spent,
+            COALESCE(SUM(p.amount), 0) as total_profit_generated
      FROM users u
-     LEFT JOIN transactions t ON t.user_id = u.id AND t.status='SUCCESS'
+     INNER JOIN top_users tu ON tu.user_id = u.id
+     LEFT JOIN transactions t ON t.user_id = u.id AND t.status = 'SUCCESS'
      LEFT JOIN profits p ON p.transaction_id = t.id
-     WHERE u.company=$1
+     WHERE u.company = $1
      GROUP BY u.id
      ORDER BY total_spent DESC`,
     [req.user.company]
@@ -1251,57 +1346,76 @@ app.get("/admin/top-users", auth, adminOnly, async (req, res) => {
 
 app.post("/admin/top-users/add", auth, adminOnly, async (req, res) => {
   const { email } = req.body;
-  const result = await pool.query(
-    "UPDATE users SET is_top_user=true WHERE email=$1 AND company=$2 RETURNING id,username,email,company",
+  const user = await pool.query(
+    "SELECT id FROM users WHERE email = $1 AND company = $2",
     [email, req.user.company]
   );
-  if (!result.rows.length) return res.status(404).json({ message: "User not found in your company" });
+  if (!user.rows.length) return res.status(404).json({ message: "User not found in your company" });
+
+  await pool.query(
+    "INSERT INTO top_users(user_id) VALUES($1) ON CONFLICT DO NOTHING",
+    [user.rows[0].id]
+  );
+  await pool.query("DELETE FROM regular_users WHERE user_id = $1", [user.rows[0].id]);
 
   broadcastTopUserUpdate(req.user.company);
-  res.json({ message: "Top user added", user: result.rows[0] });
+  res.json({ message: "Top user added" });
 });
 
 app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
   const { email } = req.body;
-  const result = await pool.query(
-    "UPDATE users SET is_top_user=false WHERE email=$1 AND company=$2 RETURNING id,company",
+  const user = await pool.query(
+    "SELECT id FROM users WHERE email = $1 AND company = $2",
     [email, req.user.company]
   );
-  if (!result.rows.length) return res.status(404).json({ message: "User not found in your company" });
+  if (!user.rows.length) return res.status(404).json({ message: "User not found in your company" });
+
+  await pool.query("DELETE FROM top_users WHERE user_id = $1", [user.rows[0].id]);
 
   broadcastTopUserUpdate(req.user.company);
   res.json({ message: "Top user removed" });
 });
 
-/* ================= ADMIN: PLANS MANAGER - Company isolated ================= */
+/* ================= ADMIN: PLANS MANAGER - 3 Tier Pricing ================= */
 app.get("/admin/plans", auth, adminOnly, async (req, res) => {
   const plans = await pool.query(
-    "SELECT * FROM plans WHERE company=$1 ORDER BY network, price",
+    "SELECT * FROM plans WHERE company = $1 ORDER BY network, price",
     [req.user.company]
   );
   res.json(plans.rows);
 });
+
 app.post("/admin/plans", auth, adminOnly, async (req, res) => {
-  const { plan_id, network, name, price, top_price, cost, validity, restricted, provider, network_id, api_plan_id } = req.body;
+  const { plan_id, network, name, price, regular_price, top_price, cost, validity, restricted, provider, network_id, api_plan_id } = req.body;
+
   if (!plan_id ||!network ||!name ||!price ||!cost ||!provider ||!network_id ||!api_plan_id) {
     return res.status(400).json({ message: "Missing required fields: plan_id, network, name, price, cost, provider, network_id, api_plan_id" });
   }
+
   try {
     const result = await pool.query(
-      `INSERT INTO plans(plan_id,company,network,name,price,top_price,cost,validity,restricted,is_active,provider,network_id,api_plan_id)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10,$11,$12) RETURNING *`,
-      [plan_id, req.user.company, network, name, price, top_price || price, cost, validity, restricted || false, provider, network_id, api_plan_id]
+      `INSERT INTO plans(plan_id, company, network, name, price, regular_price, top_price, cost, validity, restricted, is_active, provider, network_id, api_plan_id)
+       VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, $11, $12, $13) RETURNING *`,
+      [
+        plan_id, req.user.company, network, name,
+        price,
+        regular_price || price,
+        top_price || price,
+        cost, validity, restricted || false,
+        provider, network_id, api_plan_id
+      ]
     );
     res.json({ message: "Plan added", plan: result.rows[0] });
   } catch (e) {
     if (e.code === "23505") return res.status(400).json({ message: "Plan ID already exists" });
+    console.error("Add plan error:", e);
     res.status(500).json({ message: "Failed to add plan" });
   }
 });
 
 app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
   const { id } = req.params;
-  const allowed = ['plan_id','network','name','price','top_price','cost','validity','restricted','is_active','provider','network_id','api_plan_id'];
+  const allowed = ['plan_id', 'network', 'name', 'price', 'regular_price', 'top_price', 'cost', 'validity', 'restricted', 'is_active', 'provider', 'network_id', 'api_plan_id'];
 
   const updates = {};
   for (const key of allowed) {
@@ -1310,19 +1424,19 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
 
   if (!Object.keys(updates).length) return res.status(400).json({ message: "No fields to update" });
 
-  const set = Object.keys(updates).map((k, i) => `${k}=$${i + 1}`).join(",");
+  const set = Object.keys(updates).map((k, i) => `${k} = $${i + 1}`).join(", ");
   const values = Object.values(updates);
   values.push(id, req.user.company);
 
   try {
     const result = await pool.query(
-      `UPDATE plans SET ${set} WHERE id=$${values.length - 1} AND company=$${values.length} RETURNING *`,
+      `UPDATE plans SET ${set} WHERE id = $${values.length - 1} AND company = $${values.length} RETURNING *`,
       values
     );
     if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
     res.json({ message: "Plan updated", plan: result.rows[0] });
   } catch (e) {
-    console.log("UPDATE PLAN ERROR:", e.message);
+    console.error("UPDATE PLAN ERROR:", e.message);
     res.status(500).json({ message: "Failed to update plan" });
   }
 });
@@ -1330,57 +1444,11 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
 app.delete("/admin/plans/:id", auth, adminOnly, async (req, res) => {
   const { id } = req.params;
   const result = await pool.query(
-    "UPDATE plans SET is_active=FALSE WHERE id=$1 AND company=$2 RETURNING id",
+    "UPDATE plans SET is_active = FALSE WHERE id = $1 AND company = $2 RETURNING id",
     [id, req.user.company]
   );
   if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
   res.json({ message: "Plan deactivated" });
-});
-
-/* ================= ADMIN: USERS ================= */
-app.get("/admin/users", auth, adminOnly, async (req, res) => {
-  const { search } = req.query;
-  let query = `SELECT id,username,email,wallet_balance,is_top_user,company,created_at,phone FROM users WHERE company=$1`;
-  const params = [req.user.company];
-  if (search) {
-    params.push(`%${search}%`);
-    query += ` AND (username ILIKE $${params.length} OR email ILIKE $${params.length})`;
-  }
-  query += ` ORDER BY created_at DESC LIMIT 100`;
-  const users = await pool.query(query, params);
-  res.json(users.rows);
-});
-
-app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
-  const { id } = req.params;
-  const { is_top_user, wallet_balance } = req.body;
-  const updates = [];
-  const values = [];
-  let idx = 1;
-
-  if (is_top_user!== undefined) {
-    updates.push(`is_top_user=$${idx++}`);
-    values.push(is_top_user);
-  }
-  if (wallet_balance!== undefined) {
-    updates.push(`wallet_balance=$${idx++}`);
-    values.push(wallet_balance);
-  }
-
-  if (!updates.length) return res.status(400).json({ message: "No fields to update" });
-
-  values.push(id, req.user.company);
-  const result = await pool.query(
-    `UPDATE users SET ${updates.join(",")} WHERE id=$${idx} AND company=$${idx + 1} RETURNING id,username,email,is_top_user,wallet_balance,company`,
-    values
-  );
-  if (!result.rows.length) return res.status(404).json({ message: "User not found" });
-
-  if (is_top_user!== undefined) {
-    broadcastTopUserUpdate(req.user.company);
-  }
-
-  res.json({ message: "User updated", user: result.rows[0] });
 });
 /* ================= ADMIN: WITHDRAWALS ================= */
 
