@@ -900,23 +900,37 @@ app.post("/api/login", async (req, res) => {
   res.json({ token });
 });
 
-/* ================= USER INFO ================= */
+/* ================= USER INFO - WITH TIER CHECK ================= */
 app.get("/api/me", auth, async (req, res) => {
   try {
-    let user = await getUser(req.user.id);
-    if (!user.account_number && getPaystackKey(user.company, "secret") && user.phone) {
+    let user = await pool.query("SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet, account_number, bank_name, account_name FROM users WHERE id = $1", [req.user.id]);
+    if (!user.rows.length) return res.status(404).json({ message: "User not found" });
+
+    // Auto-create DVA if missing
+    if (!user.rows[0].account_number && getPaystackKey(user.rows[0].company, "secret") && user.rows[0].phone) {
       try {
-        await createDedicatedAccount(user);
-        user = await getUser(req.user.id);
+        await createDedicatedAccount(user.rows[0]);
+        user = await pool.query("SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet, account_number, bank_name, account_name FROM users WHERE id = $1", [req.user.id]);
       } catch (e) {
         console.log("Account creation failed on /me:", e.message);
       }
     }
-    delete user.password;
-    delete user.pin;
-    res.json(user);
-  } catch (e) {
-    res.status(500).json({ message: "Server error" });
+
+    const [topCheck, regularCheck] = await Promise.all([
+      pool.query("SELECT 1 FROM top_users WHERE id = $1", [req.user.id]),
+      pool.query("SELECT 1 FROM regular_users WHERE user_id = $1", [req.user.id])
+    ]);
+
+    const userData = user.rows[0];
+    userData.is_top_user = topCheck.rows.length > 0;
+    userData.is_regular_user = regularCheck.rows.length > 0;
+    userData.user_tier = userData.is_top_user? 'top' : userData.is_regular_user? 'regular' : 'default';
+
+    delete userData.password;
+    delete userData.pin;
+    res.json(userData);
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch user" });
   }
 });
 
