@@ -1268,12 +1268,12 @@ app.get("/admin/users", auth, adminOnly, async (req, res) => {
       SELECT
         u.id, u.username, u.email, u.wallet_balance, u.company, u.created_at, u.phone,
         CASE
-          WHEN t.user_id IS NOT NULL THEN 'top'
+          WHEN t.id IS NOT NULL THEN 'top'
           WHEN r.user_id IS NOT NULL THEN 'regular'
           ELSE 'default'
         END as user_tier
       FROM users u
-      LEFT JOIN top_users t ON t.user_id = u.id
+      LEFT JOIN top_users t ON t.id = u.id
       LEFT JOIN regular_users r ON r.user_id = u.id
       WHERE u.company = $1
     `;
@@ -1293,30 +1293,29 @@ app.get("/admin/users", auth, adminOnly, async (req, res) => {
 
 app.post("/admin/users/set-tier", auth, adminOnly, async (req, res) => {
   try {
-    const { user_id, tier } = req.body; // 'default', 'regular', 'top'
+    const { user_id, tier } = req.body;
 
     if (!['default', 'regular', 'top'].includes(tier)) {
       return res.status(400).json({ message: "Invalid tier" });
     }
 
-    // Verify user belongs to admin's company
     const check = await pool.query(
       "SELECT id FROM users WHERE id = $1 AND company = $2",
       [user_id, req.user.company]
     );
     if (!check.rows.length) return res.status(404).json({ message: "User not found" });
 
-    // Remove from both tables first
-    await pool.query("DELETE FROM top_users WHERE user_id = $1", [user_id]);
+    await pool.query("DELETE FROM top_users WHERE id = $1", [user_id]);
     await pool.query("DELETE FROM regular_users WHERE user_id = $1", [user_id]);
 
-    // Insert into correct table
     if (tier === 'top') {
-      await pool.query("INSERT INTO top_users(user_id) VALUES($1)", [user_id]);
+      await pool.query(
+        "INSERT INTO top_users(id, username, email, wallet_balance) SELECT id, username, email, wallet_balance FROM users WHERE id = $1",
+        [user_id]
+      );
     } else if (tier === 'regular') {
       await pool.query("INSERT INTO regular_users(user_id) VALUES($1)", [user_id]);
     }
-    // 'default' = not in either table
 
     broadcastTopUserUpdate(req.user.company);
     res.json({ success: true, tier });
@@ -1356,7 +1355,7 @@ app.get("/admin/top-users", auth, adminOnly, async (req, res) => {
               COALESCE(SUM(t.amount), 0) as total_spent,
               COALESCE(SUM(p.amount), 0) as total_profit_generated
        FROM users u
-       INNER JOIN top_users tu ON tu.user_id = u.id
+       INNER JOIN top_users tu ON tu.id = u.id
        LEFT JOIN transactions t ON t.user_id = u.id AND t.status = 'SUCCESS'
        LEFT JOIN profits p ON p.transaction_id = t.id
        WHERE u.company = $1
@@ -1375,14 +1374,14 @@ app.post("/admin/top-users/add", auth, adminOnly, async (req, res) => {
   try {
     const { email } = req.body;
     const user = await pool.query(
-      "SELECT id FROM users WHERE email = $1 AND company = $2",
+      "SELECT id, username, email, wallet_balance FROM users WHERE email = $1 AND company = $2",
       [email, req.user.company]
     );
     if (!user.rows.length) return res.status(404).json({ message: "User not found in your company" });
 
     await pool.query(
-      "INSERT INTO top_users(user_id) VALUES($1) ON CONFLICT DO NOTHING",
-      [user.rows[0].id]
+      "INSERT INTO top_users(id, username, email, wallet_balance) VALUES($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING",
+      [user.rows[0].id, user.rows[0].username, user.rows[0].email, user.rows[0].wallet_balance]
     );
     await pool.query("DELETE FROM regular_users WHERE user_id = $1", [user.rows[0].id]);
 
@@ -1403,7 +1402,7 @@ app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
     );
     if (!user.rows.length) return res.status(404).json({ message: "User not found in your company" });
 
-    await pool.query("DELETE FROM top_users WHERE user_id = $1", [user.rows[0].id]);
+    await pool.query("DELETE FROM top_users WHERE id = $1", [user.rows[0].id]);
 
     broadcastTopUserUpdate(req.user.company);
     res.json({ message: "Top user removed" });
@@ -1449,7 +1448,7 @@ app.post("/admin/regular-users/add", auth, adminOnly, async (req, res) => {
       "INSERT INTO regular_users(user_id) VALUES($1) ON CONFLICT DO NOTHING",
       [user.rows[0].id]
     );
-    await pool.query("DELETE FROM top_users WHERE user_id = $1", [user.rows[0].id]);
+    await pool.query("DELETE FROM top_users WHERE id = $1", [user.rows[0].id]);
 
     broadcastTopUserUpdate(req.user.company);
     res.json({ message: "Regular user added" });
