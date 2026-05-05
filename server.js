@@ -956,6 +956,211 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
   });
 });
 
+/* ================= ADMIN: TRANSACTIONS LIST ================= */
+app.get("/admin/transactions", auth, adminOnly, async (req, res) => {
+  try {
+    const { status, provider, search, limit = 200 } = req.query;
+    let query = `
+      SELECT t.id, t.reference, t.type, t.amount, t.status, t.provider, t.company, t.created_at, t.metadata,
+             u.id as user_id, u.username, u.email
+      FROM transactions t
+      JOIN users u ON u.id = t.user_id
+      WHERE t.company = $1
+    `;
+    const params = [req.user.company];
+    let paramCount = 1;
+
+    if (status) {
+      paramCount++;
+      query += ` AND t.status = $${paramCount}`;
+      params.push(status);
+    }
+    if (provider) {
+      paramCount++;
+      query += ` AND t.provider = $${paramCount}`;
+      params.push(provider);
+    }
+    if (search) {
+      paramCount++;
+      query += ` AND (t.reference ILIKE $${paramCount} OR u.email ILIKE $${paramCount})`;
+      params.push(`%${search}%`);
+    }
+
+    query += ` ORDER BY t.created_at DESC LIMIT $${paramCount + 1}`;
+    params.push(Number(limit));
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Admin transactions error:", err);
+    res.status(500).json({ message: "Failed to fetch transactions" });
+  }
+});
+
+/* ================= ADMIN: MANUAL DEDUCT ================= */
+app.post("/admin/transactions/force-deduct", auth, adminOnly, async (req, res) => {
+  const { reference, reason } = req.body;
+
+  if (!reference) {
+    return res.status(400).json({ message: "Transaction reference required" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const txRes = await client.query(
+      "SELECT id, user_id, amount, status, provider, company FROM transactions WHERE reference=$1 FOR UPDATE",
+      [reference]
+    );
+
+    if (!txRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Transaction not found" });
+    }
+
+    const tx = txRes.rows[0];
+
+    // Restriction: Only mayconnect can use this for cheapdatahub/subpadi
+    const allowedProviders = ['maitama'];
+    if (req.user.company === 'mayconnect') {
+      allowedProviders.push('cheapdatahub', 'subpadi');
+    }
+    if (!allowedProviders.includes(tx.provider)) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ message: `Manual deduction not allowed for ${tx.provider} on ${req.user.company}` });
+    }
+
+    if (tx.status === 'SUCCESS') {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Transaction is already marked as SUCCESS" });
+    }
+
+    // Check user balance
+    const userRes = await client.query(
+      "SELECT wallet_balance FROM users WHERE id=$1 FOR UPDATE",
+      [tx.user_id]
+    );
+    if (!userRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (Number(userRes.rows[0].wallet_balance) < Number(tx.amount)) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "User has insufficient wallet balance" });
+    }
+
+    // Deduct user wallet
+    const update = await client.query(
+      "UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id=$2 RETURNING wallet_balance",
+      [tx.amount, tx.user_id]
+    );
+
+    // Update transaction status + add admin note in metadata
+    await client.query(
+      `UPDATE transactions
+       SET status='SUCCESS', updated_at=NOW(), metadata = COALESCE(metadata, '{}') || $1
+       WHERE reference=$2`,
+      [JSON.stringify({
+        manual_deducted: true,
+        deducted_by: req.user.id,
+        deducted_at: new Date().toISOString(),
+        reason: reason || "Admin manual deduction - Provider delivered but API failed"
+      }), reference]
+    );
+
+    await client.query("COMMIT");
+
+    sendWalletUpdate(tx.user_id, Number(update.rows[0].wallet_balance));
+
+    console.log(`ADMIN MANUAL DEDUCT: Admin ${req.user.id} deducted ₦${tx.amount} from user ${tx.user_id} for ${reference}`);
+
+    res.json({
+      message: `₦${tx.amount} deducted from user wallet successfully`,
+      new_balance: update.rows[0].wallet_balance
+    });
+
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("FORCE DEDUCT ERROR:", e.message);
+    res.status(500).json({ message: "Failed to deduct" });
+  } finally {
+    client.release();
+  }
+});
+
+/* ================= ADMIN: TRANSACTION REVERSAL ================= */
+app.post("/admin/transactions/reverse", auth, adminOnly, async (req, res) => {
+  const { reference, reason } = req.body;
+
+  if (!reference) {
+    return res.status(400).json({ message: "Transaction reference required" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const txRes = await client.query(
+      "SELECT id, user_id, amount, status, provider, company FROM transactions WHERE reference=$1 FOR UPDATE",
+      [reference]
+    );
+
+    if (!txRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Transaction not found" });
+    }
+
+    const tx = txRes.rows[0];
+
+    if (tx.status!== 'SUCCESS') {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Only SUCCESS transactions can be reversed" });
+    }
+
+    // Refund user wallet
+    const update = await client.query(
+      "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
+      [tx.amount, tx.user_id]
+    );
+
+    // Mark transaction as REVERSED
+    await client.query(
+      `UPDATE transactions
+       SET status='REVERSED', updated_at=NOW(), metadata = COALESCE(metadata, '{}') || $1
+       WHERE reference=$2`,
+      [JSON.stringify({
+        reversed: true,
+        reversed_by: req.user.id,
+        reversed_at: new Date().toISOString(),
+        reason: reason || "Admin reversal"
+      }), reference]
+    );
+
+    // Also reverse profit if exists
+    await client.query("DELETE FROM profits WHERE transaction_id=$1", [tx.id]);
+
+    await client.query("COMMIT");
+
+    sendWalletUpdate(tx.user_id, Number(update.rows[0].wallet_balance));
+
+    console.log(`ADMIN REVERSAL: Admin ${req.user.id} reversed ₦${tx.amount} for user ${tx.user_id} for ${reference}`);
+
+    res.json({
+      message: `₦${tx.amount} refunded to user wallet successfully`,
+      new_balance: update.rows[0].wallet_balance
+    });
+
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("REVERSAL ERROR:", e.message);
+    res.status(500).json({ message: "Failed to reverse transaction" });
+  } finally {
+    client.release();
+  }
+});
+
 /* ================= ADMIN: USERS + TIERS ================= */
 app.get("/admin/users", auth, adminOnly, async (req, res) => {
   try {
@@ -1108,8 +1313,6 @@ app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
     res.status(500).json({ message: "Failed to remove top user" });
   }
 });
-
-// REMOVED: Regular Users routes - admin should only use Users Manager to set tier
 
 /* ================= ADMIN: PLANS MANAGER - 3 Tier Pricing ================= */
 app.get("/admin/plans", auth, adminOnly, async (req, res) => {
@@ -1394,45 +1597,7 @@ app.post("/admin/withdraw/approve", auth, adminOnly, async (req, res) => {
   }
 });
 
-/* ================= ADMIN: REVERSE ================= */
-app.post("/api/admin/reverse", auth, adminOnly, async (req, res) => {
-  const { reference } = req.body;
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const tx = await client.query("SELECT * FROM transactions WHERE reference=$1 FOR UPDATE", [reference]);
-    if (!tx.rows.length) throw new Error("Transaction not found");
-    if (tx.rows[0].status === "REVERSED") throw new Error("Already reversed");
 
-    const t = tx.rows[0];
-
-    // Ensure reversal only within same company
-    const txUser = await client.query("SELECT company FROM users WHERE id=$1", [t.user_id]);
-    if (txUser.rows[0].company!== req.user.company) {
-      throw new Error("Cannot reverse transaction from another company");
-    }
-
-    await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [t.amount, t.user_id]);
-    await client.query("UPDATE transactions SET status='REVERSED' WHERE id=$1", [t.id]);
-
-    const profit = await client.query("SELECT * FROM profits WHERE transaction_id=$1", [t.id]);
-    if (profit.rows.length) {
-      const p = profit.rows[0];
-      await client.query("UPDATE users SET admin_wallet = admin_wallet - $1 WHERE id=$2", [p.amount, p.credited_to_user_id]);
-      await client.query("DELETE FROM profits WHERE id=$1", [p.id]);
-    }
-
-    await client.query("COMMIT");
-    const user = await getUser(t.user_id);
-    sendWalletUpdate(t.user_id, user.wallet_balance);
-    res.json({ message: "Transaction reversed" });
-  } catch (e) {
-    await client.query("ROLLBACK");
-    res.status(400).json({ message: e.message });
-  } finally {
-    client.release();
-  }
-});
 
 // Health check for UptimeRobot
 app.get("/", (req, res) => {
