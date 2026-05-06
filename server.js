@@ -3,7 +3,7 @@ const path = require('path');
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { Pool } = require("pg");
+const { Pool } = require("pg"); // ONLY DECLARE THIS ONCE - AT THE TOP
 const http = require("http");
 const WebSocket = require("ws");
 const { v4: uuidv4 } = require("uuid");
@@ -12,9 +12,6 @@ const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 const webpush = require("web-push");
 
-const app = express();
-app.use(express.static('public'));
-
 const {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -22,31 +19,15 @@ const {
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
 
+const app = express();
+app.use(express.static('public'));
 app.set('trust proxy', 1);
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 const PORT = process.env.PORT || 3000;
 
-// 1. CORS
-app.use(cors({
-  origin: [
-    'https://teeversh-frontend.onrender.com',
-    'https://mayconnect-frontend.onrender.com',
-    'https://sadeeq-frontend.onrender.com',
-    'https://bnhabeeb-frontend.onrender.com',
-    'http://localhost:3000',
-    'http://localhost:5173'
-  ],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-/* ================= DATABASE ================= */
-const { Pool } = require('pg');
-
-// One Pool instance for the whole app
+/* ================= DATABASE - SINGLE INSTANCE ================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL + '?sslmode=require',
   ssl: {
@@ -64,8 +45,23 @@ pool.connect((err, client, release) => {
   }
 });
 
-// Export the pool to use in your routes
-module.exports = pool;
+// DON'T export pool here if you import it elsewhere. Remove this line:
+// module.exports = pool;
+
+/* ================= CORS ================= */
+app.use(cors({
+  origin: [
+    'https://teeversh-frontend.onrender.com',
+    'https://mayconnect-frontend.onrender.com',
+    'https://sadeeq-frontend.onrender.com',
+    'https://bnhabeeb-frontend.onrender.com',
+    'http://localhost:3000',
+    'http://localhost:5173'
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 /* ================= VAPID ================= */
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC;
@@ -83,9 +79,13 @@ const ADMIN_EMAILS = [
   "Sadeeqtukur765@gmail.com"
 ];
 
-// PAYMENT KEYS - Paystack removed
-const MONNIFY_KEYS = JSON.parse(process.env.MONNIFY_KEYS || "{}"); // {mayconnect:{api,secret,contract}, bnhabeeb:{}, teeversh:{}}
-const FLW_KEYS = JSON.parse(process.env.FLW_KEYS || "{}"); // {sadeeq:{api,secret,hash}}
+const RP_ID = process.env.RP_ID || 'mayconnect-backend-1.onrender.com';
+const RP_NAME = 'Mayconnect';
+const ORIGIN = process.env.RP_ORIGIN || 'https://mayconnect-backend-1.onrender.com';
+
+// PAYMENT KEYS
+const MONNIFY_KEYS = JSON.parse(process.env.MONNIFY_KEYS || "{}");
+const FLW_KEYS = JSON.parse(process.env.FLW_KEYS || "{}");
 
 const VTU_PROVIDERS = {
   maitama: { base_url: process.env.MAITAMA_BASE_URL, tokens: { mayconnect: process.env.MAITAMA_TOKEN_MAYCONNECT, teeversh: process.env.MAITAMA_TOKEN_TEEVERSH, sadeeq: process.env.MAITAMA_TOKEN_SADEEQ, bnhabeeb: process.env.MAITAMA_TOKEN_BNHABEEB } },
@@ -147,14 +147,12 @@ async function createMonnifyAccount(user) {
   if (!user.phone) throw new Error("Phone number required to create virtual account. Please update your profile.");
 
   try {
-    // Get token
     const auth = Buffer.from(`${apiKey}:${secretKey}`).toString('base64');
     const login = await axios.post('https://api.monnify.com/api/v1/auth/login', {}, {
       headers: { Authorization: `Basic ${auth}` }
     });
     const token = login.data.responseBody.accessToken;
 
-    // Create reserved account
     const acc = await axios.post('https://api.monnify.com/api/v2/bank-transfer/reserved-accounts', {
       accountReference: `${user.company.toUpperCase().slice(0,3)}_${user.id}_${Date.now()}`,
       accountName: user.username,
@@ -276,8 +274,6 @@ async function callMaitamaData(phone, network_id, api_plan_id, company) {
     network: Number(network_id)
   };
 
-  console.log(`[Maitama] ${company} REQUEST:`, { url: `${base_url}/api/data`, payload });
-
   const res = await axios.post(
     `${base_url}/api/data`,
     payload,
@@ -344,7 +340,7 @@ async function callSubPadiData(phone, network_id, api_plan_id) {
   return res.data;
 }
 
-// 2. MONNIFY WEBHOOK - MUST BE BEFORE express.json()
+/* ================= MONNIFY WEBHOOK - MUST BE BEFORE express.json() ================= */
 app.post("/api/monnify/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
@@ -353,13 +349,11 @@ app.post("/api/monnify/webhook",
       const rawBody = req.body;
       const signature = req.headers["monnify-signature"];
       if (!rawBody ||!signature) {
-        console.log("Missing rawBody or signature");
         return res.sendStatus(400);
       }
 
       const hash = crypto.createHmac("sha512", process.env.MONNIFY_SECRET_KEY).update(rawBody).digest("hex");
       if (hash!== signature) {
-        console.log("❌ Invalid Monnify signature");
         return res.sendStatus(400);
       }
 
@@ -369,7 +363,7 @@ app.post("/api/monnify/webhook",
       const amount = Number(event.eventData.amountPaid);
       const reference = event.eventData.paymentReference;
       const accountRef = event.eventData.accountReference;
-      const userId = accountRef.split('_')[1]; // BNH_userId_timestamp
+      const userId = accountRef.split('_')[1];
 
       const client = await pool.connect();
       try {
@@ -386,7 +380,6 @@ app.post("/api/monnify/webhook",
         }
         await client.query("COMMIT");
         sendWalletUpdate(userId, Number(newBalance));
-        console.log(`✅ Wallet funded: ₦${amount} -> user ${userId}`);
       } catch (e) {
         await client.query("ROLLBACK");
         console.log("MONNIFY WEBHOOK TX ERROR:", e.message);
@@ -401,13 +394,12 @@ app.post("/api/monnify/webhook",
   }
 );
 
-// 2b. FLUTTERWAVE WEBHOOK - MUST BE BEFORE express.json()
+/* ================= FLUTTERWAVE WEBHOOK - MUST BE BEFORE express.json() ================= */
 app.post("/api/flutterwave/webhook", async (req, res) => {
   console.log("FLUTTERWAVE WEBHOOK HIT");
   try {
     const signature = req.headers['verif-hash'];
     if (!signature || signature!== process.env.FLW_SECRET_HASH) {
-      console.log("❌ Invalid Flutterwave signature");
       return res.sendStatus(401);
     }
 
@@ -423,7 +415,6 @@ app.post("/api/flutterwave/webhook", async (req, res) => {
       await client.query("BEGIN");
       const userRes = await client.query("SELECT id FROM users WHERE email=$1 FOR UPDATE", [email]);
       if (!userRes.rows.length) {
-        console.log("❌ USER NOT FOUND → NO CREDIT:", reference);
         await client.query("ROLLBACK");
         return res.sendStatus(200);
       }
@@ -441,7 +432,6 @@ app.post("/api/flutterwave/webhook", async (req, res) => {
       }
       await client.query("COMMIT");
       sendWalletUpdate(userId, Number(newBalance));
-      console.log(`✅ Wallet funded: ₦${amount} -> user ${userId}`);
     } catch (e) {
       await client.query("ROLLBACK");
       console.log("FLW WEBHOOK TX ERROR:", e.message);
@@ -455,9 +445,219 @@ app.post("/api/flutterwave/webhook", async (req, res) => {
   }
 });
 
-// 3. JSON PARSER - AFTER WEBHOOKS ONLY
+/* ================= JSON PARSER - AFTER WEBHOOKS ONLY ================= */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+/* ================= AUTH MIDDLEWARE ================= */
+function auth(req, res, next) {
+  try {
+    const token = req.headers.authorization.split(" ")[1];
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).json({ message: "Unauthorized" });
+  }
+}
+
+function adminOnly(req, res, next) {
+  if (!req.user.is_admin) return res.status(403).json({ message: "Admin only" });
+  next();
+}
+
+/* ================= WEBAUTHN ROUTES ================= */
+// Check if user has webauthn enabled
+app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT webauthn_enabled FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    const enabled = result.rows[0]?.webauthn_enabled === true;
+    res.json({ enabled });
+  } catch (err) {
+    console.error('Check enabled error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Start registration
+app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
+  try {
+    const user = await getUser(req.user.id);
+    const existingCreds = await pool.query(
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1',
+      [user.id]
+    );
+
+    const options = await generateRegistrationOptions({
+      rpName: RP_NAME,
+      rpID: RP_ID,
+      userID: String(user.id),
+      userName: user.username,
+      userDisplayName: user.username,
+      attestationType: 'none',
+      excludeCredentials: existingCreds.rows.map(c => ({
+        id: Buffer.from(c.credential_id, 'base64'),
+        type: 'public-key',
+      })),
+    });
+
+    await pool.query(
+      'INSERT INTO webauthn_challenges(user_id, challenge) VALUES($1, $2) ON CONFLICT (user_id) DO UPDATE SET challenge = $2',
+      [user.id, options.challenge]
+    );
+
+    res.json(options);
+  } catch (err) {
+    console.error('Register start error:', err);
+    res.status(500).json({ error: 'Failed to start registration' });
+  }
+});
+
+// Finish registration
+app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
+  try {
+    const user = await getUser(req.user.id);
+    const challengeRes = await pool.query(
+      'SELECT challenge FROM webauthn_challenges WHERE user_id = $1',
+      [user.id]
+    );
+
+    if (!challengeRes.rows.length) {
+      return res.status(400).json({ error: 'Challenge not found' });
+    }
+
+    const verification = await verifyRegistrationResponse({
+      response: req.body,
+      expectedChallenge: challengeRes.rows[0].challenge,
+      expectedOrigin: ORIGIN,
+      expectedRPID: RP_ID,
+    });
+
+    if (verification.verified) {
+      const { credential } = verification.registrationInfo;
+
+      await pool.query(
+        `INSERT INTO webauthn_credentials(user_id, credential_id, public_key, counter)
+         VALUES($1, $2, $3, $4)`,
+        [
+          user.id,
+          Buffer.from(credential.id).toString('base64'),
+          Buffer.from(credential.publicKey).toString('base64'),
+          credential.counter
+        ]
+      );
+
+      await pool.query('UPDATE users SET webauthn_enabled = TRUE WHERE id = $1', [user.id]);
+      await pool.query('DELETE FROM webauthn_challenges WHERE user_id = $1', [user.id]);
+
+      res.json({ verified: true });
+    } else {
+      res.json({ verified: false, error: 'Verification failed' });
+    }
+  } catch (err) {
+    console.error('Register finish error:', err);
+    res.status(500).json({ error: 'Failed to verify registration' });
+  }
+});
+
+// Start login
+app.post('/api/auth/webauthn/login-start', async (req, res) => {
+  try {
+    const { email } = req.body;
+    const userRes = await pool.query('SELECT id, username FROM users WHERE email = $1', [email]);
+    if (!userRes.rows.length) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const user = userRes.rows[0];
+
+    const creds = await pool.query(
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1',
+      [user.id]
+    );
+
+    const options = await generateAuthenticationOptions({
+      rpID: RP_ID,
+      allowCredentials: creds.rows.map(c => ({
+        id: Buffer.from(c.credential_id, 'base64'),
+        type: 'public-key',
+      })),
+    });
+
+    await pool.query(
+      'INSERT INTO webauthn_challenges(user_id, challenge) VALUES($1, $2) ON CONFLICT (user_id) DO UPDATE SET challenge = $2',
+      [user.id, options.challenge]
+    );
+
+    res.json(options);
+  } catch (err) {
+    console.error('Login start error:', err);
+    res.status(500).json({ error: 'Failed to start login' });
+  }
+});
+
+// Finish login
+app.post('/api/auth/webauthn/login-finish', async (req, res) => {
+  try {
+    const { email,...credential } = req.body;
+    const userRes = await pool.query('SELECT id, username, company, is_admin FROM users WHERE email = $1', [email]);
+    if (!userRes.rows.length) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const user = userRes.rows[0];
+
+    const challengeRes = await pool.query(
+      'SELECT challenge FROM webauthn_challenges WHERE user_id = $1',
+      [user.id]
+    );
+    if (!challengeRes.rows.length) {
+      return res.status(400).json({ error: 'Challenge not found' });
+    }
+
+    const credRes = await pool.query(
+      'SELECT credential_id, public_key, counter FROM webauthn_credentials WHERE user_id = $1 AND credential_id = $2',
+      [user.id, credential.id]
+    );
+    if (!credRes.rows.length) {
+      return res.status(400).json({ error: 'Credential not found' });
+    }
+
+    const dbCredential = credRes.rows[0];
+
+    const verification = await verifyAuthenticationResponse({
+      response: credential,
+      expectedChallenge: challengeRes.rows[0].challenge,
+      expectedOrigin: ORIGIN,
+      expectedRPID: RP_ID,
+      credential: {
+        id: Buffer.from(dbCredential.credential_id, 'base64'),
+        publicKey: Buffer.from(dbCredential.public_key, 'base64'),
+        counter: dbCredential.counter,
+      },
+    });
+
+    if (verification.verified) {
+      await pool.query(
+        'UPDATE webauthn_credentials SET counter = $1 WHERE credential_id = $2',
+        [verification.authenticationInfo.newCounter, credential.id]
+      );
+
+      await pool.query('DELETE FROM webauthn_challenges WHERE user_id = $1', [user.id]);
+
+      const token = jwt.sign(
+        { id: user.id, username: user.username, is_admin: user.is_admin, company: user.company },
+        process.env.JWT_SECRET
+      );
+      res.json({ token });
+    } else {
+      res.json({ error: 'Verification failed' });
+    }
+  } catch (err) {
+    console.error('Login finish error:', err);
+    res.status(500).json({ error: 'Failed to verify login' });
+  }
+});
 
 // 4. TEST ROUTE
 app.get('/api/ping', (req, res) => {
