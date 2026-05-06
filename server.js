@@ -1582,6 +1582,7 @@ app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
 /* ================= ADMIN: PLANS MANAGER - 3 Tier Pricing ================= */
 app.get("/admin/plans", auth, adminOnly, async (req, res) => {
   try {
+    res.set("Cache-Control", "no-store"); // Prevent browser caching
     const plans = await pool.query(
       "SELECT * FROM plans WHERE company = $1 ORDER BY network, price",
       [req.user.company]
