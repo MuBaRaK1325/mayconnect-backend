@@ -1606,11 +1606,13 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, $11, $12, $13) RETURNING *`,
       [
         plan_id, req.user.company, network, name,
-        price,
-        regular_price || price,
-        top_price || price,
-        cost, validity, restricted || false,
-        provider, network_id, api_plan_id
+        Number(price),
+        regular_price === '' || regular_price === null? null : Number(regular_price),
+        top_price === '' || top_price === null? null : Number(top_price),
+        Number(cost),
+        validity === '' || validity === null? null : Number(validity),
+        restricted || false,
+        provider, Number(network_id), api_plan_id
       ]
     );
     res.json({ message: "Plan added", plan: result.rows[0] });
@@ -1654,7 +1656,7 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `UPDATE plans SET ${set}, updated_at = NOW() WHERE id = $${values.length - 1} AND company = $${values.length} RETURNING *`,
+      `UPDATE plans SET ${set} WHERE id = $${values.length - 1} AND company = $${values.length} RETURNING *`,
       values
     );
     if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
