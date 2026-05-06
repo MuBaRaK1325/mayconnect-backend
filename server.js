@@ -491,6 +491,43 @@ function userIdToBuffer(userId) {
   return Buffer.from(String(userId), 'utf-8');
 }
 
+/* ================= WEBAUTHN CONFIG ================= */
+const ALLOWED_ORIGINS = [
+  'https://teeversh-frontend.onrender.com',
+  'https://mayconnect-frontend.onrender.com',
+  'https://sadeeq-frontend.onrender.com',
+  'https://bnhabeeb-frontend.onrender.com',
+  'http://localhost:3000',
+  'http://localhost:5173'
+];
+
+// Get RP_ID and ORIGIN from request origin dynamically
+function getWebAuthnConfig(origin) {
+  if (!origin) origin = ALLOWED_ORIGINS[0];
+  const url = new URL(origin);
+  return {
+    rpID: url.hostname,
+    rpName: 'Mayconnect',
+    origin: origin
+  };
+}
+
+// Convert user ID to Uint8Array for simplewebauthn v10+
+function userIdToBuffer(userId) {
+  return Buffer.from(String(userId), 'utf-8');
+}
+
+// Convert base64 to base64url - required by simplewebauthn
+function toBase64URL(base64) {
+  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Convert base64url to base64 - for reading from DB
+function toBase64(base64url) {
+  const padding = '='.repeat((4 - base64url.length % 4) % 4);
+  return (base64url + padding).replace(/-/g, '+').replace(/_/g, '/');
+}
+
 /* ================= WEBAUTHN ROUTES ================= */
 // Check if user has webauthn enabled
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
@@ -529,14 +566,16 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const options = await generateRegistrationOptions({
       rpName: rpName,
       rpID: rpID,
-      userID: userIdToBuffer(user.id), // FIXED: Must be Buffer, not string
+      userID: userIdToBuffer(user.id),
       userName: user.username,
       userDisplayName: user.username,
       attestationType: 'none',
-      excludeCredentials: existingCreds.rows.map(c => ({
-        id: Buffer.from(c.credential_id, 'base64'),
-        type: 'public-key',
-      })),
+      excludeCredentials: existingCreds.rows
+       .filter(c => c.credential_id) // skip nulls
+       .map(c => ({
+          id: Buffer.from(toBase64(c.credential_id), 'base64'), // convert base64url -> base64 -> buffer
+          type: 'public-key',
+        })),
     });
 
     await pool.query(
@@ -580,15 +619,14 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     if (verification.verified) {
       const { credential } = verification.registrationInfo;
 
+      // Store as base64url without padding
+      const credentialIdB64URL = toBase64URL(Buffer.from(credential.id).toString('base64'));
+      const publicKeyB64URL = toBase64URL(Buffer.from(credential.publicKey).toString('base64'));
+
       await pool.query(
         `INSERT INTO webauthn_credentials(user_id, credential_id, public_key, counter)
          VALUES($1, $2, $3, $4)`,
-        [
-          user.id,
-          Buffer.from(credential.id).toString('base64'),
-          Buffer.from(credential.publicKey).toString('base64'),
-          credential.counter
-        ]
+        [user.id, credentialIdB64URL, publicKeyB64URL, credential.counter]
       );
 
       await pool.query('UPDATE users SET webauthn_enabled = TRUE WHERE id = $1', [user.id]);
@@ -627,10 +665,12 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 
     const options = await generateAuthenticationOptions({
       rpID: rpID,
-      allowCredentials: creds.rows.map(c => ({
-        id: Buffer.from(c.credential_id, 'base64'),
-        type: 'public-key',
-      })),
+      allowCredentials: creds.rows
+       .filter(c => c.credential_id)
+       .map(c => ({
+          id: Buffer.from(toBase64(c.credential_id), 'base64'),
+          type: 'public-key',
+        })),
     });
 
     await pool.query(
@@ -685,8 +725,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       expectedOrigin: expectedOrigin,
       expectedRPID: rpID,
       credential: {
-        id: Buffer.from(dbCredential.credential_id, 'base64'),
-        publicKey: Buffer.from(dbCredential.public_key, 'base64'),
+        id: Buffer.from(toBase64(dbCredential.credential_id), 'base64'),
+        publicKey: Buffer.from(toBase64(dbCredential.public_key), 'base64'),
         counter: dbCredential.counter,
       },
     });
