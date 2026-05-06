@@ -1627,7 +1627,17 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
 
   const updates = {};
   for (const key of allowed) {
-    if (req.body[key]!== undefined) updates[key] = req.body[key];
+    if (req.body[key]!== undefined && req.body[key]!== '') {
+      // Cast numeric fields to numbers
+      if (['price', 'regular_price', 'top_price', 'cost', 'validity', 'network_id'].includes(key)) {
+        updates[key] = Number(req.body[key]);
+        if (isNaN(updates[key])) {
+          return res.status(400).json({ message: `${key} must be a valid number` });
+        }
+      } else {
+        updates[key] = req.body[key];
+      }
+    }
   }
 
   if (!Object.keys(updates).length) return res.status(400).json({ message: "No fields to update" });
@@ -1638,7 +1648,7 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `UPDATE plans SET ${set} WHERE id = $${values.length - 1} AND company = $${values.length} RETURNING *`,
+      `UPDATE plans SET ${set}, updated_at = NOW() WHERE id = $${values.length - 1} AND company = $${values.length} RETURNING *`,
       values
     );
     if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
