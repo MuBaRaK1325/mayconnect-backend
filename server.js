@@ -466,7 +466,6 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN CONFIG ================= */
-// Reuse the same origins from your CORS config above
 const CORS_ORIGINS = [
   'https://teeversh-frontend.onrender.com',
   'https://mayconnect-frontend.onrender.com',
@@ -476,7 +475,6 @@ const CORS_ORIGINS = [
   'http://localhost:5173'
 ];
 
-// Get RP_ID and ORIGIN from request origin dynamically
 function getWebAuthnConfig(origin) {
   if (!origin) origin = CORS_ORIGINS[0];
   const url = new URL(origin);
@@ -487,24 +485,21 @@ function getWebAuthnConfig(origin) {
   };
 }
 
-// Convert user ID to Uint8Array for simplewebauthn v10+
 function userIdToBuffer(userId) {
   return Buffer.from(String(userId), 'utf-8');
 }
 
-// Convert base64 to base64url - required by simplewebauthn
 function toBase64URL(base64) {
   return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-// Convert base64url to base64 - for reading from DB
 function toBase64(base64url) {
+  if (!base64url || typeof base64url!== 'string') return '';
   const padding = '='.repeat((4 - base64url.length % 4) % 4);
   return (base64url + padding).replace(/-/g, '+').replace(/_/g, '/');
 }
 
 /* ================= WEBAUTHN ROUTES ================= */
-// Check if user has webauthn enabled
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
     const result = await pool.query(
@@ -515,7 +510,6 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
     res.json({ enabled });
   } catch (err) {
     if (err.code === '42703') {
-      console.log('webauthn_enabled column not found, returning false');
       return res.json({ enabled: false });
     }
     console.error('Check enabled error:', err);
@@ -534,9 +528,14 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const user = await getUser(req.user.id);
     const existingCreds = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1',
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND credential_id IS NOT NULL',
       [user.id]
     );
+
+    // Filter out empty/null credential_ids before mapping
+    const validCreds = existingCreds.rows
+     .map(c => c.credential_id)
+     .filter(id => id && typeof id === 'string' && id.length > 0);
 
     const options = await generateRegistrationOptions({
       rpName: rpName,
@@ -545,12 +544,10 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       userName: user.username,
       userDisplayName: user.username,
       attestationType: 'none',
-      excludeCredentials: existingCreds.rows
-     .filter(c => c.credential_id)
-     .map(c => ({
-          id: Buffer.from(toBase64(c.credential_id), 'base64'),
-          type: 'public-key',
-        })),
+      excludeCredentials: validCreds.map(id => ({
+        id: Buffer.from(toBase64(id), 'base64'),
+        type: 'public-key',
+      })),
     });
 
     await pool.query(
@@ -633,18 +630,20 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     const user = userRes.rows[0];
 
     const creds = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1',
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND credential_id IS NOT NULL',
       [user.id]
     );
 
+    const validCreds = creds.rows
+     .map(c => c.credential_id)
+     .filter(id => id && typeof id === 'string' && id.length > 0);
+
     const options = await generateAuthenticationOptions({
       rpID: rpID,
-      allowCredentials: creds.rows
-     .filter(c => c.credential_id)
-     .map(c => ({
-          id: Buffer.from(toBase64(c.credential_id), 'base64'),
-          type: 'public-key',
-        })),
+      allowCredentials: validCreds.map(id => ({
+        id: Buffer.from(toBase64(id), 'base64'),
+        type: 'public-key',
+      })),
     });
 
     await pool.query(
