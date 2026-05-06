@@ -1627,16 +1627,22 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
 
   const updates = {};
   for (const key of allowed) {
-    if (req.body[key]!== undefined && req.body[key]!== '') {
-      // Cast numeric fields to numbers
-      if (['price', 'regular_price', 'top_price', 'cost', 'validity', 'network_id'].includes(key)) {
-        updates[key] = Number(req.body[key]);
-        if (isNaN(updates[key])) {
+    const value = req.body[key];
+    if (value === undefined) continue;
+
+    // Handle numeric fields - convert empty string to null, string to number
+    if (['price', 'regular_price', 'top_price', 'cost', 'validity', 'network_id'].includes(key)) {
+      if (value === '' || value === null) {
+        updates[key] = null;
+      } else {
+        const numValue = Number(value);
+        if (isNaN(numValue)) {
           return res.status(400).json({ message: `${key} must be a valid number` });
         }
-      } else {
-        updates[key] = req.body[key];
+        updates[key] = numValue;
       }
+    } else {
+      updates[key] = value;
     }
   }
 
@@ -1655,7 +1661,7 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
     res.json({ message: "Plan updated", plan: result.rows[0] });
   } catch (e) {
     console.error("UPDATE PLAN ERROR:", e.message);
-    res.status(500).json({ message: "Failed to update plan" });
+    res.status(500).json({ message: "Failed to update plan: " + e.message });
   }
 });
 
