@@ -466,7 +466,8 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN CONFIG ================= */
-const ALLOWED_ORIGINS = [
+// Reuse the same origins from your CORS config above
+const CORS_ORIGINS = [
   'https://teeversh-frontend.onrender.com',
   'https://mayconnect-frontend.onrender.com',
   'https://sadeeq-frontend.onrender.com',
@@ -477,34 +478,7 @@ const ALLOWED_ORIGINS = [
 
 // Get RP_ID and ORIGIN from request origin dynamically
 function getWebAuthnConfig(origin) {
-  if (!origin) origin = ALLOWED_ORIGINS[0];
-  const url = new URL(origin);
-  return {
-    rpID: url.hostname, // teeversh-frontend.onrender.com, etc
-    rpName: 'Mayconnect',
-    origin: origin
-  };
-}
-
-// Convert user ID to Uint8Array for simplewebauthn v10+
-function userIdToBuffer(userId) {
-  return Buffer.from(String(userId), 'utf-8');
-}
-
-/* ================= WEBAUTHN CONFIG ================= */
-// Use existing CORS origins array if you already declared it at the top
-const ALLOWED_ORIGINS = [
-  'https://teeversh-frontend.onrender.com',
-  'https://mayconnect-frontend.onrender.com',
-  'https://sadeeq-frontend.onrender.com',
-  'https://bnhabeeb-frontend.onrender.com',
-  'http://localhost:3000',
-  'http://localhost:5173'
-];
-
-// Get RP_ID and ORIGIN from request origin dynamically
-function getWebAuthnConfig(origin) {
-  if (!origin) origin = ALLOWED_ORIGINS[0];
+  if (!origin) origin = CORS_ORIGINS[0];
   const url = new URL(origin);
   return {
     rpID: url.hostname,
@@ -553,7 +527,7 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const origin = req.headers.origin;
-    if (!ALLOWED_ORIGINS.includes(origin)) {
+    if (!CORS_ORIGINS.includes(origin)) {
       return res.status(403).json({ error: 'Origin not allowed' });
     }
     const { rpID, rpName } = getWebAuthnConfig(origin);
@@ -572,8 +546,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       userDisplayName: user.username,
       attestationType: 'none',
       excludeCredentials: existingCreds.rows
-      .filter(c => c.credential_id)
-      .map(c => ({
+     .filter(c => c.credential_id)
+     .map(c => ({
           id: Buffer.from(toBase64(c.credential_id), 'base64'),
           type: 'public-key',
         })),
@@ -595,7 +569,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   try {
     const origin = req.headers.origin;
-    if (!ALLOWED_ORIGINS.includes(origin)) {
+    if (!CORS_ORIGINS.includes(origin)) {
       return res.status(403).json({ error: 'Origin not allowed' });
     }
     const { rpID, origin: expectedOrigin } = getWebAuthnConfig(origin);
@@ -646,7 +620,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     const origin = req.headers.origin;
-    if (!ALLOWED_ORIGINS.includes(origin)) {
+    if (!CORS_ORIGINS.includes(origin)) {
       return res.status(403).json({ error: 'Origin not allowed' });
     }
     const { rpID } = getWebAuthnConfig(origin);
@@ -666,8 +640,8 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     const options = await generateAuthenticationOptions({
       rpID: rpID,
       allowCredentials: creds.rows
-      .filter(c => c.credential_id)
-      .map(c => ({
+     .filter(c => c.credential_id)
+     .map(c => ({
           id: Buffer.from(toBase64(c.credential_id), 'base64'),
           type: 'public-key',
         })),
@@ -689,7 +663,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
     const origin = req.headers.origin;
-    if (!ALLOWED_ORIGINS.includes(origin)) {
+    if (!CORS_ORIGINS.includes(origin)) {
       return res.status(403).json({ error: 'Origin not allowed' });
     }
     const { rpID, origin: expectedOrigin } = getWebAuthnConfig(origin);
@@ -752,6 +726,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     res.status(500).json({ error: 'Failed to verify login: ' + err.message });
   }
 });
+
+
 
 // 4. TEST ROUTE
 app.get('/api/ping', (req, res) => {
