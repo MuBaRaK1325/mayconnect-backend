@@ -492,6 +492,7 @@ function userIdToBuffer(userId) {
 }
 
 /* ================= WEBAUTHN CONFIG ================= */
+// Use existing CORS origins array if you already declared it at the top
 const ALLOWED_ORIGINS = [
   'https://teeversh-frontend.onrender.com',
   'https://mayconnect-frontend.onrender.com',
@@ -555,7 +556,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     if (!ALLOWED_ORIGINS.includes(origin)) {
       return res.status(403).json({ error: 'Origin not allowed' });
     }
-    const { rpID, rpName, origin: expectedOrigin } = getWebAuthnConfig(origin);
+    const { rpID, rpName } = getWebAuthnConfig(origin);
 
     const user = await getUser(req.user.id);
     const existingCreds = await pool.query(
@@ -571,9 +572,9 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       userDisplayName: user.username,
       attestationType: 'none',
       excludeCredentials: existingCreds.rows
-       .filter(c => c.credential_id) // skip nulls
-       .map(c => ({
-          id: Buffer.from(toBase64(c.credential_id), 'base64'), // convert base64url -> base64 -> buffer
+      .filter(c => c.credential_id)
+      .map(c => ({
+          id: Buffer.from(toBase64(c.credential_id), 'base64'),
           type: 'public-key',
         })),
     });
@@ -619,7 +620,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     if (verification.verified) {
       const { credential } = verification.registrationInfo;
 
-      // Store as base64url without padding
       const credentialIdB64URL = toBase64URL(Buffer.from(credential.id).toString('base64'));
       const publicKeyB64URL = toBase64URL(Buffer.from(credential.publicKey).toString('base64'));
 
@@ -649,7 +649,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     if (!ALLOWED_ORIGINS.includes(origin)) {
       return res.status(403).json({ error: 'Origin not allowed' });
     }
-    const { rpID, origin: expectedOrigin } = getWebAuthnConfig(origin);
+    const { rpID } = getWebAuthnConfig(origin);
 
     const { email } = req.body;
     const userRes = await pool.query('SELECT id, username FROM users WHERE email = $1', [email]);
@@ -666,8 +666,8 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     const options = await generateAuthenticationOptions({
       rpID: rpID,
       allowCredentials: creds.rows
-       .filter(c => c.credential_id)
-       .map(c => ({
+      .filter(c => c.credential_id)
+      .map(c => ({
           id: Buffer.from(toBase64(c.credential_id), 'base64'),
           type: 'public-key',
         })),
