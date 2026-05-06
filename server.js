@@ -44,10 +44,16 @@ app.use(cors({
 }));
 
 /* ================= DATABASE ================= */
+const { Pool } = require('pg');
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  connectionString: process.env.DATABASE_URL + '?sslmode=require',
+  ssl: {
+    rejectUnauthorized: false // Required for Render + Neon managed Postgres
+  }
 });
+
+module.exports = pool;
 
 /* ================= VAPID ================= */
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC;
