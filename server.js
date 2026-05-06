@@ -961,11 +961,15 @@ app.get("/admin/transactions", auth, adminOnly, async (req, res) => {
   try {
     const { status, provider, search, limit = 200 } = req.query;
     let query = `
-      SELECT t.id, t.reference, t.type, t.amount, t.status, t.provider, t.company, t.created_at, t.metadata,
-             u.id as user_id, u.username, u.email
+      SELECT
+        t.id, t.reference, t.type, t.amount, t.status, t.network, t.phone,
+        t.created_at, t.metadata, t.description,
+        u.id as user_id, u.username, u.email,
+        p.name as plan_name, p.provider
       FROM transactions t
       JOIN users u ON u.id = t.user_id
-      WHERE t.company = $1
+      LEFT JOIN plans p ON p.id = t.plan_id
+      WHERE u.company = $1
     `;
     const params = [req.user.company];
     let paramCount = 1;
@@ -977,12 +981,12 @@ app.get("/admin/transactions", auth, adminOnly, async (req, res) => {
     }
     if (provider) {
       paramCount++;
-      query += ` AND t.provider = $${paramCount}`;
+      query += ` AND p.provider = $${paramCount}`;
       params.push(provider);
     }
     if (search) {
       paramCount++;
-      query += ` AND (t.reference ILIKE $${paramCount} OR u.email ILIKE $${paramCount})`;
+      query += ` AND (t.reference ILIKE $${paramCount} OR u.email ILIKE $${paramCount} OR u.username ILIKE $${paramCount})`;
       params.push(`%${search}%`);
     }
 
@@ -1010,7 +1014,10 @@ app.post("/admin/transactions/force-deduct", auth, adminOnly, async (req, res) =
     await client.query("BEGIN");
 
     const txRes = await client.query(
-      "SELECT id, user_id, amount, status, provider, company FROM transactions WHERE reference=$1 FOR UPDATE",
+      `SELECT t.id, t.user_id, t.amount, t.status, t.company, p.provider
+       FROM transactions t
+       LEFT JOIN plans p ON p.id = t.plan_id
+       WHERE t.reference=$1 FOR UPDATE`,
       [reference]
     );
 
@@ -1103,7 +1110,10 @@ app.post("/admin/transactions/reverse", auth, adminOnly, async (req, res) => {
     await client.query("BEGIN");
 
     const txRes = await client.query(
-      "SELECT id, user_id, amount, status, provider, company FROM transactions WHERE reference=$1 FOR UPDATE",
+      `SELECT t.id, t.user_id, t.amount, t.status, t.company, p.provider
+       FROM transactions t
+       LEFT JOIN plans p ON p.id = t.plan_id
+       WHERE t.reference=$1 FOR UPDATE`,
       [reference]
     );
 
