@@ -46,13 +46,25 @@ app.use(cors({
 /* ================= DATABASE ================= */
 const { Pool } = require('pg');
 
+// One Pool instance for the whole app
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL + '?sslmode=require',
   ssl: {
-    rejectUnauthorized: false // Required for Render + Neon managed Postgres
+    rejectUnauthorized: false // Required for Render + Neon
   }
 });
 
+// Test connection on startup
+pool.connect((err, client, release) => {
+  if (err) {
+    console.error('Error connecting to Postgres:', err.stack);
+  } else {
+    console.log('Connected to Postgres successfully');
+    release();
+  }
+});
+
+// Export the pool to use in your routes
 module.exports = pool;
 
 /* ================= VAPID ================= */
