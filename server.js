@@ -465,6 +465,27 @@ function adminOnly(req, res, next) {
   next();
 }
 
+/* ================= WEBAUTHN CONFIG ================= */
+const ALLOWED_ORIGINS = [
+  'https://teeversh-frontend.onrender.com',
+  'https://mayconnect-frontend.onrender.com',
+  'https://sadeeq-frontend.onrender.com',
+  'https://bnhabeeb-frontend.onrender.com',
+  'http://localhost:3000',
+  'http://localhost:5173'
+];
+
+// Get RP_ID and ORIGIN from request origin dynamically
+function getWebAuthnConfig(origin) {
+  if (!origin) origin = ALLOWED_ORIGINS[0];
+  const url = new URL(origin);
+  return {
+    rpID: url.hostname, // teeversh-frontend.onrender.com, etc
+    rpName: 'Mayconnect',
+    origin: origin
+  };
+}
+
 /* ================= WEBAUTHN ROUTES ================= */
 // Check if user has webauthn enabled
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
@@ -476,6 +497,11 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
     const enabled = result.rows[0]?.webauthn_enabled === true;
     res.json({ enabled });
   } catch (err) {
+    // If column doesn't exist yet, return false instead of crashing
+    if (err.code === '42703') {
+      console.log('webauthn_enabled column not found, returning false');
+      return res.json({ enabled: false });
+    }
     console.error('Check enabled error:', err);
     res.status(500).json({ error: 'Server error' });
   }
@@ -484,6 +510,12 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 // Start registration
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
+    const origin = req.headers.origin;
+    if (!ALLOWED_ORIGINS.includes(origin)) {
+      return res.status(403).json({ error: 'Origin not allowed' });
+    }
+    const { rpID, rpName, origin: expectedOrigin } = getWebAuthnConfig(origin);
+
     const user = await getUser(req.user.id);
     const existingCreds = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE user_id = $1',
@@ -491,8 +523,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     );
 
     const options = await generateRegistrationOptions({
-      rpName: RP_NAME,
-      rpID: RP_ID,
+      rpName: rpName,
+      rpID: rpID,
       userID: String(user.id),
       userName: user.username,
       userDisplayName: user.username,
@@ -518,6 +550,12 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 // Finish registration
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   try {
+    const origin = req.headers.origin;
+    if (!ALLOWED_ORIGINS.includes(origin)) {
+      return res.status(403).json({ error: 'Origin not allowed' });
+    }
+    const { rpID, origin: expectedOrigin } = getWebAuthnConfig(origin);
+
     const user = await getUser(req.user.id);
     const challengeRes = await pool.query(
       'SELECT challenge FROM webauthn_challenges WHERE user_id = $1',
@@ -531,8 +569,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challengeRes.rows[0].challenge,
-      expectedOrigin: ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: expectedOrigin,
+      expectedRPID: rpID,
     });
 
     if (verification.verified) {
@@ -565,6 +603,12 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 // Start login
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
+    const origin = req.headers.origin;
+    if (!ALLOWED_ORIGINS.includes(origin)) {
+      return res.status(403).json({ error: 'Origin not allowed' });
+    }
+    const { rpID, origin: expectedOrigin } = getWebAuthnConfig(origin);
+
     const { email } = req.body;
     const userRes = await pool.query('SELECT id, username FROM users WHERE email = $1', [email]);
     if (!userRes.rows.length) {
@@ -578,7 +622,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     );
 
     const options = await generateAuthenticationOptions({
-      rpID: RP_ID,
+      rpID: rpID,
       allowCredentials: creds.rows.map(c => ({
         id: Buffer.from(c.credential_id, 'base64'),
         type: 'public-key',
@@ -600,6 +644,12 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 // Finish login
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
+    const origin = req.headers.origin;
+    if (!ALLOWED_ORIGINS.includes(origin)) {
+      return res.status(403).json({ error: 'Origin not allowed' });
+    }
+    const { rpID, origin: expectedOrigin } = getWebAuthnConfig(origin);
+
     const { email,...credential } = req.body;
     const userRes = await pool.query('SELECT id, username, company, is_admin FROM users WHERE email = $1', [email]);
     if (!userRes.rows.length) {
@@ -628,8 +678,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const verification = await verifyAuthenticationResponse({
       response: credential,
       expectedChallenge: challengeRes.rows[0].challenge,
-      expectedOrigin: ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: expectedOrigin,
+      expectedRPID: rpID,
       credential: {
         id: Buffer.from(dbCredential.credential_id, 'base64'),
         publicKey: Buffer.from(dbCredential.public_key, 'base64'),
