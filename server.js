@@ -1173,259 +1173,6 @@ app.post("/api/change-pin", auth, async (req, res) => {
   }
 });
 
-/* ================= ADMIN: PROFIT ================= */
-app.get("/admin/profit", auth, adminOnly, async (req, res) => {
-  const { from, to, company } = req.query;
-  const userCompany = req.user.company;
-
-  let query = `
-    SELECT DATE(t.created_at) as date,
-           SUM(p.amount) as total_profit,
-           COUNT(*) as total_sales
-    FROM transactions t
-    JOIN profits p ON p.transaction_id = t.id
-    JOIN users u ON t.user_id = u.id
-    WHERE t.status = 'SUCCESS'
-  `;
-  const params = [];
-
-  if (from) {
-    params.push(from);
-    query += ` AND t.created_at >= $${params.length}`;
-  }
-  if (to) {
-    params.push(to);
-    query += ` AND t.created_at <= $${params.length}`;
-  }
-  params.push(company || userCompany);
-  query += ` AND u.company = $${params.length}`;
-  query += ` GROUP BY DATE(t.created_at) ORDER BY date DESC`;
-
-  const result = await pool.query(query, params);
-  const adminWallet = await pool.query("SELECT admin_wallet FROM users WHERE id=$1", [req.user.id]);
-
-  res.json({
-    daily: result.rows,
-    admin_wallet: adminWallet.rows[0].admin_wallet,
-    total: result.rows.reduce((sum, r) => sum + Number(r.total_profit), 0)
-  });
-});
-
-/* ================= ADMIN: TRANSACTIONS LIST ================= */
-app.get("/admin/transactions", auth, adminOnly, async (req, res) => {
-  try {
-    const { status, provider, search, limit = 200 } = req.query;
-    let query = `
-      SELECT
-        t.id, t.reference, t.type, t.amount, t.status, t.network, t.phone,
-        t.created_at, t.metadata, t.description,
-        u.id as user_id, u.username, u.email,
-        p.name as plan_name, p.provider
-      FROM transactions t
-      JOIN users u ON u.id = t.user_id
-      LEFT JOIN plans p ON p.id = t.plan_id
-      WHERE u.company = $1
-    `;
-    const params = [req.user.company];
-    let paramCount = 1;
-
-    if (status) {
-      paramCount++;
-      query += ` AND t.status = $${paramCount}`;
-      params.push(status);
-    }
-    if (provider) {
-      paramCount++;
-      query += ` AND p.provider = $${paramCount}`;
-      params.push(provider);
-    }
-    if (search) {
-      paramCount++;
-      query += ` AND (t.reference ILIKE $${paramCount} OR u.email ILIKE $${paramCount} OR u.username ILIKE $${paramCount})`;
-      params.push(`%${search}%`);
-    }
-
-    query += ` ORDER BY t.created_at DESC LIMIT $${paramCount + 1}`;
-    params.push(Number(limit));
-
-    const result = await pool.query(query, params);
-    res.json(result.rows);
-  } catch (err) {
-    console.error("Admin transactions error:", err);
-    res.status(500).json({ message: "Failed to fetch transactions" });
-  }
-});
-
-/* ================= ADMIN: MANUAL DEDUCT ================= */
-app.post("/admin/transactions/force-deduct", auth, adminOnly, async (req, res) => {
-  const { reference, reason } = req.body;
-
-  if (!reference) {
-    return res.status(400).json({ message: "Transaction reference required" });
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    const txRes = await client.query(
-      `SELECT t.id, t.user_id, t.amount, t.status, t.company, p.provider
-       FROM transactions t
-       LEFT JOIN plans p ON p.id = t.plan_id
-       WHERE t.reference=$1 FOR UPDATE`,
-      [reference]
-    );
-
-    if (!txRes.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ message: "Transaction not found" });
-    }
-
-    const tx = txRes.rows[0];
-
-    // Restriction: Only mayconnect can use this for cheapdatahub/subpadi
-    const allowedProviders = ['maitama'];
-    if (req.user.company === 'mayconnect') {
-      allowedProviders.push('cheapdatahub', 'subpadi');
-    }
-    if (!allowedProviders.includes(tx.provider)) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ message: `Manual deduction not allowed for ${tx.provider} on ${req.user.company}` });
-    }
-
-    if (tx.status === 'SUCCESS') {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Transaction is already marked as SUCCESS" });
-    }
-
-    // Check user balance
-    const userRes = await client.query(
-      "SELECT wallet_balance FROM users WHERE id=$1 FOR UPDATE",
-      [tx.user_id]
-    );
-    if (!userRes.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    if (Number(userRes.rows[0].wallet_balance) < Number(tx.amount)) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "User has insufficient wallet balance" });
-    }
-
-    // Deduct user wallet
-    const update = await client.query(
-      "UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id=$2 RETURNING wallet_balance",
-      [tx.amount, tx.user_id]
-    );
-
-    // Update transaction status + add admin note in metadata
-    await client.query(
-      `UPDATE transactions
-       SET status='SUCCESS', updated_at=NOW(), metadata = COALESCE(metadata, '{}') || $1
-       WHERE reference=$2`,
-      [JSON.stringify({
-        manual_deducted: true,
-        deducted_by: req.user.id,
-        deducted_at: new Date().toISOString(),
-        reason: reason || "Admin manual deduction - Provider delivered but API failed"
-      }), reference]
-    );
-
-    await client.query("COMMIT");
-
-    sendWalletUpdate(tx.user_id, Number(update.rows[0].wallet_balance));
-
-    console.log(`ADMIN MANUAL DEDUCT: Admin ${req.user.id} deducted ₦${tx.amount} from user ${tx.user_id} for ${reference}`);
-
-    res.json({
-      message: `₦${tx.amount} deducted from user wallet successfully`,
-      new_balance: update.rows[0].wallet_balance
-    });
-
-  } catch (e) {
-    await client.query("ROLLBACK");
-    console.error("FORCE DEDUCT ERROR:", e.message);
-    res.status(500).json({ message: "Failed to deduct" });
-  } finally {
-    client.release();
-  }
-});
-
-/* ================= ADMIN: TRANSACTION REVERSAL ================= */
-app.post("/admin/transactions/reverse", auth, adminOnly, async (req, res) => {
-  const { reference, reason } = req.body;
-
-  if (!reference) {
-    return res.status(400).json({ message: "Transaction reference required" });
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    const txRes = await client.query(
-      `SELECT t.id, t.user_id, t.amount, t.status, t.company, p.provider
-       FROM transactions t
-       LEFT JOIN plans p ON p.id = t.plan_id
-       WHERE t.reference=$1 FOR UPDATE`,
-      [reference]
-    );
-
-    if (!txRes.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ message: "Transaction not found" });
-    }
-
-    const tx = txRes.rows[0];
-
-    if (tx.status!== 'SUCCESS') {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Only SUCCESS transactions can be reversed" });
-    }
-
-    // Refund user wallet
-    const update = await client.query(
-      "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
-      [tx.amount, tx.user_id]
-    );
-
-    // Mark transaction as REVERSED
-    await client.query(
-      `UPDATE transactions
-       SET status='REVERSED', updated_at=NOW(), metadata = COALESCE(metadata, '{}') || $1
-       WHERE reference=$2`,
-      [JSON.stringify({
-        reversed: true,
-        reversed_by: req.user.id,
-        reversed_at: new Date().toISOString(),
-        reason: reason || "Admin reversal"
-      }), reference]
-    );
-
-    // Also reverse profit if exists
-    await client.query("DELETE FROM profits WHERE transaction_id=$1", [tx.id]);
-
-    await client.query("COMMIT");
-
-    sendWalletUpdate(tx.user_id, Number(update.rows[0].wallet_balance));
-
-    console.log(`ADMIN REVERSAL: Admin ${req.user.id} reversed ₦${tx.amount} for user ${tx.user_id} for ${reference}`);
-
-    res.json({
-      message: `₦${tx.amount} refunded to user wallet successfully`,
-      new_balance: update.rows[0].wallet_balance
-    });
-
-  } catch (e) {
-    await client.query("ROLLBACK");
-    console.error("REVERSAL ERROR:", e.message);
-    res.status(500).json({ message: "Failed to reverse transaction" });
-  } finally {
-    client.release();
-  }
-});
-
 /* ================= ADMIN: USERS + TIERS ================= */
 app.get("/admin/users", auth, adminOnly, async (req, res) => {
   try {
@@ -1435,12 +1182,12 @@ app.get("/admin/users", auth, adminOnly, async (req, res) => {
         u.id, u.username, u.email, u.wallet_balance, u.company, u.created_at, u.phone,
         CASE
           WHEN t.id IS NOT NULL THEN 'top'
-          WHEN ru.id IS NOT NULL THEN 'regular'
+          WHEN ru.user_id IS NOT NULL THEN 'regular'
           ELSE 'default'
         END as user_tier
       FROM users u
       LEFT JOIN top_users t ON t.id = u.id
-      LEFT JOIN regular_users ru ON ru.id = u.id
+      LEFT JOIN regular_users ru ON ru.user_id = u.id
       WHERE u.company = $1
     `;
     const params = [req.user.company];
@@ -1454,6 +1201,329 @@ app.get("/admin/users", auth, adminOnly, async (req, res) => {
   } catch (err) {
     console.error("Admin users error:", err);
     res.status(500).json({ message: "Failed to fetch users" });
+  }
+});
+
+app.post("/admin/users/set-tier", auth, adminOnly, async (req, res) => {
+  try {
+    const { user_id, tier } = req.body;
+
+    if (!['default', 'top', 'regular'].includes(tier)) {
+      return res.status(400).json({ message: "Invalid tier. Only 'default', 'top', or 'regular' allowed" });
+    }
+
+    const check = await pool.query(
+      "SELECT id FROM users WHERE id = $1 AND company = $2",
+      [user_id, req.user.company]
+    );
+    if (!check.rows.length) return res.status(404).json({ message: "User not found" });
+
+    // Remove user from all tier tables first
+    await pool.query("DELETE FROM top_users WHERE id = $1", [user_id]);
+    await pool.query("DELETE FROM regular_users WHERE user_id = $1", [user_id]);
+
+    // Add to the selected tier table
+    if (tier === 'top') {
+      await pool.query(
+        `INSERT INTO top_users(id, username, email, wallet_balance)
+         SELECT id, username, email, wallet_balance FROM users WHERE id = $1`,
+        [user_id]
+      );
+    } else if (tier === 'regular') {
+      await pool.query(
+        `INSERT INTO regular_users(user_id, username, email, wallet_balance)
+         SELECT id, username, email, wallet_balance FROM users WHERE id = $1`,
+        [user_id]
+      );
+    }
+    // 'default' means no entry in either table
+
+    broadcastTopUserUpdate(req.user.company);
+    res.json({ success: true, tier });
+  } catch (err) {
+    console.error("Set tier error:", err);
+    res.status(500).json({ message: "Failed to update tier" });
+  }
+});
+
+app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { wallet_balance } = req.body;
+
+    if (wallet_balance === undefined) {
+      return res.status(400).json({ message: "No fields to update" });
+    }
+
+    const numBalance = Number(wallet_balance);
+    if (isNaN(numBalance)) {
+      return res.status(400).json({ message: "Wallet balance must be a valid number" });
+    }
+
+    const result = await pool.query(
+      `UPDATE users SET wallet_balance=$1 WHERE id=$2 AND company=$3 RETURNING id,username,email,wallet_balance,company`,
+      [numBalance, id, req.user.company]
+    );
+    if (!result.rows.length) return res.status(404).json({ message: "User not found" });
+
+    // Keep tier tables in sync with wallet_balance
+    await pool.query(`UPDATE top_users SET wallet_balance=$1 WHERE id=$2`, [numBalance, id]);
+    await pool.query(`UPDATE regular_users SET wallet_balance=$1 WHERE user_id=$2`, [numBalance, id]);
+
+    res.json({ message: "User updated", user: result.rows[0] });
+  } catch (err) {
+    console.error("Update user error:", err);
+    res.status(500).json({ message: "Failed to update user" });
+  }
+});
+
+/* ================= ADMIN: TOP USERS LIST ================= */
+app.get("/admin/top-users", auth, adminOnly, async (req, res) => {
+  try {
+    const users = await pool.query(
+      `SELECT u.id, u.username, u.email, u.company,
+              COALESCE(SUM(t.amount), 0) as total_spent,
+              COALESCE(SUM(p.amount), 0) as total_profit_generated
+       FROM users u
+       INNER JOIN top_users tu ON tu.id = u.id
+       LEFT JOIN transactions t ON t.user_id = u.id AND t.status = 'SUCCESS'
+       LEFT JOIN profits p ON p.transaction_id = t.id
+       WHERE u.company = $1
+       GROUP BY u.id, u.username, u.email, u.company
+       ORDER BY total_spent DESC`,
+      [req.user.company]
+    );
+    res.json(users.rows);
+  } catch (err) {
+    console.error("Top users error:", err);
+    res.status(500).json({ message: "Failed to fetch top users" });
+  }
+});
+
+app.post("/admin/top-users/add", auth, adminOnly, async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await pool.query(
+      "SELECT id, username, email, wallet_balance FROM users WHERE email = $1 AND company = $2",
+      [email, req.user.company]
+    );
+    if (!user.rows.length) return res.status(404).json({ message: "User not found in your company" });
+
+    await pool.query(
+      `INSERT INTO top_users(id, username, email, wallet_balance)
+       VALUES($1, $2, $3, $4)
+       ON CONFLICT (id) DO UPDATE SET
+         username = EXCLUDED.username,
+         email = EXCLUDED.email,
+         wallet_balance = EXCLUDED.wallet_balance`,
+      [user.rows[0].id, user.rows[0].username, user.rows[0].email, user.rows[0].wallet_balance]
+    );
+
+    // Remove from regular_users if they were there
+    await pool.query("DELETE FROM regular_users WHERE user_id = $1", [user.rows[0].id]);
+
+    broadcastTopUserUpdate(req.user.company);
+    res.json({ message: "Top user added" });
+  } catch (err) {
+    console.error("Add top user error:", err);
+    res.status(500).json({ message: "Failed to add top user" });
+  }
+});
+
+app.delete("/admin/top-users/remove", auth, adminOnly, async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await pool.query(
+      "SELECT id FROM users WHERE email = $1 AND company = $2",
+      [email, req.user.company]
+    );
+    if (!user.rows.length) return res.status(404).json({ message: "User not found in your company" });
+
+    const result = await pool.query("DELETE FROM top_users WHERE id = $1", [user.rows[0].id]);
+    if (result.rowCount === 0) return res.status(404).json({ message: "User is not a top user" });
+
+    broadcastTopUserUpdate(req.user.company);
+    res.json({ message: "Top user removed" });
+  } catch (err) {
+    console.error("Remove top user error:", err);
+    res.status(500).json({ message: "Failed to remove top user" });
+  }
+});
+
+/* ================= ADMIN: REGULAR USERS LIST ================= */
+app.get("/admin/regular-users", auth, adminOnly, async (req, res) => {
+  try {
+    const users = await pool.query(
+      `SELECT u.id, u.username, u.email, u.company,
+              COALESCE(SUM(t.amount), 0) as total_spent,
+              COALESCE(SUM(p.amount), 0) as total_profit_generated
+       FROM users u
+       INNER JOIN regular_users ru ON ru.user_id = u.id
+       LEFT JOIN transactions t ON t.user_id = u.id AND t.status = 'SUCCESS'
+       LEFT JOIN profits p ON p.transaction_id = t.id
+       WHERE u.company = $1
+       GROUP BY u.id, u.username, u.email, u.company
+       ORDER BY total_spent DESC`,
+      [req.user.company]
+    );
+    res.json(users.rows);
+  } catch (err) {
+    console.error("Regular users error:", err);
+    res.status(500).json({ message: "Failed to fetch regular users" });
+  }
+});
+
+app.post("/admin/regular-users/add", auth, adminOnly, async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await pool.query(
+      "SELECT id, username, email, wallet_balance FROM users WHERE email = $1 AND company = $2",
+      [email, req.user.company]
+    );
+    if (!user.rows.length) return res.status(404).json({ message: "User not found in your company" });
+
+    await pool.query(
+      `INSERT INTO regular_users(user_id, username, email, wallet_balance)
+       VALUES($1, $2, $3, $4)
+       ON CONFLICT (user_id) DO UPDATE SET
+         username = EXCLUDED.username,
+         email = EXCLUDED.email,
+         wallet_balance = EXCLUDED.wallet_balance`,
+      [user.rows[0].id, user.rows[0].username, user.rows[0].email, user.rows[0].wallet_balance]
+    );
+
+    // Remove from top_users if they were there
+    await pool.query("DELETE FROM top_users WHERE id = $1", [user.rows[0].id]);
+
+    broadcastTopUserUpdate(req.user.company);
+    res.json({ message: "Regular user added" });
+  } catch (err) {
+    console.error("Add regular user error:", err);
+    res.status(500).json({ message: "Failed to add regular user" });
+  }
+});
+
+app.delete("/admin/regular-users/remove", auth, adminOnly, async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await pool.query(
+      "SELECT id FROM users WHERE email = $1 AND company = $2",
+      [email, req.user.company]
+    );
+    if (!user.rows.length) return res.status(404).json({ message: "User not found in your company" });
+
+    const result = await pool.query("DELETE FROM regular_users WHERE user_id = $1", [user.rows[0].id]);
+    if (result.rowCount === 0) return res.status(404).json({ message: "User is not a regular user" });
+
+    broadcastTopUserUpdate(req.user.company);
+    res.json({ message: "Regular user removed" });
+  } catch (err) {
+    console.error("Remove regular user error:", err);
+    res.status(500).json({ message: "Failed to remove regular user" });
+  }
+});
+
+/* ================= ADMIN: PLANS MANAGER - 3 Tier Pricing ================= */
+app.get("/admin/plans", auth, adminOnly, async (req, res) => {
+  try {
+    res.set("Cache-Control", "no-store"); // Prevent browser caching
+    const plans = await pool.query(
+      "SELECT * FROM plans WHERE company = $1 ORDER BY network, price",
+      [req.user.company]
+    );
+    res.json(plans.rows);
+  } catch (err) {
+    console.error("Get plans error:", err);
+    res.status(500).json({ message: "Failed to fetch plans" });
+  }
+});
+
+app.post("/admin/plans", auth, adminOnly, async (req, res) => {
+  const { plan_id, network, name, price, regular_price, top_price, cost, validity, restricted, provider, network_id, api_plan_id } = req.body;
+
+  if (!plan_id ||!network ||!name ||!price ||!cost ||!provider ||!network_id ||!api_plan_id) {
+    return res.status(400).json({ message: "Missing required fields: plan_id, network, name, price, cost, provider, network_id, api_plan_id" });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO plans(plan_id, company, network, name, price, regular_price, top_price, cost, validity, restricted, is_active, provider, network_id, api_plan_id)
+       VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, $11, $12, $13) RETURNING *`,
+      [
+        plan_id, req.user.company, network, name,
+        Number(price),
+        regular_price === '' || regular_price === null? null : Number(regular_price),
+        top_price === '' || top_price === null? null : Number(top_price),
+        Number(cost),
+        validity === '' || validity === null? null : Number(validity),
+        restricted || false,
+        provider, Number(network_id), api_plan_id
+      ]
+    );
+    res.json({ message: "Plan added", plan: result.rows[0] });
+  } catch (e) {
+    if (e.code === "23505") return res.status(400).json({ message: "Plan ID already exists" });
+    console.error("Add plan error:", e);
+    res.status(500).json({ message: "Failed to add plan" });
+  }
+});
+
+app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
+  const { id } = req.params;
+  const allowed = ['plan_id', 'network', 'name', 'price', 'regular_price', 'top_price', 'cost', 'validity', 'restricted', 'is_active', 'provider', 'network_id', 'api_plan_id'];
+
+  const updates = {};
+  for (const key of allowed) {
+    const value = req.body[key];
+    if (value === undefined) continue;
+
+    // Handle numeric fields - convert empty string to null, string to number
+    if (['price', 'regular_price', 'top_price', 'cost', 'validity', 'network_id'].includes(key)) {
+      if (value === '' || value === null) {
+        updates[key] = null;
+      } else {
+        const numValue = Number(value);
+        if (isNaN(numValue)) {
+          return res.status(400).json({ message: `${key} must be a valid number` });
+        }
+        updates[key] = numValue;
+      }
+    } else {
+      updates[key] = value;
+    }
+  }
+
+  if (!Object.keys(updates).length) return res.status(400).json({ message: "No fields to update" });
+
+  const set = Object.keys(updates).map((k, i) => `${k} = $${i + 1}`).join(", ");
+  const values = Object.values(updates);
+  values.push(id, req.user.company);
+
+  try {
+    const result = await pool.query(
+      `UPDATE plans SET ${set} WHERE id = $${values.length - 1} AND company = $${values.length} RETURNING *`,
+      values
+    );
+    if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
+    res.json({ message: "Plan updated", plan: result.rows[0] });
+  } catch (e) {
+    console.error("UPDATE PLAN ERROR:", e.message);
+    res.status(500).json({ message: "Failed to update plan: " + e.message });
+  }
+});
+
+app.delete("/admin/plans/:id", auth, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      "UPDATE plans SET is_active = FALSE WHERE id = $1 AND company = $2 RETURNING id",
+      [id, req.user.company]
+    );
+    if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
+    res.json({ message: "Plan deactivated" });
+  } catch (err) {
+    console.error("Delete plan error:", err);
+    res.status(500).json({ message: "Failed to deactivate plan" });
   }
 });
 
