@@ -532,7 +532,6 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       [user.id]
     );
 
-    // Filter out empty/null credential_ids before mapping
     const validCreds = existingCreds.rows
      .map(c => c.credential_id)
      .filter(id => id && typeof id === 'string' && id.length > 0);
@@ -544,6 +543,11 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       userName: user.username,
       userDisplayName: user.username,
       attestationType: 'none',
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform', // <-- THIS is the key fix
+        userVerification: 'required',        // Require fingerprint/face/PIN
+        residentKey: 'preferred',            // Store credential on device
+      },
       excludeCredentials: validCreds.map(id => ({
         id: Buffer.from(toBase64(id), 'base64'),
         type: 'public-key',
