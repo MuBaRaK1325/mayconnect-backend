@@ -468,7 +468,7 @@ function adminOnly(req, res, next) {
 /* ================= WEBAUTHN CONFIG ================= */
 const CORS_ORIGINS = [
   'https://teeversh-frontend.onrender.com',
-  'https://mayconnect-frontend.onrender.com',
+  'https://mayconnect-frontend.onrender.com', 
   'https://sadeeq-frontend.onrender.com',
   'https://bnhabeeb-frontend.onrender.com',
   'http://localhost:3000',
@@ -480,7 +480,7 @@ function getWebAuthnConfig(origin) {
   const url = new URL(origin);
   return {
     rpID: url.hostname,
-    rpName: 'Mayconnect',
+    rpName: 'BNHABEEB',
     origin: origin
   };
 }
@@ -517,7 +517,7 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   }
 });
 
-// Start registration
+// Start registration - FORCE PLATFORM AUTHENTICATOR
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const origin = req.headers.origin;
@@ -533,8 +533,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     );
 
     const validCreds = existingCreds.rows
-     .map(c => c.credential_id)
-     .filter(id => id && typeof id === 'string' && id.length > 0);
+    .map(c => c.credential_id)
+    .filter(id => id && typeof id === 'string' && id.length > 0);
 
     const options = await generateRegistrationOptions({
       rpName: rpName,
@@ -543,10 +543,11 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       userName: user.username,
       userDisplayName: user.username,
       attestationType: 'none',
+      // THIS IS THE KEY FOR V10+
       authenticatorSelection: {
-        authenticatorAttachment: 'platform', // <-- THIS is the key fix
-        userVerification: 'required',        // Require fingerprint/face/PIN
-        residentKey: 'preferred',            // Store credential on device
+        authenticatorAttachment: 'platform', // Force phone fingerprint, no QR code
+        userVerification: 'required', // Require fingerprint/face/PIN
+        residentKey: 'preferred', // Store credential on device
       },
       excludeCredentials: validCreds.map(id => ({
         id: Buffer.from(toBase64(id), 'base64'),
@@ -617,7 +618,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   }
 });
 
-// Start login
+// Start login - ALSO FORCE PLATFORM HERE
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     const origin = req.headers.origin;
@@ -639,8 +640,8 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     );
 
     const validCreds = creds.rows
-     .map(c => c.credential_id)
-     .filter(id => id && typeof id === 'string' && id.length > 0);
+    .map(c => c.credential_id)
+    .filter(id => id && typeof id === 'string' && id.length > 0);
 
     const options = await generateAuthenticationOptions({
       rpID: rpID,
@@ -648,6 +649,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
         id: Buffer.from(toBase64(id), 'base64'),
         type: 'public-key',
       })),
+      userVerification: 'required', // Force fingerprint on login too
     });
 
     await pool.query(
