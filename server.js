@@ -486,6 +486,11 @@ function getWebAuthnConfig(origin) {
   };
 }
 
+// Convert user ID to Uint8Array for simplewebauthn v10+
+function userIdToBuffer(userId) {
+  return Buffer.from(String(userId), 'utf-8');
+}
+
 /* ================= WEBAUTHN ROUTES ================= */
 // Check if user has webauthn enabled
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
@@ -497,7 +502,6 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
     const enabled = result.rows[0]?.webauthn_enabled === true;
     res.json({ enabled });
   } catch (err) {
-    // If column doesn't exist yet, return false instead of crashing
     if (err.code === '42703') {
       console.log('webauthn_enabled column not found, returning false');
       return res.json({ enabled: false });
@@ -525,7 +529,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const options = await generateRegistrationOptions({
       rpName: rpName,
       rpID: rpID,
-      userID: String(user.id),
+      userID: userIdToBuffer(user.id), // FIXED: Must be Buffer, not string
       userName: user.username,
       userDisplayName: user.username,
       attestationType: 'none',
@@ -543,7 +547,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     res.json(options);
   } catch (err) {
     console.error('Register start error:', err);
-    res.status(500).json({ error: 'Failed to start registration' });
+    res.status(500).json({ error: 'Failed to start registration: ' + err.message });
   }
 });
 
@@ -596,7 +600,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     }
   } catch (err) {
     console.error('Register finish error:', err);
-    res.status(500).json({ error: 'Failed to verify registration' });
+    res.status(500).json({ error: 'Failed to verify registration: ' + err.message });
   }
 });
 
@@ -637,7 +641,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     res.json(options);
   } catch (err) {
     console.error('Login start error:', err);
-    res.status(500).json({ error: 'Failed to start login' });
+    res.status(500).json({ error: 'Failed to start login: ' + err.message });
   }
 });
 
@@ -705,7 +709,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     }
   } catch (err) {
     console.error('Login finish error:', err);
-    res.status(500).json({ error: 'Failed to verify login' });
+    res.status(500).json({ error: 'Failed to verify login: ' + err.message });
   }
 });
 
