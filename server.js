@@ -87,10 +87,27 @@ const ORIGIN = process.env.RP_ORIGIN || 'https://mayconnect-backend-1.onrender.c
 const MONNIFY_KEYS = JSON.parse(process.env.MONNIFY_KEYS || "{}");
 const FLW_KEYS = JSON.parse(process.env.FLW_KEYS || "{}");
 
+// Debug: log available companies on startup
+console.log("[MONNIFY KEYS] Configured companies:", Object.keys(MONNIFY_KEYS));
+
 const VTU_PROVIDERS = {
-  maitama: { base_url: process.env.MAITAMA_BASE_URL, tokens: { mayconnect: process.env.MAITAMA_TOKEN_MAYCONNECT, teeversh: process.env.MAITAMA_TOKEN_TEEVERSH, sadeeq: process.env.MAITAMA_TOKEN_SADEEQ, bnhabeeb: process.env.MAITAMA_TOKEN_BNHABEEB } },
-  cheapdatahub: { base_url: "https://www.cheapdatahub.ng/api/v1/resellers", api_key: process.env.CHEAPDATAHUB_API_KEY },
-  subpadi: { base_url: "https://api.subpadi.com", token: process.env.SUBPADI_TOKEN }
+  maitama: {
+    base_url: process.env.MAITAMA_BASE_URL,
+    tokens: {
+      mayconnect: process.env.MAITAMA_TOKEN_MAYCONNECT,
+      teeversh: process.env.MAITAMA_TOKEN_TEEVERSH,
+      sadeeq: process.env.MAITAMA_TOKEN_SADEEQ,
+      bnhabeeb: process.env.MAITAMA_TOKEN_BNHABEEB
+    }
+  },
+  cheapdatahub: {
+    base_url: "https://www.cheapdatahub.ng/api/v1/resellers",
+    api_key: process.env.CHEAPDATAHUB_API_KEY
+  },
+  subpadi: {
+    base_url: "https://api.subpadi.com",
+    token: process.env.SUBPADI_TOKEN
+  }
 };
 
 /* ================= RATE LIMITERS ================= */
@@ -114,25 +131,32 @@ const fundInitLimiter = rateLimit({
 const getCompanyAdmin = async (company) => {
   const admin = await pool.query(
     "SELECT id FROM users WHERE company=$1 AND is_admin=TRUE ORDER BY id ASC LIMIT 1",
-    [company]
+    [company.toLowerCase()] // normalize company name
   );
   return admin.rows[0]?.id || null;
 };
 
 const getMonnifyKey = (company, type = "secret") => {
-  const normalizedCompany = company.toLowerCase(); // force lowercase
-  const keys = MONNIFY_KEYS[normalizedCompany] || MONNIFY_KEYS.mayconnect;
+  if (!company) return null;
+  const normalizedCompany = company.toLowerCase().trim();
+  const keys = MONNIFY_KEYS[normalizedCompany];
+  if (!keys) {
+    console.error(`[MONNIFY ERROR] No keys found for company: ${normalizedCompany}. Available:`, Object.keys(MONNIFY_KEYS));
+    return null;
+  }
   return keys?.[type] || null;
 };
 
 const getMonnifyContract = (company) => {
-  const normalizedCompany = company.toLowerCase();
-  const keys = MONNIFY_KEYS[normalizedCompany] || MONNIFY_KEYS.mayconnect;
+  if (!company) return null;
+  const normalizedCompany = company.toLowerCase().trim();
+  const keys = MONNIFY_KEYS[normalizedCompany];
   return keys?.contract || null;
 };
 
 const getFLWKey = (company, type = "secret") => {
-  const keys = FLW_KEYS[company] || FLW_KEYS.sadeeq;
+  const normalizedCompany = company.toLowerCase().trim();
+  const keys = FLW_KEYS[normalizedCompany] || FLW_KEYS.sadeeq;
   return keys?.[type] || null;
 };
 
@@ -145,14 +169,29 @@ async function createMonnifyAccount(user) {
   const apiKey = getMonnifyKey(user.company, "api");
   const secretKey = getMonnifyKey(user.company, "secret");
   const contractCode = getMonnifyContract(user.company);
-  if (!apiKey ||!secretKey ||!contractCode) throw new Error("Monnify not configured for your company");
-  if (!user.phone) throw new Error("Phone number required to create virtual account. Please update your profile.");
+
+  if (!apiKey ||!secretKey ||!contractCode) {
+    console.error(`[MONNIFY CONFIG ERROR] Missing keys for company: ${user.company}`);
+    throw new Error(`Monnify not configured for company: ${user.company}`);
+  }
+
+  if (!user.phone) {
+    throw new Error("Phone number required to create virtual account. Please update your profile.");
+  }
+
+  console.log(`[MONNIFY] Creating account for ${user.company}. Contract: ${contractCode}, API: ${apiKey.slice(0, 12)}...`);
 
   try {
     const auth = Buffer.from(`${apiKey}:${secretKey}`).toString('base64');
     const login = await axios.post('https://api.monnify.com/api/v1/auth/login', {}, {
-      headers: { Authorization: `Basic ${auth}` }
+      headers: { Authorization: `Basic ${auth}` },
+      timeout: 30000
     });
+
+    if (!login.data.requestSuccessful) {
+      throw new Error(login.data.responseMessage || "Monnify login failed");
+    }
+
     const token = login.data.responseBody.accessToken;
 
     const acc = await axios.post('https://api.monnify.com/api/v2/bank-transfer/reserved-accounts', {
@@ -163,18 +202,31 @@ async function createMonnifyAccount(user) {
       customerEmail: user.email,
       customerName: user.username,
       getAllAvailableBanks: true
-    }, { headers: { Authorization: `Bearer ${token}` } });
+    }, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 30000
+    });
+
+    if (!acc.data.requestSuccessful) {
+      throw new Error(acc.data.responseMessage || "Failed to create reserved account");
+    }
 
     const account = acc.data.responseBody.accounts[0];
     await pool.query(
       `UPDATE users SET account_number=$1, account_name=$2, bank_name=$3 WHERE id=$4`,
       [account.accountNumber, account.accountName, account.bankName, user.id]
     );
+
+    console.log(`[MONNIFY] Account created successfully for ${user.company}: ${account.accountNumber}`);
     return account;
+
   } catch (e) {
     const errData = e.response?.data || e.message;
-    console.log("MONNIFY CREATE ACCOUNT ERROR:", JSON.stringify(errData));
-    throw new Error(errData?.message || "Failed to create Monnify account");
+    console.error("[MONNIFY CREATE ACCOUNT ERROR]:", JSON.stringify(errData, null, 2));
+
+    // Throw the actual Monnify message if available
+    const errorMsg = errData?.responseMessage || errData?.message || "Failed to create Monnify account";
+    throw new Error(errorMsg);
   }
 }
 
