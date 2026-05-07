@@ -1215,7 +1215,191 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
     res.status(500).json({ message: "Failed to fetch profit data" });
   }
 });
+/* ================= ADMIN: WALLET TRANSACTIONS MANAGER ================= */
 
+// GET admin wallet transactions log
+app.get("/admin/wallet/transactions", auth, adminOnly, async (req, res) => {
+  try {
+    const { status, provider, search } = req.query;
+    const userCompany = req.user.company;
+
+    let query = `
+      SELECT
+        wt.id, wt.type, wt.amount, wt.balance_after, wt.company,
+        wt.reason, wt.admin_email, wt.reference, wt.metadata, wt.created_at,
+        t.username, t.email, t.provider, t.status as tx_status
+      FROM wallet_transactions wt
+      LEFT JOIN transactions t ON t.reference = wt.reference
+      WHERE wt.company = $1
+    `;
+    const params = [userCompany];
+    let paramCount = 1;
+
+    if (status) {
+      paramCount++;
+      query += ` AND wt.type = $${paramCount}`;
+      params.push(status.toLowerCase());
+    }
+    if (provider) {
+      paramCount++;
+      query += ` AND t.provider = $${paramCount}`;
+      params.push(provider.toLowerCase());
+    }
+    if (search) {
+      paramCount++;
+      query += ` AND (wt.reference ILIKE $${paramCount} OR wt.admin_email ILIKE $${paramCount} OR t.username ILIKE $${paramCount})`;
+      params.push(`%${search}%`);
+    }
+
+    query += ` ORDER BY wt.created_at DESC LIMIT 200`;
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Admin wallet transactions error:", err);
+    res.status(500).json({ message: "Failed to fetch wallet transactions" });
+  }
+});
+
+// FORCE DEDUCT - manually deduct from user wallet for failed transaction
+app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { reference, reason } = req.body;
+
+    if (!reference ||!reason) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Reference and reason are required" });
+    }
+
+    // Get the transaction
+    const txRes = await client.query(
+      "SELECT * FROM transactions WHERE reference = $1 FOR UPDATE",
+      [reference]
+    );
+    if (!txRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Transaction not found" });
+    }
+
+    const tx = txRes.rows[0];
+    if (tx.status!== "FAILED") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Only FAILED transactions can be manually deducted" });
+    }
+
+    // Get user and check balance
+    const userRes = await client.query("SELECT * FROM users WHERE id = $1 FOR UPDATE", [tx.user_id]);
+    if (!userRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const user = userRes.rows[0];
+    if (Number(user.wallet_balance) < Number(tx.amount)) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Insufficient wallet balance" });
+    }
+
+    // Deduct wallet
+    const newBalance = Number(user.wallet_balance) - Number(tx.amount);
+    await client.query("UPDATE users SET wallet_balance = $1 WHERE id = $2", [newBalance, user.id]);
+
+    // Update transaction status
+    await client.query(
+      `UPDATE transactions
+       SET status = 'SUCCESS', metadata = COALESCE(metadata, '{}') || $1
+       WHERE reference = $2`,
+      [JSON.stringify({ manual_deducted: true, manual_deducted_by: req.user.email, manual_deducted_reason: reason }), reference]
+    );
+
+    // Create wallet transaction record
+    await client.query(
+      `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, admin_email, reference, metadata)
+       VALUES($1, 'debit', $2, $3, $4, $5, $6, $7)`,
+      [user.company, tx.amount, newBalance, reason, req.user.email, `MANUAL-${reference}`, JSON.stringify({ original_ref: reference })]
+    );
+
+    await client.query("COMMIT");
+    sendWalletUpdate(user.id, newBalance);
+
+    res.json({ message: `Successfully deducted ₦${tx.amount} from ${user.username}` });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("Force deduct error:", e);
+    res.status(500).json({ message: "Server error during deduction: " + e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// REVERSE TRANSACTION - refund user wallet for successful transaction
+app.post("/admin/wallet/reverse", auth, adminOnly, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { reference, reason } = req.body;
+
+    if (!reference ||!reason) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Reference and reason are required" });
+    }
+
+    // Get the transaction
+    const txRes = await client.query(
+      "SELECT * FROM transactions WHERE reference = $1 FOR UPDATE",
+      [reference]
+    );
+    if (!txRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Transaction not found" });
+    }
+
+    const tx = txRes.rows[0];
+    if (tx.status!== "SUCCESS") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Only SUCCESS transactions can be reversed" });
+    }
+
+    // Get user and refund wallet
+    const userRes = await client.query("SELECT * FROM users WHERE id = $1 FOR UPDATE", [tx.user_id]);
+    if (!userRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const user = userRes.rows[0];
+    const newBalance = Number(user.wallet_balance) + Number(tx.amount);
+    await client.query("UPDATE users SET wallet_balance = $1 WHERE id = $2", [newBalance, user.id]);
+
+    // Update transaction status
+    await client.query(
+      `UPDATE transactions
+       SET status = 'REVERSED', metadata = COALESCE(metadata, '{}') || $1
+       WHERE reference = $2`,
+      [JSON.stringify({ reversed: true, reversed_by: req.user.email, reversed_reason: reason }), reference]
+    );
+
+    // Create wallet transaction record
+    await client.query(
+      `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, admin_email, reference, metadata)
+       VALUES($1, 'credit', $2, $3, $4, $5, $6, $7)`,
+      [user.company, tx.amount, newBalance, reason, req.user.email, `REVERSAL-${reference}`, JSON.stringify({ original_ref: reference })]
+    );
+
+    await client.query("COMMIT");
+    sendWalletUpdate(user.id, newBalance);
+
+    res.json({ message: `Successfully reversed ₦${tx.amount} to ${user.username}` });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("Reverse transaction error:", e);
+    res.status(500).json({ message: "Server error during reversal: " + e.message });
+  } finally {
+    client.release();
+  }
+});
 /* ================= ADMIN: USERS + TIERS ================= */
 app.get("/admin/users", auth, adminOnly, async (req, res) => {
   try {
