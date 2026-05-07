@@ -120,12 +120,14 @@ const getCompanyAdmin = async (company) => {
 };
 
 const getMonnifyKey = (company, type = "secret") => {
-  const keys = MONNIFY_KEYS[company] || MONNIFY_KEYS.mayconnect;
+  const normalizedCompany = company.toLowerCase(); // force lowercase
+  const keys = MONNIFY_KEYS[normalizedCompany] || MONNIFY_KEYS.mayconnect;
   return keys?.[type] || null;
 };
 
 const getMonnifyContract = (company) => {
-  const keys = MONNIFY_KEYS[company] || MONNIFY_KEYS.mayconnect;
+  const normalizedCompany = company.toLowerCase();
+  const keys = MONNIFY_KEYS[normalizedCompany] || MONNIFY_KEYS.mayconnect;
   return keys?.contract || null;
 };
 
