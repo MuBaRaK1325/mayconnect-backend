@@ -1330,7 +1330,8 @@ app.get("/admin/wallet/transactions", auth, adminOnly, async (req, res) => {
         wt.reason, wt.admin_email, wt.reference, wt.metadata, wt.created_at,
         u.username, u.email
       FROM wallet_transactions wt
-      LEFT JOIN users u ON u.id = wt.user_id
+      LEFT JOIN transactions t ON t.reference = wt.reference
+      LEFT JOIN users u ON u.id = t.user_id
       WHERE wt.company = $1
     `;
     const params = [userCompany];
@@ -1352,8 +1353,8 @@ app.get("/admin/wallet/transactions", auth, adminOnly, async (req, res) => {
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) {
-    console.error("Admin wallet transactions error:", err);
-    res.status(500).json({ message: "Failed to fetch wallet transactions" });
+    console.error("Admin wallet transactions error:", err.message);
+    res.status(500).json({ message: "Failed to fetch wallet transactions", error: err.message });
   }
 });
 
@@ -1369,9 +1370,9 @@ app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
       return res.status(400).json({ message: "Reference and reason are required" });
     }
 
-    // Get the transaction from wallet_transactions
+    // Get the transaction from transactions table
     const txRes = await client.query(
-      "SELECT * FROM wallet_transactions WHERE reference = $1 AND type = 'debit' FOR UPDATE",
+      "SELECT * FROM transactions WHERE reference = $1 FOR UPDATE",
       [reference]
     );
     if (!txRes.rows.length) {
@@ -1380,6 +1381,10 @@ app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
     }
 
     const tx = txRes.rows[0];
+    if (tx.status!== "FAILED") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Only FAILED transactions can be manually deducted" });
+    }
 
     // Get user and check balance
     const userRes = await client.query("SELECT * FROM users WHERE id = $1 FOR UPDATE", [tx.user_id]);
@@ -1398,12 +1403,19 @@ app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
     const newBalance = Number(user.wallet_balance) - Number(tx.amount);
     await client.query("UPDATE users SET wallet_balance = $1 WHERE id = $2", [newBalance, user.id]);
 
-    // Update wallet transaction status
+    // Update transaction status
     await client.query(
-      `UPDATE wallet_transactions
-       SET metadata = COALESCE(metadata, '{}') || $1
+      `UPDATE transactions
+       SET status = 'SUCCESS', metadata = COALESCE(metadata, '{}') || $1
        WHERE reference = $2`,
       [JSON.stringify({ manual_deducted: true, manual_deducted_by: req.user.email, manual_deducted_reason: reason }), reference]
+    );
+
+    // Insert wallet transaction record
+    await client.query(
+      `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, admin_email, reference, metadata)
+       VALUES($1, 'debit', $2, $3, $4, $5, $6, $7)`,
+      [user.company, tx.amount, newBalance, reason, req.user.email, `MANUAL-${reference}`, JSON.stringify({ original_ref: reference })]
     );
 
     await client.query("COMMIT");
@@ -1431,9 +1443,9 @@ app.post("/admin/wallet/reverse", auth, adminOnly, async (req, res) => {
       return res.status(400).json({ message: "Reference and reason are required" });
     }
 
-    // Get the transaction from wallet_transactions
+    // Get the transaction from transactions table
     const txRes = await client.query(
-      "SELECT * FROM wallet_transactions WHERE reference = $1 AND type = 'credit' FOR UPDATE",
+      "SELECT * FROM transactions WHERE reference = $1 FOR UPDATE",
       [reference]
     );
     if (!txRes.rows.length) {
@@ -1442,6 +1454,10 @@ app.post("/admin/wallet/reverse", auth, adminOnly, async (req, res) => {
     }
 
     const tx = txRes.rows[0];
+    if (tx.status!== "SUCCESS") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Only SUCCESS transactions can be reversed" });
+    }
 
     // Get user and refund wallet
     const userRes = await client.query("SELECT * FROM users WHERE id = $1 FOR UPDATE", [tx.user_id]);
@@ -1454,12 +1470,19 @@ app.post("/admin/wallet/reverse", auth, adminOnly, async (req, res) => {
     const newBalance = Number(user.wallet_balance) + Number(tx.amount);
     await client.query("UPDATE users SET wallet_balance = $1 WHERE id = $2", [newBalance, user.id]);
 
-    // Update wallet transaction metadata
+    // Update transaction status
     await client.query(
-      `UPDATE wallet_transactions
-       SET metadata = COALESCE(metadata, '{}') || $1
+      `UPDATE transactions
+       SET status = 'REVERSED', metadata = COALESCE(metadata, '{}') || $1
        WHERE reference = $2`,
       [JSON.stringify({ reversed: true, reversed_by: req.user.email, reversed_reason: reason }), reference]
+    );
+
+    // Insert wallet transaction record
+    await client.query(
+      `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, admin_email, reference, metadata)
+       VALUES($1, 'credit', $2, $3, $4, $5, $6, $7)`,
+      [user.company, tx.amount, newBalance, reason, req.user.email, `REVERSAL-${reference}`, JSON.stringify({ original_ref: reference })]
     );
 
     await client.query("COMMIT");
@@ -1519,7 +1542,7 @@ app.post("/admin/users/set-tier", auth, adminOnly, async (req, res) => {
     );
     if (!check.rows.length) return res.status(404).json({ message: "User not found" });
 
-    // Remove user from all tier tables first - single source of truth is users manager now
+    // Remove user from all tier tables first
     await pool.query("DELETE FROM top_users WHERE id = $1", [user_id]);
     await pool.query("DELETE FROM regular_users WHERE user_id = $1", [user_id]);
 
@@ -1535,7 +1558,6 @@ app.post("/admin/users/set-tier", auth, adminOnly, async (req, res) => {
         [user_id]
       );
     }
-    // 'default' means no entry in either table
 
     broadcastTopUserUpdate(req.user.company);
     res.json({ success: true, tier, message: `User tier updated to ${tier}` });
