@@ -154,10 +154,18 @@ const getMonnifyContract = (company) => {
   return keys?.contract || null;
 };
 
+/* Updated for Render env vars */
 const getFLWKey = (company, type = "secret") => {
-  const normalizedCompany = company.toLowerCase().trim();
-  const keys = FLW_KEYS[normalizedCompany] || FLW_KEYS.sadeeq;
-  return keys?.[type] || null;
+  if (type === "secret") {
+    return process.env.FLUTTERWAVE_SECRET_KEY || null;
+  }
+  if (type === "public") {
+    return process.env.FLUTTERWAVE_PUBLIC_KEY || null;
+  }
+  if (type === "webhook") {
+    return process.env.FLUTTERWAVE_WEBHOOK_SECRET || null;
+  }
+  return null;
 };
 
 const getUser = async (id) => {
@@ -224,7 +232,6 @@ async function createMonnifyAccount(user) {
     const errData = e.response?.data || e.message;
     console.error("[MONNIFY CREATE ACCOUNT ERROR]:", JSON.stringify(errData, null, 2));
 
-    // Throw the actual Monnify message if available
     const errorMsg = errData?.responseMessage || errData?.message || "Failed to create Monnify account";
     throw new Error(errorMsg);
   }
@@ -449,55 +456,84 @@ app.post("/api/monnify/webhook",
 );
 
 /* ================= FLUTTERWAVE WEBHOOK - MUST BE BEFORE express.json() ================= */
-app.post("/api/flutterwave/webhook", async (req, res) => {
-  console.log("FLUTTERWAVE WEBHOOK HIT");
-  try {
-    const signature = req.headers['verif-hash'];
-    if (!signature || signature!== process.env.FLW_SECRET_HASH) {
-      return res.sendStatus(401);
-    }
-
-    const event = req.body;
-    if (event.status!== 'successful') return res.sendStatus(200);
-
-    const amount = Number(event.amount);
-    const reference = event.txRef;
-    const email = event.customer?.email;
-
-    const client = await pool.connect();
+app.post("/api/flutterwave/webhook",
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    console.log("FLUTTERWAVE WEBHOOK HIT");
     try {
-      await client.query("BEGIN");
-      const userRes = await client.query("SELECT id FROM users WHERE email=$1 FOR UPDATE", [email]);
-      if (!userRes.rows.length) {
-        await client.query("ROLLBACK");
-        return res.sendStatus(200);
-      }
-      const userId = userRes.rows[0].id;
+      const signature = req.headers['verif-hash'];
+      const secret = process.env.FLUTTERWAVE_WEBHOOK_SECRET;
 
-      const existing = await client.query("SELECT status FROM transactions WHERE reference=$1 FOR UPDATE", [reference]);
-      if (existing.rows.length && existing.rows[0].status === "SUCCESS") {
-        await client.query("ROLLBACK");
+      if (!signature ||!secret) {
+        console.log("Missing signature or secret");
+        return res.sendStatus(401);
+      }
+
+      // Verify signature
+      const crypto = require('crypto');
+      const hash = crypto.createHmac('sha256', secret)
+                        .update(req.body)
+                        .digest('hex');
+
+      if (hash!== signature) {
+        console.log("Invalid signature");
+        return res.sendStatus(401);
+      }
+
+      const event = JSON.parse(req.body);
+
+      // Only process successful charges
+      if (event.event!== 'charge.completed' || event.data.status!== 'successful') {
         return res.sendStatus(200);
       }
-      const update = await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance", [amount, userId]);
-      const newBalance = update.rows[0].wallet_balance;
-      if (!existing.rows.length) {
-        await client.query(`INSERT INTO transactions(user_id,type,amount,reference,status) VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS')`, [userId, amount, reference]);
+
+      const amount = Number(event.data.amount);
+      const reference = event.data.tx_ref;
+      const email = event.data.customer?.email;
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const userRes = await client.query("SELECT id FROM users WHERE email=$1 FOR UPDATE", [email]);
+        if (!userRes.rows.length) {
+          await client.query("ROLLBACK");
+          return res.sendStatus(200);
+        }
+        const userId = userRes.rows[0].id;
+
+        const existing = await client.query("SELECT status FROM transactions WHERE reference=$1 FOR UPDATE", [reference]);
+        if (existing.rows.length && existing.rows[0].status === "SUCCESS") {
+          await client.query("ROLLBACK");
+          return res.sendStatus(200);
+        }
+
+        const update = await client.query(
+          "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
+          [amount, userId]
+        );
+        const newBalance = update.rows[0].wallet_balance;
+
+        if (!existing.rows.length) {
+          await client.query(
+            `INSERT INTO transactions(user_id,type,amount,reference,status) VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS')`,
+            [userId, amount, reference]
+          );
+        }
+        await client.query("COMMIT");
+        sendWalletUpdate(userId, Number(newBalance));
+      } catch (e) {
+        await client.query("ROLLBACK");
+        console.log("FLW WEBHOOK TX ERROR:", e.message);
+      } finally {
+        client.release();
       }
-      await client.query("COMMIT");
-      sendWalletUpdate(userId, Number(newBalance));
+      res.sendStatus(200);
     } catch (e) {
-      await client.query("ROLLBACK");
-      console.log("FLW WEBHOOK TX ERROR:", e.message);
-    } finally {
-      client.release();
+      console.log("FLUTTERWAVE WEBHOOK ERROR:", e.message);
+      res.sendStatus(500);
     }
-    res.sendStatus(200);
-  } catch (e) {
-    console.log("FLUTTERWAVE WEBHOOK ERROR:", e.message);
-    res.sendStatus(500);
   }
-});
+);
 
 /* ================= JSON PARSER - AFTER WEBHOOKS ONLY ================= */
 app.use(express.json());
@@ -791,8 +827,19 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
         amount: Number(amount),
         currency: "NGN",
         redirect_url: `https://${user.company}-frontend.onrender.com/dashboard.html`,
-        customer: { email: user.email, name: user.username }
-      }, { headers: { Authorization: `Bearer ${flwSecret}` } });
+        customer: { email: user.email, name: user.username },
+        customizations: {
+          title: "Wallet Funding",
+          description: "Fund your wallet"
+        }
+      }, {
+        headers: { Authorization: `Bearer ${flwSecret}` },
+        timeout: 30000
+      });
+
+      if (!response.data.status === "success") {
+        throw new Error(response.data.message || "Flutterwave init failed");
+      }
 
       res.json({ url: response.data.link, reference });
 
@@ -1274,16 +1321,16 @@ app.get("/admin/profit", auth, adminOnly, async (req, res) => {
 // GET admin wallet transactions log
 app.get("/admin/wallet/transactions", auth, adminOnly, async (req, res) => {
   try {
-    const { status, provider, search } = req.query;
+    const { status, search } = req.query;
     const userCompany = req.user.company;
 
     let query = `
       SELECT
         wt.id, wt.type, wt.amount, wt.balance_after, wt.company,
         wt.reason, wt.admin_email, wt.reference, wt.metadata, wt.created_at,
-        t.username, t.email, t.provider, t.status as tx_status
+        u.username, u.email
       FROM wallet_transactions wt
-      LEFT JOIN transactions t ON t.reference = wt.reference
+      LEFT JOIN users u ON u.id = wt.user_id
       WHERE wt.company = $1
     `;
     const params = [userCompany];
@@ -1294,14 +1341,9 @@ app.get("/admin/wallet/transactions", auth, adminOnly, async (req, res) => {
       query += ` AND wt.type = $${paramCount}`;
       params.push(status.toLowerCase());
     }
-    if (provider) {
-      paramCount++;
-      query += ` AND t.provider = $${paramCount}`;
-      params.push(provider.toLowerCase());
-    }
     if (search) {
       paramCount++;
-      query += ` AND (wt.reference ILIKE $${paramCount} OR wt.admin_email ILIKE $${paramCount} OR t.username ILIKE $${paramCount})`;
+      query += ` AND (wt.reference ILIKE $${paramCount} OR wt.admin_email ILIKE $${paramCount} OR u.username ILIKE $${paramCount} OR u.email ILIKE $${paramCount})`;
       params.push(`%${search}%`);
     }
 
@@ -1327,9 +1369,9 @@ app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
       return res.status(400).json({ message: "Reference and reason are required" });
     }
 
-    // Get the transaction
+    // Get the transaction from wallet_transactions
     const txRes = await client.query(
-      "SELECT * FROM transactions WHERE reference = $1 FOR UPDATE",
+      "SELECT * FROM wallet_transactions WHERE reference = $1 AND type = 'debit' FOR UPDATE",
       [reference]
     );
     if (!txRes.rows.length) {
@@ -1338,10 +1380,6 @@ app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
     }
 
     const tx = txRes.rows[0];
-    if (tx.status!== "FAILED") {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Only FAILED transactions can be manually deducted" });
-    }
 
     // Get user and check balance
     const userRes = await client.query("SELECT * FROM users WHERE id = $1 FOR UPDATE", [tx.user_id]);
@@ -1360,19 +1398,12 @@ app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
     const newBalance = Number(user.wallet_balance) - Number(tx.amount);
     await client.query("UPDATE users SET wallet_balance = $1 WHERE id = $2", [newBalance, user.id]);
 
-    // Update transaction status
+    // Update wallet transaction status
     await client.query(
-      `UPDATE transactions
-       SET status = 'SUCCESS', metadata = COALESCE(metadata, '{}') || $1
+      `UPDATE wallet_transactions
+       SET metadata = COALESCE(metadata, '{}') || $1
        WHERE reference = $2`,
       [JSON.stringify({ manual_deducted: true, manual_deducted_by: req.user.email, manual_deducted_reason: reason }), reference]
-    );
-
-    // Create wallet transaction record
-    await client.query(
-      `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, admin_email, reference, metadata)
-       VALUES($1, 'debit', $2, $3, $4, $5, $6, $7)`,
-      [user.company, tx.amount, newBalance, reason, req.user.email, `MANUAL-${reference}`, JSON.stringify({ original_ref: reference })]
     );
 
     await client.query("COMMIT");
@@ -1400,9 +1431,9 @@ app.post("/admin/wallet/reverse", auth, adminOnly, async (req, res) => {
       return res.status(400).json({ message: "Reference and reason are required" });
     }
 
-    // Get the transaction
+    // Get the transaction from wallet_transactions
     const txRes = await client.query(
-      "SELECT * FROM transactions WHERE reference = $1 FOR UPDATE",
+      "SELECT * FROM wallet_transactions WHERE reference = $1 AND type = 'credit' FOR UPDATE",
       [reference]
     );
     if (!txRes.rows.length) {
@@ -1411,10 +1442,6 @@ app.post("/admin/wallet/reverse", auth, adminOnly, async (req, res) => {
     }
 
     const tx = txRes.rows[0];
-    if (tx.status!== "SUCCESS") {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Only SUCCESS transactions can be reversed" });
-    }
 
     // Get user and refund wallet
     const userRes = await client.query("SELECT * FROM users WHERE id = $1 FOR UPDATE", [tx.user_id]);
@@ -1427,19 +1454,12 @@ app.post("/admin/wallet/reverse", auth, adminOnly, async (req, res) => {
     const newBalance = Number(user.wallet_balance) + Number(tx.amount);
     await client.query("UPDATE users SET wallet_balance = $1 WHERE id = $2", [newBalance, user.id]);
 
-    // Update transaction status
+    // Update wallet transaction metadata
     await client.query(
-      `UPDATE transactions
-       SET status = 'REVERSED', metadata = COALESCE(metadata, '{}') || $1
+      `UPDATE wallet_transactions
+       SET metadata = COALESCE(metadata, '{}') || $1
        WHERE reference = $2`,
       [JSON.stringify({ reversed: true, reversed_by: req.user.email, reversed_reason: reason }), reference]
-    );
-
-    // Create wallet transaction record
-    await client.query(
-      `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, admin_email, reference, metadata)
-       VALUES($1, 'credit', $2, $3, $4, $5, $6, $7)`,
-      [user.company, tx.amount, newBalance, reason, req.user.email, `REVERSAL-${reference}`, JSON.stringify({ original_ref: reference })]
     );
 
     await client.query("COMMIT");
