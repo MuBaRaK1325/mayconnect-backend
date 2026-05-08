@@ -1326,35 +1326,37 @@ app.get("/admin/wallet/transactions", auth, adminOnly, async (req, res) => {
 
     let query = `
       SELECT
-        wt.id, wt.type, wt.amount, wt.balance_after, wt.company,
-        wt.reason, wt.admin_email, wt.reference, wt.metadata, wt.created_at,
-        u.username, u.email
-      FROM wallet_transactions wt
-      LEFT JOIN transactions t ON t.reference = wt.reference
-      LEFT JOIN users u ON u.id = t.user_id
-      WHERE wt.company = $1
+        t.id, t.type, t.amount, t.status, t.phone, t.reference,
+        t.created_at, t.cost, t.network, t.provider_reference, t.description, t.metadata,
+        u.username, u.email, u.company
+      FROM transactions t
+      JOIN users u ON u.id = t.user_id
+      WHERE u.company = $1
     `;
     const params = [userCompany];
     let paramCount = 1;
 
     if (status) {
       paramCount++;
-      query += ` AND wt.type = $${paramCount}`;
-      params.push(status.toLowerCase());
+      query += ` AND t.status = $${paramCount}`;
+      params.push(status.toUpperCase());
     }
     if (search) {
       paramCount++;
-      query += ` AND (wt.reference ILIKE $${paramCount} OR wt.admin_email ILIKE $${paramCount} OR u.username ILIKE $${paramCount} OR u.email ILIKE $${paramCount})`;
+      query += ` AND (t.reference ILIKE $${paramCount}
+                OR t.phone ILIKE $${paramCount}
+                OR u.username ILIKE $${paramCount}
+                OR u.email ILIKE $${paramCount})`;
       params.push(`%${search}%`);
     }
 
-    query += ` ORDER BY wt.created_at DESC LIMIT 200`;
+    query += ` ORDER BY t.created_at DESC LIMIT 200`;
 
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) {
     console.error("Admin wallet transactions error:", err.message);
-    res.status(500).json({ message: "Failed to fetch wallet transactions", error: err.message });
+    res.status(500).json({ message: "Failed to fetch transactions", error: err.message });
   }
 });
 
@@ -1411,7 +1413,7 @@ app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
       [JSON.stringify({ manual_deducted: true, manual_deducted_by: req.user.email, manual_deducted_reason: reason }), reference]
     );
 
-    // Insert wallet transaction record
+    // Insert wallet transaction record for audit trail
     await client.query(
       `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, admin_email, reference, metadata)
        VALUES($1, 'debit', $2, $3, $4, $5, $6, $7)`,
@@ -1478,7 +1480,7 @@ app.post("/admin/wallet/reverse", auth, adminOnly, async (req, res) => {
       [JSON.stringify({ reversed: true, reversed_by: req.user.email, reversed_reason: reason }), reference]
     );
 
-    // Insert wallet transaction record
+    // Insert wallet transaction record for audit trail
     await client.query(
       `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, admin_email, reference, metadata)
        VALUES($1, 'credit', $2, $3, $4, $5, $6, $7)`,
