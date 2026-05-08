@@ -1328,7 +1328,17 @@ app.get("/admin/wallet/transactions", auth, adminOnly, async (req, res) => {
       SELECT
         t.id, t.type, t.amount, t.status, t.phone, t.reference,
         t.created_at, t.cost, t.network, t.provider_reference, t.description, t.metadata,
-        u.username, u.email, u.company
+        u.username, u.email, u.company,
+        CASE
+          WHEN t.type = 'WALLET_FUND' THEN 'CREDIT'
+          WHEN t.type = 'REVERSAL' THEN 'CREDIT'
+          ELSE 'DEBIT'
+        END AS display_type,
+        CASE
+          WHEN t.type = 'WALLET_FUND' THEN 'green'
+          WHEN t.type = 'REVERSAL' THEN 'green'
+          ELSE 'red'
+        END AS display_color
       FROM transactions t
       JOIN users u ON u.id = t.user_id
       WHERE u.company = $1
