@@ -166,8 +166,13 @@ async function createPaymentPointAccount(user) {
     'Content-Type': 'application/json'
   };
 
+  // Debug logs - check these in Render logs
   console.log(`[PAYMENTPOINT] Creating account for ${user.username} on ${user.company}`);
   console.log(`[PAYMENTPOINT] URL: ${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`);
+  console.log(`[PAYMENTPOINT] Business ID: ${creds.businessId}`);
+  console.log(`[PAYMENTPOINT] API Key Length: ${creds.apiKey.length}`);
+  console.log(`[PAYMENTPOINT] Sending Authorization: Bearer ${creds.apiKey.substring(0, 10)}...`);
+  console.log(`[PAYMENTPOINT] Sending api-key: ${creds.apiKey.substring(0, 10)}...`);
 
   const { data } = await axios.post(
     `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
@@ -176,6 +181,7 @@ async function createPaymentPointAccount(user) {
   );
 
   if (data.status!== "success") {
+    console.log("[PAYMENTPOINT] Full Error Response:", JSON.stringify(data));
     throw new Error(data.message || "PaymentPoint account creation failed");
   }
 
