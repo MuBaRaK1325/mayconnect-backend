@@ -145,7 +145,7 @@ const getUser = async (id) => {
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
-  if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
+  if (!creds.apiKey ||!creds.businessId) {
     throw new Error(`PaymentPoint not configured for company: ${user.company}`);
   }
   if (!user.phone) {
@@ -163,12 +163,11 @@ async function createPaymentPointAccount(user) {
   const headers = {
     'Authorization': `Bearer ${creds.apiKey}`,
     'api-key': creds.apiKey,
-    'api-secret': creds.secretKey,
     'Content-Type': 'application/json'
   };
 
   console.log(`[PAYMENTPOINT] Creating account for ${user.username} on ${user.company}`);
-  console.log(`[PAYMENTPOINT] API key loaded: ${creds.apiKey? 'yes' : 'no'}`);
+  console.log(`[PAYMENTPOINT] URL: ${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`);
 
   const { data } = await axios.post(
     `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
