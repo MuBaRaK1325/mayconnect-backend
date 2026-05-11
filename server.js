@@ -162,6 +162,7 @@ async function createPaymentPointAccount(user) {
 
   const headers = {
     'Authorization': `Bearer ${creds.apiKey}`,
+    'api-key': creds.apiKey,
     'api-secret': creds.secretKey,
     'Content-Type': 'application/json'
   };
