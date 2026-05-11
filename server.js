@@ -45,9 +45,6 @@ pool.connect((err, client, release) => {
   }
 });
 
-// DON'T export pool here if you import it elsewhere. Remove this line:
-// module.exports = pool;
-
 /* ================= CORS ================= */
 app.use(cors({
   origin: [
@@ -83,12 +80,18 @@ const RP_ID = process.env.RP_ID || 'mayconnect-backend-1.onrender.com';
 const RP_NAME = 'Mayconnect';
 const ORIGIN = process.env.RP_ORIGIN || 'https://mayconnect-backend-1.onrender.com';
 
-// PAYMENT KEYS
-const MONNIFY_KEYS = JSON.parse(process.env.MONNIFY_KEYS || "{}");
-const FLW_KEYS = JSON.parse(process.env.FLW_KEYS || "{}");
+// PAYMENTPOINT CONFIG
+const PAYMENTPOINT_BASE = "https://api.paymentpoint.co";
+const PAYMENTPOINT_API_KEY = process.env.PAYMENTPOINT_API_KEY;
+const PAYMENTPOINT_SECRET_KEY = process.env.PAYMENTPOINT_SECRET_KEY;
+const PAYMENTPOINT_BUSINESS_ID = process.env.PAYMENTPOINT_BUSINESS_ID;
 
-// Debug: log available companies on startup
-console.log("[MONNIFY KEYS] Configured companies:", Object.keys(MONNIFY_KEYS));
+console.log("[PAYMENTPOINT] Config loaded:", {
+  base: PAYMENTPOINT_BASE,
+  hasApiKey:!!PAYMENTPOINT_API_KEY,
+  hasSecretKey:!!PAYMENTPOINT_SECRET_KEY,
+  businessId: PAYMENTPOINT_BUSINESS_ID
+});
 
 const VTU_PROVIDERS = {
   maitama: {
@@ -131,41 +134,9 @@ const fundInitLimiter = rateLimit({
 const getCompanyAdmin = async (company) => {
   const admin = await pool.query(
     "SELECT id FROM users WHERE company=$1 AND is_admin=TRUE ORDER BY id ASC LIMIT 1",
-    [company.toLowerCase()] // normalize company name
+    [company.toLowerCase()]
   );
   return admin.rows[0]?.id || null;
-};
-
-const getMonnifyKey = (company, type = "secret") => {
-  if (!company) return null;
-  const normalizedCompany = company.toLowerCase().trim();
-  const keys = MONNIFY_KEYS[normalizedCompany];
-  if (!keys) {
-    console.error(`[MONNIFY ERROR] No keys found for company: ${normalizedCompany}. Available:`, Object.keys(MONNIFY_KEYS));
-    return null;
-  }
-  return keys?.[type] || null;
-};
-
-const getMonnifyContract = (company) => {
-  if (!company) return null;
-  const normalizedCompany = company.toLowerCase().trim();
-  const keys = MONNIFY_KEYS[normalizedCompany];
-  return keys?.contract || null;
-};
-
-/* Updated for Render env vars */
-const getFLWKey = (company, type = "secret") => {
-  if (type === "secret") {
-    return process.env.FLUTTERWAVE_SECRET_KEY || null;
-  }
-  if (type === "public") {
-    return process.env.FLUTTERWAVE_PUBLIC_KEY || null;
-  }
-  if (type === "webhook") {
-    return process.env.FLUTTERWAVE_WEBHOOK_SECRET || null;
-  }
-  return null;
 };
 
 const getUser = async (id) => {
@@ -173,68 +144,69 @@ const getUser = async (id) => {
   return res.rows[0];
 };
 
-async function createMonnifyAccount(user) {
-  const apiKey = getMonnifyKey(user.company, "api");
-  const secretKey = getMonnifyKey(user.company, "secret");
-  const contractCode = getMonnifyContract(user.company);
-
-  if (!apiKey ||!secretKey ||!contractCode) {
-    console.error(`[MONNIFY CONFIG ERROR] Missing keys for company: ${user.company}`);
-    throw new Error(`Monnify not configured for company: ${user.company}`);
+async function createPaymentPointAccount(user) {
+  if (!PAYMENTPOINT_API_KEY ||!PAYMENTPOINT_SECRET_KEY ||!PAYMENTPOINT_BUSINESS_ID) {
+    throw new Error("PaymentPoint not configured. Set PAYMENTPOINT_API_KEY, PAYMENTPOINT_SECRET_KEY, PAYMENTPOINT_BUSINESS_ID env vars");
   }
-
   if (!user.phone) {
     throw new Error("Phone number required to create virtual account. Please update your profile.");
   }
 
-  console.log(`[MONNIFY] Creating account for ${user.company}. Contract: ${contractCode}, API: ${apiKey.slice(0, 12)}...`);
+  const payload = {
+    email: user.email,
+    name: user.fullname || user.username,
+    phoneNumber: user.phone,
+    bankCode: ["20946", "20897"], // Palmpay, Opay
+    businessId: PAYMENTPOINT_BUSINESS_ID
+  };
 
-  try {
-    const auth = Buffer.from(`${apiKey}:${secretKey}`).toString('base64');
-    const login = await axios.post('https://api.monnify.com/api/v1/auth/login', {}, {
-      headers: { Authorization: `Basic ${auth}` },
-      timeout: 30000
-    });
+  const headers = {
+    'api-key': PAYMENTPOINT_API_KEY,
+    'api-secret': PAYMENTPOINT_SECRET_KEY,
+    'Content-Type': 'application/json'
+  };
 
-    if (!login.data.requestSuccessful) {
-      throw new Error(login.data.responseMessage || "Monnify login failed");
-    }
+  console.log(`[PAYMENTPOINT] Creating account for ${user.username}`);
 
-    const token = login.data.responseBody.accessToken;
+  const { data } = await axios.post(
+    `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
+    payload,
+    { headers, timeout: 30000 }
+  );
 
-    const acc = await axios.post('https://api.monnify.com/api/v2/bank-transfer/reserved-accounts', {
-      accountReference: `${user.company.toUpperCase().slice(0,3)}_${user.id}_${Date.now()}`,
-      accountName: user.username,
-      currencyCode: "NGN",
-      contractCode: contractCode,
-      customerEmail: user.email,
-      customerName: user.username,
-      getAllAvailableBanks: true
-    }, {
-      headers: { Authorization: `Bearer ${token}` },
-      timeout: 30000
-    });
-
-    if (!acc.data.requestSuccessful) {
-      throw new Error(acc.data.responseMessage || "Failed to create reserved account");
-    }
-
-    const account = acc.data.responseBody.accounts[0];
-    await pool.query(
-      `UPDATE users SET account_number=$1, account_name=$2, bank_name=$3 WHERE id=$4`,
-      [account.accountNumber, account.accountName, account.bankName, user.id]
-    );
-
-    console.log(`[MONNIFY] Account created successfully for ${user.company}: ${account.accountNumber}`);
-    return account;
-
-  } catch (e) {
-    const errData = e.response?.data || e.message;
-    console.error("[MONNIFY CREATE ACCOUNT ERROR]:", JSON.stringify(errData, null, 2));
-
-    const errorMsg = errData?.responseMessage || errData?.message || "Failed to create Monnify account";
-    throw new Error(errorMsg);
+  if (data.status!== "success") {
+    throw new Error(data.message || "PaymentPoint account creation failed");
   }
+
+  const bankAcc = data.bankAccounts[0];
+
+  await pool.query(
+    `UPDATE users SET
+      account_number=$1,
+      account_name=$2,
+      bank_name=$3,
+      paymentmethod='paymentpoint',
+      reserved_account_id=$4,
+      customer_id=$5
+     WHERE id=$6`,
+    [
+      bankAcc.accountNumber,
+      bankAcc.accountName,
+      bankAcc.bankName,
+      bankAcc.Reserved_Account_Id,
+      data.customer_id,
+      user.id
+    ]
+  );
+
+  console.log(`[PAYMENTPOINT] Account created for ${user.username}: ${bankAcc.accountNumber}`);
+
+  return {
+    account_number: bankAcc.accountNumber,
+    account_name: bankAcc.accountName,
+    bank_name: bankAcc.bankName,
+    reserved_account_id: bankAcc.Reserved_Account_Id
+  };
 }
 
 /* ================= WEBSOCKET SETUP ================= */
@@ -401,107 +373,57 @@ async function callSubPadiData(phone, network_id, api_plan_id) {
   return res.data;
 }
 
-/* ================= MONNIFY WEBHOOK - MUST BE BEFORE express.json() ================= */
-app.post("/api/monnify/webhook",
+/* ================= PAYMENTPOINT WEBHOOK - MUST BE BEFORE express.json() ================= */
+app.post("/api/paymentpoint/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
-    console.log("MONNIFY WEBHOOK HIT");
+    console.log("PAYMENTPOINT WEBHOOK HIT");
     try {
       const rawBody = req.body;
-      const signature = req.headers["monnify-signature"];
-      if (!rawBody ||!signature) {
+      const signature = req.headers["paymentpoint-signature"];
+
+      if (!rawBody ||!signature ||!PAYMENTPOINT_SECRET_KEY) {
         return res.sendStatus(400);
       }
 
-      const hash = crypto.createHmac("sha512", process.env.MONNIFY_SECRET_KEY).update(rawBody).digest("hex");
-      if (hash!== signature) {
-        return res.sendStatus(400);
+      const calculatedSignature = crypto
+      .createHmac("sha256", PAYMENTPOINT_SECRET_KEY)
+      .update(rawBody)
+      .digest("hex");
+
+      if (!crypto.timingSafeEqual(Buffer.from(calculatedSignature), Buffer.from(signature))) {
+        console.log("Invalid PaymentPoint signature");
+        return res.sendStatus(401);
       }
 
       const event = JSON.parse(rawBody.toString());
-      if (event.eventType!== "SUCCESSFUL_TRANSACTION") return res.sendStatus(200);
 
-      const amount = Number(event.eventData.amountPaid);
-      const reference = event.eventData.paymentReference;
-      const accountRef = event.eventData.accountReference;
-      const userId = accountRef.split('_')[1];
-
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        const existing = await client.query("SELECT status FROM transactions WHERE reference=$1 FOR UPDATE", [reference]);
-        if (existing.rows.length && existing.rows[0].status === "SUCCESS") {
-          await client.query("ROLLBACK");
-          return res.sendStatus(200);
-        }
-        const update = await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance", [amount, userId]);
-        const newBalance = update.rows[0].wallet_balance;
-        if (!existing.rows.length) {
-          await client.query(`INSERT INTO transactions(user_id,type,amount,reference,status) VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS')`, [userId, amount, reference]);
-        }
-        await client.query("COMMIT");
-        sendWalletUpdate(userId, Number(newBalance));
-      } catch (e) {
-        await client.query("ROLLBACK");
-        console.log("MONNIFY WEBHOOK TX ERROR:", e.message);
-      } finally {
-        client.release();
-      }
-      res.sendStatus(200);
-    } catch (e) {
-      console.log("MONNIFY WEBHOOK ERROR:", e.message);
-      res.sendStatus(500);
-    }
-  }
-);
-
-/* ================= FLUTTERWAVE WEBHOOK - MUST BE BEFORE express.json() ================= */
-app.post("/api/flutterwave/webhook",
-  express.raw({ type: 'application/json' }),
-  async (req, res) => {
-    console.log("FLUTTERWAVE WEBHOOK HIT");
-    try {
-      const signature = req.headers['verif-hash'];
-      const secret = process.env.FLUTTERWAVE_WEBHOOK_SECRET;
-
-      if (!signature ||!secret) {
-        console.log("Missing signature or secret");
-        return res.sendStatus(401);
-      }
-
-      // Verify signature
-      const crypto = require('crypto');
-      const hash = crypto.createHmac('sha256', secret)
-                        .update(req.body)
-                        .digest('hex');
-
-      if (hash!== signature) {
-        console.log("Invalid signature");
-        return res.sendStatus(401);
-      }
-
-      const event = JSON.parse(req.body);
-
-      // Only process successful charges
-      if (event.event!== 'charge.completed' || event.data.status!== 'successful') {
+      if (event.notification_status!== "payment_successful" || event.transaction_status!== "success") {
         return res.sendStatus(200);
       }
 
-      const amount = Number(event.data.amount);
-      const reference = event.data.tx_ref;
-      const email = event.data.customer?.email;
+      const amount = Number(event.amount_paid);
+      const reference = event.transaction_id;
+      const customerId = event.customer.customer_id;
 
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
-        const userRes = await client.query("SELECT id FROM users WHERE email=$1 FOR UPDATE", [email]);
+
+        const userRes = await client.query(
+          "SELECT id FROM users WHERE customer_id=$1 FOR UPDATE",
+          [customerId]
+        );
         if (!userRes.rows.length) {
           await client.query("ROLLBACK");
           return res.sendStatus(200);
         }
         const userId = userRes.rows[0].id;
 
-        const existing = await client.query("SELECT status FROM transactions WHERE reference=$1 FOR UPDATE", [reference]);
+        const existing = await client.query(
+          "SELECT status FROM transactions WHERE reference=$1 FOR UPDATE",
+          [reference]
+        );
         if (existing.rows.length && existing.rows[0].status === "SUCCESS") {
           await client.query("ROLLBACK");
           return res.sendStatus(200);
@@ -519,17 +441,19 @@ app.post("/api/flutterwave/webhook",
             [userId, amount, reference]
           );
         }
+
         await client.query("COMMIT");
         sendWalletUpdate(userId, Number(newBalance));
+
       } catch (e) {
         await client.query("ROLLBACK");
-        console.log("FLW WEBHOOK TX ERROR:", e.message);
+        console.log("PAYMENTPOINT WEBHOOK TX ERROR:", e.message);
       } finally {
         client.release();
       }
       res.sendStatus(200);
     } catch (e) {
-      console.log("FLUTTERWAVE WEBHOOK ERROR:", e.message);
+      console.log("PAYMENTPOINT WEBHOOK ERROR:", e.message);
       res.sendStatus(500);
     }
   }
@@ -538,7 +462,6 @@ app.post("/api/flutterwave/webhook",
 /* ================= JSON PARSER - AFTER WEBHOOKS ONLY ================= */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
 /* ================= AUTH MIDDLEWARE ================= */
 function auth(req, res, next) {
   try {
@@ -817,68 +740,56 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
   const reference = "FUND-" + uuidv4();
 
   try {
-    if (user.company === "sadeeq") {
-      // FLUTTERWAVE
-      const flwSecret = getFLWKey(user.company, "secret");
-      if (!flwSecret) return res.status(500).json({ message: "Flutterwave not configured for your company" });
+    let account = await pool.query(
+      "SELECT account_number, bank_name, account_name, paymentmethod FROM users WHERE id=$1",
+      [user.id]
+    );
 
-      const response = await axios.post("https://api.flutterwave.com/v3/payments", {
-        tx_ref: reference,
-        amount: Number(amount),
-        currency: "NGN",
-        redirect_url: `https://${user.company}-frontend.onrender.com/dashboard.html`,
-        customer: { email: user.email, name: user.username },
-        customizations: {
-          title: "Wallet Funding",
-          description: "Fund your wallet"
-        }
-      }, {
-        headers: { Authorization: `Bearer ${flwSecret}` },
-        timeout: 30000
-      });
-
-      if (!response.data.status === "success") {
-        throw new Error(response.data.message || "Flutterwave init failed");
-      }
-
-      res.json({ url: response.data.link, reference });
-
-    } else {
-      // MONNIFY for mayconnect, bnhabeeb, teeversh
-      let account = await pool.query("SELECT account_number, bank_name, account_name FROM users WHERE id=$1", [user.id]);
-      if (!account.rows[0]?.account_number) {
-        account = { rows: [await createMonnifyAccount(user)] };
-      }
-      res.json({
-        bank_name: account.rows[0].bank_name,
-        account_number: account.rows[0].account_number,
-        account_name: account.rows[0].account_name,
-        reference
-      });
+    if (!account.rows[0]?.account_number || account.rows[0].paymentmethod!== "paymentpoint") {
+      account = { rows: [await createPaymentPointAccount(user)] };
     }
+
+    res.json({
+      bank_name: account.rows[0].bank_name,
+      account_number: account.rows[0].account_number,
+      account_name: account.rows[0].account_name,
+      reference,
+      method: "paymentpoint"
+    });
+
   } catch (e) {
     console.log("FUND INIT ERROR:", e.response?.data || e.message);
     res.status(500).json({ message: "Unable to initialize payment" });
   }
 });
 
-/* ================= DVA ROUTE - MONNIFY ================= */
+/* ================= DVA ROUTE ================= */
 app.post('/api/wallet/create-dva', auth, async (req, res) => {
   try {
     const userId = req.user.id;
     const user = await getUser(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    if (user.company === "sadeeq") return res.status(400).json({ error: 'DVA not available for Sadeeq' });
-    if (user.account_number) return res.json({ message: "Account already exists", account: user });
-    if (!user.phone) return res.status(400).json({ error: 'Phone number missing. Update profile first.' });
 
-    const account = await createMonnifyAccount(user);
+    if (user.account_number && user.paymentmethod === "paymentpoint") {
+      return res.json({
+        message: "Account already exists",
+        account: user,
+        method: "paymentpoint"
+      });
+    }
+    if (!user.phone) {
+      return res.status(400).json({ error: 'Phone number missing. Update profile first.' });
+    }
+
+    const account = await createPaymentPointAccount(user);
     res.json({
       success: true,
-      account_number: account.accountNumber,
-      bank_name: account.bankName,
-      account_name: account.accountName
+      account_number: account.account_number,
+      bank_name: account.bank_name,
+      account_name: account.account_name,
+      method: "paymentpoint"
     });
+
   } catch (error) {
     console.error('DVA Error:', error.response?.data || error.message);
     res.status(500).json({ error: error.message || 'Failed to create virtual account' });
@@ -976,11 +887,27 @@ app.get("/api/me", auth, async (req, res) => {
 app.post("/api/generate-account", auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
-    if (user.company === "sadeeq") return res.status(400).json({ message: "Sadeeq uses Flutterwave, no DVA" });
-    if (user.account_number) return res.json({ message: "Account already exists", account: user });
-    if (!user.phone) return res.status(400).json({ message: "Please update your phone number in profile first" });
-    const acc = await createMonnifyAccount(user);
+
+    if (user.account_number) {
+      return res.json({ message: "Account already exists", account: user });
+    }
+    if (!user.phone) {
+      return res.status(400).json({ message: "Please update your phone number in profile first" });
+    }
+
+    const paymentpointUsers = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
+    let acc;
+
+    if (paymentpointUsers.includes(user.username.toLowerCase())) {
+      // Use PaymentPoint
+      acc = await createPaymentPointAccount(user);
+    } else {
+      // Fallback to Monnify for other users
+      acc = await createMonnifyAccount(user);
+    }
+
     res.json({ message: "Account created", account: acc });
+
   } catch (e) {
     console.log("GENERATE ACCOUNT ERROR:", e.message);
     res.status(400).json({ message: e.message || "Failed to create account" });
