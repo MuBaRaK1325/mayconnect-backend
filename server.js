@@ -30,12 +30,9 @@ const PORT = process.env.PORT || 3000;
 /* ================= DATABASE - SINGLE INSTANCE ================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL + '?sslmode=require',
-  ssl: {
-    rejectUnauthorized: false // Required for Render + Neon
-  }
+  ssl: { rejectUnauthorized: false }
 });
 
-// Test connection on startup
 pool.connect((err, client, release) => {
   if (err) {
     console.error('Error connecting to Postgres:', err.stack);
@@ -81,17 +78,18 @@ const RP_NAME = 'Mayconnect';
 const ORIGIN = process.env.RP_ORIGIN || 'https://mayconnect-backend-1.onrender.com';
 
 // PAYMENTPOINT CONFIG
-const PAYMENTPOINT_BASE = "https://api.paymentpoint.co";
-const PAYMENTPOINT_API_KEY = process.env.PAYMENTPOINT_API_KEY;
-const PAYMENTPOINT_SECRET_KEY = process.env.PAYMENTPOINT_SECRET_KEY;
-const PAYMENTPOINT_BUSINESS_ID = process.env.PAYMENTPOINT_BUSINESS_ID;
+const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE_URL || "https://api.paymentpoint.co";
 
-console.log("[PAYMENTPOINT] Config loaded:", {
-  base: PAYMENTPOINT_BASE,
-  hasApiKey:!!PAYMENTPOINT_API_KEY,
-  hasSecretKey:!!PAYMENTPOINT_SECRET_KEY,
-  businessId: PAYMENTPOINT_BUSINESS_ID
-});
+function getPaymentPointCreds(company) {
+  const c = company.toLowerCase();
+  return {
+    apiKey: process.env[`PAYMENTPOINT_${c.toUpperCase()}_API_KEY`],
+    secretKey: process.env[`PAYMENTPOINT_${c.toUpperCase()}_SECRET_KEY`],
+    businessId: process.env[`PAYMENTPOINT_${c.toUpperCase()}_BUSINESS_ID`]
+  };
+}
+
+console.log("[PAYMENTPOINT] Config loaded for:", ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"]);
 
 const VTU_PROVIDERS = {
   maitama: {
@@ -145,8 +143,10 @@ const getUser = async (id) => {
 };
 
 async function createPaymentPointAccount(user) {
-  if (!PAYMENTPOINT_API_KEY ||!PAYMENTPOINT_SECRET_KEY ||!PAYMENTPOINT_BUSINESS_ID) {
-    throw new Error("PaymentPoint not configured. Set PAYMENTPOINT_API_KEY, PAYMENTPOINT_SECRET_KEY, PAYMENTPOINT_BUSINESS_ID env vars");
+  const creds = getPaymentPointCreds(user.company);
+
+  if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
+    throw new Error(`PaymentPoint not configured for company: ${user.company}`);
   }
   if (!user.phone) {
     throw new Error("Phone number required to create virtual account. Please update your profile.");
@@ -156,17 +156,17 @@ async function createPaymentPointAccount(user) {
     email: user.email,
     name: user.fullname || user.username,
     phoneNumber: user.phone,
-    bankCode: ["20946", "20897"], // Palmpay, Opay
-    businessId: PAYMENTPOINT_BUSINESS_ID
+    bankCode: ["20946", "20897"],
+    businessId: creds.businessId
   };
 
   const headers = {
-    'api-key': PAYMENTPOINT_API_KEY,
-    'api-secret': PAYMENTPOINT_SECRET_KEY,
+    'api-key': creds.apiKey,
+    'api-secret': creds.secretKey,
     'Content-Type': 'application/json'
   };
 
-  console.log(`[PAYMENTPOINT] Creating account for ${user.username}`);
+  console.log(`[PAYMENTPOINT] Creating account for ${user.username} on ${user.company}`);
 
   const { data } = await axios.post(
     `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
@@ -381,15 +381,18 @@ app.post("/api/paymentpoint/webhook",
     try {
       const rawBody = req.body;
       const signature = req.headers["paymentpoint-signature"];
+      const company = req.headers["x-paymentpoint-company"] || "mayconnect";
 
-      if (!rawBody ||!signature ||!PAYMENTPOINT_SECRET_KEY) {
+      const creds = getPaymentPointCreds(company);
+
+      if (!rawBody ||!signature ||!creds.secretKey) {
         return res.sendStatus(400);
       }
 
       const calculatedSignature = crypto
-      .createHmac("sha256", PAYMENTPOINT_SECRET_KEY)
-      .update(rawBody)
-      .digest("hex");
+     .createHmac("sha256", creds.secretKey)
+     .update(rawBody)
+     .digest("hex");
 
       if (!crypto.timingSafeEqual(Buffer.from(calculatedSignature), Buffer.from(signature))) {
         console.log("Invalid PaymentPoint signature");
@@ -404,7 +407,7 @@ app.post("/api/paymentpoint/webhook",
 
       const amount = Number(event.amount_paid);
       const reference = event.transaction_id;
-      const customerId = event.customer.customer_id;
+      const customerId = event.customer_id;
 
       const client = await pool.connect();
       try {
