@@ -145,7 +145,7 @@ const getUser = async (id) => {
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
-  if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
+  if (!creds.apiKey || !creds.secretKey || !creds.businessId) {
     throw new Error(`PaymentPoint not configured for company: ${user.company}`);
   }
   if (!user.phone) {
@@ -161,7 +161,7 @@ async function createPaymentPointAccount(user) {
   };
 
   const headers = {
-    'api-key': creds.apiKey,
+    'Authorization': `Bearer ${creds.apiKey}`,
     'api-secret': creds.secretKey,
     'Content-Type': 'application/json'
   };
@@ -174,9 +174,7 @@ async function createPaymentPointAccount(user) {
     { headers, timeout: 30000 }
   );
 
-  if (data.status!== "success") {
-    throw new Error(data.message || "PaymentPoint account creation failed");
-  }
+  // rest stays the same
 
   const bankAcc = data.bankAccounts[0];
 
