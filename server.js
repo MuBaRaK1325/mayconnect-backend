@@ -417,37 +417,60 @@ async function callSubPadiData(phone, network_id, api_plan_id) {
 app.post("/api/paymentpoint/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
-    console.log("PAYMENTPOINT WEBHOOK HIT");
+    console.log("[PAYMENTPOINT WEBHOOK] HIT");
     try {
-      const rawBody = req.body;
+      const rawBody = req.body; // Buffer
       const signature = req.headers["paymentpoint-signature"];
       const company = req.headers["x-paymentpoint-company"] || "mayconnect";
 
       const creds = getPaymentPointCreds(company);
 
-      if (!rawBody ||!signature ||!creds.secretKey) {
+      if (!rawBody ||!signature ||!creds.bearer) {
+        console.log("[PAYMENTPOINT WEBHOOK] Missing body, signature, or creds");
         return res.sendStatus(400);
       }
 
+      // Step 3: Calculate expected signature using HMAC-SHA256
       const calculatedSignature = crypto
-     .createHmac("sha256", creds.secretKey)
-     .update(rawBody)
-     .digest("hex");
+       .createHmac("sha256", creds.bearer)
+       .update(rawBody)
+       .digest("hex");
 
-      if (!crypto.timingSafeEqual(Buffer.from(calculatedSignature), Buffer.from(signature))) {
-        console.log("Invalid PaymentPoint signature");
+      // Step 4: Verify signature
+      if (calculatedSignature.length!== signature.length ||
+        !crypto.timingSafeEqual(Buffer.from(calculatedSignature), Buffer.from(signature))) {
+        console.log("[PAYMENTPOINT WEBHOOK] Invalid signature");
+        console.log("Calculated:", calculatedSignature);
+        console.log("Received:", signature);
         return res.sendStatus(401);
       }
 
+      // Step 5: Decode JSON payload
       const event = JSON.parse(rawBody.toString());
 
+      // Step 6: Validate JSON
+      if (!event) {
+        console.log("[PAYMENTPOINT WEBHOOK] Invalid JSON");
+        return res.sendStatus(400);
+      }
+
+      console.log("[PAYMENTPOINT WEBHOOK] Event:", JSON.stringify(event));
+
+      // Step 7: Check required fields and status
       if (event.notification_status!== "payment_successful" || event.transaction_status!== "success") {
+        console.log("[PAYMENTPOINT WEBHOOK] Ignored: not successful");
         return res.sendStatus(200);
       }
 
       const amount = Number(event.amount_paid);
+      const settlementAmount = Number(event.settlement_amount);
       const reference = event.transaction_id;
-      const customerId = event.customer_id;
+      const customerId = event.customer?.customer_id;
+
+      if (!amount ||!reference ||!customerId) {
+        console.log("[PAYMENTPOINT WEBHOOK] Missing required data");
+        return res.sendStatus(400);
+      }
 
       const client = await pool.connect();
       try {
@@ -458,6 +481,7 @@ app.post("/api/paymentpoint/webhook",
           [customerId]
         );
         if (!userRes.rows.length) {
+          console.log("[PAYMENTPOINT WEBHOOK] User not found for customer_id:", customerId);
           await client.query("ROLLBACK");
           return res.sendStatus(200);
         }
@@ -468,35 +492,46 @@ app.post("/api/paymentpoint/webhook",
           [reference]
         );
         if (existing.rows.length && existing.rows[0].status === "SUCCESS") {
+          console.log("[PAYMENTPOINT WEBHOOK] Duplicate webhook, ignoring");
           await client.query("ROLLBACK");
           return res.sendStatus(200);
         }
 
+        // Use settlement_amount for what you actually receive
+        const creditAmount = settlementAmount || amount;
+
         const update = await client.query(
           "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
-          [amount, userId]
+          [creditAmount, userId]
         );
         const newBalance = update.rows[0].wallet_balance;
 
         if (!existing.rows.length) {
           await client.query(
-            `INSERT INTO transactions(user_id,type,amount,reference,status) VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS')`,
-            [userId, amount, reference]
+            `INSERT INTO transactions(user_id,type,amount,reference,status,gateway)
+             VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS',$4)`,
+            [userId, creditAmount, reference, 'paymentpoint']
           );
         }
 
         await client.query("COMMIT");
-        sendWalletUpdate(userId, Number(newBalance));
+        console.log(`[PAYMENTPOINT WEBHOOK] Credited user ${userId} with ${creditAmount}. New balance: ${newBalance}`);
+
+        if (typeof sendWalletUpdate === 'function') {
+          sendWalletUpdate(userId, Number(newBalance));
+        }
 
       } catch (e) {
         await client.query("ROLLBACK");
-        console.log("PAYMENTPOINT WEBHOOK TX ERROR:", e.message);
+        console.log("[PAYMENTPOINT WEBHOOK] TX ERROR:", e.message);
       } finally {
         client.release();
       }
+
+      // Step 9: Respond 200 OK to acknowledge receipt
       res.sendStatus(200);
     } catch (e) {
-      console.log("PAYMENTPOINT WEBHOOK ERROR:", e.message);
+      console.log("[PAYMENTPOINT WEBHOOK] ERROR:", e.message);
       res.sendStatus(500);
     }
   }
