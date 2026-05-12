@@ -129,7 +129,6 @@ const fundInitLimiter = rateLimit({
 });
 
 /* ================= HELPERS ================= */
-/* ================= HELPERS ================= */
 const getCompanyAdmin = async (company) => {
   const admin = await pool.query(
     "SELECT id FROM users WHERE company=$1 AND is_admin=TRUE ORDER BY id ASC LIMIT 1",
@@ -250,6 +249,7 @@ async function createPaymentPointAccount(user) {
     reserved_account_id: bankAcc.Reserved_Account_Id
   };
 }
+
 
 /* ================= WEBSOCKET SETUP ================= */
 const clients = new Map();
