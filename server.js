@@ -1714,7 +1714,7 @@ app.delete("/admin/plans/:id", auth, adminOnly, async (req, res) => {
 
 /* ================= ADMIN: WITHDRAWALS ================= */
 
-// BANK CODES - for Monnify and Flutterwave
+// BANK CODES - PaymentPoint uses same NIP bank codes
 const BANK_CODES = {
     "Access Bank": "044", "Citibank": "023", "Ecobank": "050", "Fidelity Bank": "070",
     "First Bank": "011", "FCMB": "214", "GTBank": "058", "GT Bank": "058",
@@ -1739,6 +1739,15 @@ function getBankCode(bankName) {
     if (lowerName.includes("stanbic")) return "221";
 
     return BANK_CODES[cleanName] || null;
+}
+
+function getPaymentPointCreds(company) {
+    const c = String(company || "").toUpperCase();
+    return {
+        apiKey: process.env[`PAYMENTPOINT_${c}_API_KEY`],
+        secretKey: process.env[`PAYMENTPOINT_${c}_SECRET_KEY`],
+        businessId: process.env[`PAYMENTPOINT_${c}_BUSINESS_ID`]
+    };
 }
 
 // LIST WITHDRAWALS
@@ -1791,7 +1800,7 @@ app.post("/admin/withdraw-request", auth, adminOnly, async (req, res) => {
   }
 });
 
-// APPROVE WITHDRAWAL - MONNIFY for 3 brands, FLUTTERWAVE for Sadeeq
+// APPROVE WITHDRAWAL - PAYMENTPOINT for all brands
 app.post("/admin/withdraw/approve", auth, adminOnly, async (req, res) => {
   const { reference } = req.body;
   const client = await pool.connect();
@@ -1827,64 +1836,49 @@ app.post("/admin/withdraw/approve", auth, adminOnly, async (req, res) => {
       return res.status(400).json({ message: "Unsupported bank code" });
     }
 
-    let transferCode = null;
-    let transferStatus = null;
-
-    if (user.company === "sadeeq") {
-      // FLUTTERWAVE TRANSFER
-      const flwSecret = getFLWKey(user.company, "secret");
-      if (!flwSecret) throw new Error("Flutterwave key not configured");
-
-      const recipientRes = await axios.post("https://api.flutterwave.com/v3/bank-transfer/beneficiaries", {
-        account_number: wd.account_number,
-        account_bank: bankCode,
-        beneficiary_name: wd.account_name
-      }, { headers: { Authorization: `Bearer ${flwSecret}` } });
-
-      const recipientCode = recipientRes.data.id;
-
-      const transferRes = await axios.post("https://api.flutterwave.com/v3/transfers", {
-        account_bank: bankCode,
-        account_number: wd.account_number,
-        amount: Number(wd.amount),
-        currency: "NGN",
-        narration: `Sadeeq Admin Payout ${reference}`,
-        beneficiary_name: wd.account_name,
-        beneficiary_id: recipientCode
-      }, { headers: { Authorization: `Bearer ${flwSecret}` } });
-
-      transferCode = transferRes.data.id;
-      transferStatus = transferRes.data.status;
-
-    } else {
-      // MONNIFY TRANSFER for mayconnect, bnhabeeb, teeversh
-      const apiKey = getMonnifyKey(user.company, "api");
-      const secretKey = getMonnifyKey(user.company, "secret");
-      if (!apiKey ||!secretKey) throw new Error("Monnify key not configured");
-
-      const auth = Buffer.from(`${apiKey}:${secretKey}`).toString('base64');
-      const login = await axios.post('https://api.monnify.com/api/v1/auth/login', {}, {
-        headers: { Authorization: `Basic ${auth}` }
-      });
-      const token = login.data.responseBody.accessToken;
-
-      const transferRes = await axios.post('https://api.monnify.com/api/v2/disbursements/single', {
-        amount: Number(wd.amount),
-        reference: reference,
-        narration: `Admin Payout ${reference}`,
-        destinationBankCode: bankCode,
-        destinationAccountNumber: wd.account_number,
-        currency: "NGN"
-      }, { headers: { Authorization: `Bearer ${token}` } });
-
-      transferCode = transferRes.data.responseBody.transactionReference;
-      transferStatus = transferRes.data.requestSuccessful;
-    }
-
-    if (!transferCode || transferStatus === false) {
+    const creds = getPaymentPointCreds(user.company);
+    if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Transfer failed" });
+      return res.status(400).json({ message: "PaymentPoint keys not configured for this company" });
     }
+
+    // Call PaymentPoint Transfer API
+    const payload = {
+      account_number: wd.account_number,
+      bank_code: bankCode,
+      amount: Number(wd.amount),
+      reference: wd.reference,
+      narration: `Admin Payout ${wd.reference}`,
+      account_name: wd.account_name
+    };
+
+    const signature = crypto
+     .createHmac("sha512", creds.secretKey)
+     .update(JSON.stringify(payload))
+     .digest("hex");
+
+    const transferRes = await axios.post(
+      "https://api.paymentpoint.ng/transfer",
+      payload,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": creds.apiKey,
+          "x-business-id": creds.businessId,
+          "x-signature": signature
+        },
+        timeout: 30000
+      }
+    );
+
+    const data = transferRes.data;
+
+    if (!data.status || data.status!== "success") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: data.message || "Transfer failed" });
+    }
+
+    const transferCode = data.data?.transaction_id || wd.reference;
 
     await client.query(
       "UPDATE withdrawals SET status='PAID', transfer_code=$1, paid_at=NOW() WHERE reference=$2",
