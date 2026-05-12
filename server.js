@@ -129,24 +129,16 @@ const fundInitLimiter = rateLimit({
 });
 
 /* ================= HELPERS ================= */
-const getCompanyAdmin = async (company) => {
-  const admin = await pool.query(
-    "SELECT id FROM users WHERE company=$1 AND is_admin=TRUE ORDER BY id ASC LIMIT 1",
-    [company.toLowerCase()]
-  );
-  return admin.rows[0]?.id || null;
-};
-
-const getUser = async (id) => {
-  const res = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
-  return res.rows[0];
-};
-
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
-  if (!creds.apiKey ||!creds.businessId) {
-    throw new Error(`PaymentPoint not configured for company: ${user.company}`);
+  if (!creds.apiKey ||!creds.bearer ||!creds.businessId) {
+    throw new Error(
+      `PaymentPoint not configured for company: ${user.company}. ` +
+      `Check PAYMENTPOINT_${user.company.toUpperCase()}_API_KEY, ` +
+      `PAYMENTPOINT_${user.company.toUpperCase()}_SECRET_KEY, and ` +
+      `PAYMENTPOINT_${user.company.toUpperCase()}_BUSINESS_ID`
+    );
   }
   if (!user.phone) {
     throw new Error("Phone number required to create virtual account. Please update your profile.");
@@ -161,17 +153,17 @@ async function createPaymentPointAccount(user) {
   };
 
   const headers = {
-    'Authorization': `Bearer ${creds.apiKey}`,
-    'api-key': creds.apiKey,
+    'Authorization': `Bearer ${creds.bearer}`, // 128-char Bearer token
+    'api-key': creds.apiKey, // 40-char API key
     'Content-Type': 'application/json'
   };
 
-  // Debug logs - check these in Render logs
   console.log(`[PAYMENTPOINT] Creating account for ${user.username} on ${user.company}`);
   console.log(`[PAYMENTPOINT] URL: ${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`);
   console.log(`[PAYMENTPOINT] Business ID: ${creds.businessId}`);
   console.log(`[PAYMENTPOINT] API Key Length: ${creds.apiKey.length}`);
-  console.log(`[PAYMENTPOINT] Sending Authorization: Bearer ${creds.apiKey.substring(0, 10)}...`);
+  console.log(`[PAYMENTPOINT] Bearer Length: ${creds.bearer.length}`);
+  console.log(`[PAYMENTPOINT] Sending Authorization: Bearer ${creds.bearer.substring(0, 10)}...`);
   console.log(`[PAYMENTPOINT] Sending api-key: ${creds.apiKey.substring(0, 10)}...`);
 
   const { data } = await axios.post(
