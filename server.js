@@ -418,37 +418,46 @@ app.post("/api/paymentpoint/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     console.log("[PAYMENTPOINT WEBHOOK] HIT");
+
+    // Debug logs to see what’s coming in
+    console.log("[PAYMENTPOINT WEBHOOK] Headers:", Object.keys(req.headers));
+    console.log("[PAYMENTPOINT WEBHOOK] Body length:", req.body? req.body.length : 0);
+    console.log("[PAYMENTPOINT WEBHOOK] Company header:", req.headers["x-paymentpoint-company"]);
+    console.log("[PAYMENTPOINT WEBHOOK] Signature header:", req.headers["x-paymentpoint-signature"] || req.headers["paymentpoint-signature"]);
+
     try {
       const rawBody = req.body; // Buffer
-      const signature = req.headers["paymentpoint-signature"];
+      const signature = req.headers["x-paymentpoint-signature"] || req.headers["paymentpoint-signature"];
       const company = req.headers["x-paymentpoint-company"] || "mayconnect";
 
       const creds = getPaymentPointCreds(company);
 
       if (!rawBody ||!signature ||!creds.bearer) {
         console.log("[PAYMENTPOINT WEBHOOK] Missing body, signature, or creds");
+        console.log("rawBody exists:",!!rawBody);
+        console.log("signature exists:",!!signature);
+        console.log("creds.bearer length:", creds.bearer?.length || 0);
         return res.sendStatus(400);
       }
 
-      // Step 3: Calculate expected signature using HMAC-SHA256
+      // Calculate expected signature using HMAC-SHA256
       const calculatedSignature = crypto
-       .createHmac("sha256", creds.bearer)
-       .update(rawBody)
-       .digest("hex");
+      .createHmac("sha256", creds.bearer)
+      .update(rawBody)
+      .digest("hex");
 
-      // Step 4: Verify signature
+      // Verify signature
       if (calculatedSignature.length!== signature.length ||
-        !crypto.timingSafeEqual(Buffer.from(calculatedSignature), Buffer.from(signature))) {
+       !crypto.timingSafeEqual(Buffer.from(calculatedSignature), Buffer.from(signature))) {
         console.log("[PAYMENTPOINT WEBHOOK] Invalid signature");
         console.log("Calculated:", calculatedSignature);
         console.log("Received:", signature);
         return res.sendStatus(401);
       }
 
-      // Step 5: Decode JSON payload
+      // Decode JSON payload
       const event = JSON.parse(rawBody.toString());
 
-      // Step 6: Validate JSON
       if (!event) {
         console.log("[PAYMENTPOINT WEBHOOK] Invalid JSON");
         return res.sendStatus(400);
@@ -456,7 +465,7 @@ app.post("/api/paymentpoint/webhook",
 
       console.log("[PAYMENTPOINT WEBHOOK] Event:", JSON.stringify(event));
 
-      // Step 7: Check required fields and status
+      // Check required fields and status
       if (event.notification_status!== "payment_successful" || event.transaction_status!== "success") {
         console.log("[PAYMENTPOINT WEBHOOK] Ignored: not successful");
         return res.sendStatus(200);
@@ -528,7 +537,6 @@ app.post("/api/paymentpoint/webhook",
         client.release();
       }
 
-      // Step 9: Respond 200 OK to acknowledge receipt
       res.sendStatus(200);
     } catch (e) {
       console.log("[PAYMENTPOINT WEBHOOK] ERROR:", e.message);
