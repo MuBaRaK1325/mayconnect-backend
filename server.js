@@ -78,16 +78,7 @@ const RP_NAME = 'Mayconnect';
 const ORIGIN = process.env.RP_ORIGIN || 'https://mayconnect-backend-1.onrender.com';
 
 // PAYMENTPOINT CONFIG
-const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE_URL || "https://api.paymentpoint.co";
-
-function getPaymentPointCreds(company) {
-  const c = company.toLowerCase();
-  return {
-    apiKey: process.env[`PAYMENTPOINT_${c.toUpperCase()}_API_KEY`],
-    secretKey: process.env[`PAYMENTPOINT_${c.toUpperCase()}_SECRET_KEY`],
-    businessId: process.env[`PAYMENTPOINT_${c.toUpperCase()}_BUSINESS_ID`]
-  };
-}
+const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE || "https://api.paymentpoint.co";
 
 console.log("[PAYMENTPOINT] Config loaded for:", ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"]);
 
@@ -203,10 +194,10 @@ async function createPaymentPointAccount(user) {
   console.log(`[PAYMENTPOINT] Creating account for ${user.username} on ${user.company}`);
   console.log(`[PAYMENTPOINT] URL: ${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`);
   console.log(`[PAYMENTPOINT] Business ID: ${creds.businessId}`);
-  console.log(`[PAYMENTPOINT] API Key Length: ${creds.apiKey.length}`);
-  console.log(`[PAYMENTPOINT] Bearer Length: ${creds.bearer.length}`);
-  console.log(`[PAYMENTPOINT] Sending Authorization: Bearer ${creds.bearer.substring(0, 10)}...`);
-  console.log(`[PAYMENTPOINT] Sending api-key: ${creds.apiKey.substring(0, 10)}...`);
+  console.log(`[PAYMENTPOINT] API Key Length: ${creds.apiKey?.length || 0}`);
+  console.log(`[PAYMENTPOINT] Bearer Length: ${creds.bearer?.length || 0}`);
+  console.log(`[PAYMENTPOINT] Sending Authorization: Bearer ${creds.bearer?.substring(0, 10) || ''}...`);
+  console.log(`[PAYMENTPOINT] Sending api-key: ${creds.apiKey?.substring(0, 10) || ''}...`);
 
   const { data } = await axios.post(
     `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
@@ -249,6 +240,13 @@ async function createPaymentPointAccount(user) {
     reserved_account_id: bankAcc.Reserved_Account_Id
   };
 }
+
+module.exports = {
+  getCompanyAdmin,
+  getUser,
+  getPaymentPointCreds,
+  createPaymentPointAccount
+};
 
 
 /* ================= WEBSOCKET SETUP ================= */
