@@ -1126,10 +1126,10 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     }
 
     const txRes = await client.query(
-      `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status)
-       VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'SUCCESS') RETURNING *`,
-      [user.id, plan.id, price, cost, phone, plan.network, ref]
-    );
+  `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name)
+   VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'SUCCESS',$8) RETURNING *`,
+  [user.id, plan.id, price, cost, phone, plan.network, ref, plan.name]
+);
 
     const adminId = await getCompanyAdmin(user.company);
     const profit = Number(price) - Number(cost);
