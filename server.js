@@ -129,6 +129,49 @@ const fundInitLimiter = rateLimit({
 });
 
 /* ================= HELPERS ================= */
+/* ================= HELPERS ================= */
+const getCompanyAdmin = async (company) => {
+  const admin = await pool.query(
+    "SELECT id FROM users WHERE company=$1 AND is_admin=TRUE ORDER BY id ASC LIMIT 1",
+    [company.toLowerCase()]
+  );
+  return admin.rows[0]?.id || null;
+};
+
+const getUser = async (id) => {
+  const res = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
+  return res.rows[0];
+};
+
+const getPaymentPointCreds = (company) => {
+  const c = company.toLowerCase();
+
+  const credsMap = {
+    mayconnect: {
+      apiKey: process.env.PAYMENTPOINT_MAYCONNECT_API_KEY,
+      bearer: process.env.PAYMENTPOINT_MAYCONNECT_SECRET_KEY,
+      businessId: process.env.PAYMENTPOINT_MAYCONNECT_BUSINESS_ID
+    },
+    sadeeq: {
+      apiKey: process.env.PAYMENTPOINT_SADEEQ_API_KEY,
+      bearer: process.env.PAYMENTPOINT_SADEEQ_SECRET_KEY,
+      businessId: process.env.PAYMENTPOINT_SADEEQ_BUSINESS_ID
+    },
+    teeversh: {
+      apiKey: process.env.PAYMENTPOINT_TEEVERSH_API_KEY,
+      bearer: process.env.PAYMENTPOINT_TEEVERSH_SECRET_KEY,
+      businessId: process.env.PAYMENTPOINT_TEEVERSH_BUSINESS_ID
+    },
+    bnhabeeb: {
+      apiKey: process.env.PAYMENTPOINT_BNHABEEB_API_KEY,
+      bearer: process.env.PAYMENTPOINT_BNHABEEB_SECRET_KEY,
+      businessId: process.env.PAYMENTPOINT_BNHABEEB_BUSINESS_ID
+    }
+  };
+
+  return credsMap[c] || {};
+}
+
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
@@ -153,8 +196,8 @@ async function createPaymentPointAccount(user) {
   };
 
   const headers = {
-    'Authorization': `Bearer ${creds.bearer}`, // 128-char Bearer token
-    'api-key': creds.apiKey, // 40-char API key
+    'Authorization': `Bearer ${creds.bearer}`,
+    'api-key': creds.apiKey,
     'Content-Type': 'application/json'
   };
 
