@@ -421,69 +421,64 @@ app.post("/api/paymentpoint/webhook",
     try {
       const rawBody = req.body;
       const signature = req.headers["x-paymentpoint-signature"] || req.headers["paymentpoint-signature"];
-      
+
       if (!rawBody ||!signature) {
         console.log("[PAYMENTPOINT WEBHOOK] Missing body or signature");
         return res.sendStatus(400);
       }
 
-      // Parse first to get customer_id
       const event = JSON.parse(rawBody.toString());
-      const customerId = event.customer?.customer_id;
+      const customerEmail = event.customer?.email;
+      const amount = Number(event.settlement_amount || event.amount_paid);
+      const reference = event.transaction_id;
 
-      if (!customerId) {
-        console.log("[PAYMENTPOINT WEBHOOK] Missing customer_id");
+      if (!customerEmail ||!amount ||!reference) {
+        console.log("[PAYMENTPOINT WEBHOOK] Missing email, amount, or reference");
         return res.sendStatus(400);
       }
 
-      // Get company from DB using customer_id
-      const userRes = await pool.query(
-        "SELECT company FROM users WHERE customer_id=$1",
-        [customerId]
-      );
-      if (!userRes.rows.length) {
-        console.log("[PAYMENTPOINT WEBHOOK] User not found for customer_id:", customerId);
-        return res.sendStatus(200); // 200 so PaymentPoint stops retrying
-      }
-      
-      const company = userRes.rows[0].company;
-      const creds = getPaymentPointCreds(company);
-
-      if (!creds.bearer) {
-        console.log(`[PAYMENTPOINT WEBHOOK] No creds found for company: ${company}`);
-        return res.sendStatus(400);
-      }
-
-      // Verify signature with correct company secret
-      const calculatedSignature = crypto
-      .createHmac("sha256", creds.bearer)
-      .update(rawBody)
-      .digest("hex");
-
-      if (calculatedSignature.length!== signature.length ||
-       !crypto.timingSafeEqual(Buffer.from(calculatedSignature), Buffer.from(signature))) {
-        console.log("[PAYMENTPOINT WEBHOOK] Invalid signature");
-        return res.sendStatus(401);
-      }
-
-      console.log("[PAYMENTPOINT WEBHOOK] Event:", JSON.stringify(event));
-
+      // Only process successful payments early to avoid unnecessary DB calls
       if (event.notification_status!== "payment_successful" || event.transaction_status!== "success") {
         return res.sendStatus(200);
       }
 
-      const amount = Number(event.amount_paid);
-      const settlementAmount = Number(event.settlement_amount);
-      const reference = event.transaction_id;
+      // Find user by email
+      const userRes = await pool.query(
+        "SELECT id, company FROM users WHERE lower(trim(email)) = lower(trim($1))",
+        [customerEmail]
+      );
 
-      if (!amount ||!reference) {
+      if (!userRes.rows.length) {
+        console.log("[PAYMENTPOINT WEBHOOK] No user with email:", customerEmail);
+        return res.sendStatus(200);
+      }
+
+      const userId = userRes.rows[0].id;
+      const company = userRes.rows[0].company;
+      const creds = getPaymentPointCreds(company);
+
+      if (!creds?.bearer) {
+        console.log(`[PAYMENTPOINT WEBHOOK] No creds found for company: ${company}`);
         return res.sendStatus(400);
+      }
+
+      // Verify signature - do this before crediting
+      const calculatedSignature = crypto
+       .createHmac("sha256", creds.bearer)
+       .update(rawBody)
+       .digest("hex");
+
+      if (calculatedSignature.length!== signature.length ||
+         !crypto.timingSafeEqual(Buffer.from(calculatedSignature), Buffer.from(signature))) {
+        console.log("[PAYMENTPOINT WEBHOOK] Invalid signature");
+        return res.sendStatus(401);
       }
 
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
 
+        // Prevent double credit
         const existing = await client.query(
           "SELECT status FROM transactions WHERE reference=$1 FOR UPDATE",
           [reference]
@@ -493,36 +488,36 @@ app.post("/api/paymentpoint/webhook",
           return res.sendStatus(200);
         }
 
-        const creditAmount = settlementAmount || amount;
-
+        // Credit wallet
         const update = await client.query(
-          "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE customer_id=$2 RETURNING id, wallet_balance",
-          [creditAmount, customerId]
+          "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
+          [amount, userId]
         );
-        const userId = update.rows[0].id;
-        const newBalance = update.rows[0].wallet_balance;
 
+        // Log transaction
         if (!existing.rows.length) {
           await client.query(
-            `INSERT INTO transactions(user_id,type,amount,reference,status,gateway)
-             VALUES($1,'WALLET_FUND',$2,$3,'SUCCESS',$4)`,
-            [userId, creditAmount, reference, 'paymentpoint']
+            `INSERT INTO transactions(user_id, type, amount, reference, status, gateway)
+             VALUES($1, 'WALLET_FUND', $2, $3, 'SUCCESS', 'paymentpoint')`,
+            [userId, amount, reference]
           );
         }
 
         await client.query("COMMIT");
-        console.log(`[PAYMENTPOINT WEBHOOK] Credited user ${userId} on ${company} with ${creditAmount}`);
+        console.log(`[PAYMENTPOINT WEBHOOK] Credited user ${userId} with ${amount}`);
 
         if (typeof sendWalletUpdate === 'function') {
-          sendWalletUpdate(userId, Number(newBalance));
+          sendWalletUpdate(userId, Number(update.rows[0].wallet_balance));
         }
 
       } catch (e) {
         await client.query("ROLLBACK");
         console.log("[PAYMENTPOINT WEBHOOK] TX ERROR:", e.message);
+        return res.sendStatus(500);
       } finally {
         client.release();
       }
+
       res.sendStatus(200);
     } catch (e) {
       console.log("[PAYMENTPOINT WEBHOOK] ERROR:", e.message);
@@ -530,10 +525,6 @@ app.post("/api/paymentpoint/webhook",
     }
   }
 );
-
-/* ================= JSON PARSER - AFTER WEBHOOKS ONLY ================= */
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 /* ================= AUTH MIDDLEWARE ================= */
 function auth(req, res, next) {
   try {
