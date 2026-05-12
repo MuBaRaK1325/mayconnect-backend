@@ -960,25 +960,35 @@ app.post("/api/generate-account", auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
 
-    if (user.account_number) {
-      return res.json({ message: "Account already exists", account: user });
+    if (user.account_number && user.paymentmethod === "paymentpoint") {
+      return res.json({ 
+        message: "PaymentPoint account already exists", 
+        account: user,
+        user_id: user.id 
+      });
     }
+
     if (!user.phone) {
       return res.status(400).json({ message: "Please update your phone number in profile first" });
     }
 
-    const paymentpointUsers = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
+    const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
     let acc;
 
-    if (paymentpointUsers.includes(user.username.toLowerCase())) {
-      // Use PaymentPoint
+    if (paymentpointCompanies.includes(user.company.toLowerCase())) {
+      // Use PaymentPoint for these companies
       acc = await createPaymentPointAccount(user);
     } else {
       // Fallback to Monnify for other users
       acc = await createMonnifyAccount(user);
     }
 
-    res.json({ message: "Account created", account: acc });
+    res.json({ 
+      message: "Account created successfully", 
+      account: acc,
+      user_id: user.id,        // included for webhook debugging
+      company: user.company    // included so you know which company it went to
+    });
 
   } catch (e) {
     console.log("GENERATE ACCOUNT ERROR:", e.message);
@@ -1273,48 +1283,7 @@ app.post("/api/change-pin", auth, async (req, res) => {
   }
 });
 
-/* ================= ADMIN: PROFIT DASHBOARD ================= */
-app.get("/admin/profit", auth, adminOnly, async (req, res) => {
-  try {
-    const { from, to, company } = req.query;
-    const userCompany = req.user.company;
 
-    let query = `
-      SELECT DATE(t.created_at) as date,
-             SUM(p.amount) as total_profit,
-             COUNT(*) as total_sales
-      FROM transactions t
-      JOIN profits p ON p.transaction_id = t.id
-      JOIN users u ON t.user_id = u.id
-      WHERE t.status = 'SUCCESS'
-    `;
-    const params = [];
-
-    if (from) {
-      params.push(from);
-      query += ` AND t.created_at >= $${params.length}`;
-    }
-    if (to) {
-      params.push(to);
-      query += ` AND t.created_at <= $${params.length}`;
-    }
-    params.push(company || userCompany);
-    query += ` AND u.company = $${params.length}`;
-    query += ` GROUP BY DATE(t.created_at) ORDER BY date DESC`;
-
-    const result = await pool.query(query, params);
-    const adminWallet = await pool.query("SELECT admin_wallet FROM users WHERE id=$1", [req.user.id]);
-
-    res.json({
-      daily: result.rows,
-      admin_wallet: adminWallet.rows[0].admin_wallet,
-      total: result.rows.reduce((sum, r) => sum + Number(r.total_profit), 0)
-    });
-  } catch (err) {
-    console.error("Admin profit error:", err);
-    res.status(500).json({ message: "Failed to fetch profit data" });
-  }
-});
 /* ================= ADMIN: WALLET TRANSACTIONS MANAGER ================= */
 
 // GET admin wallet transactions log
@@ -1712,190 +1681,7 @@ app.delete("/admin/plans/:id", auth, adminOnly, async (req, res) => {
   }
 });
 
-/* ================= ADMIN: WITHDRAWALS ================= */
 
-// BANK CODES - PaymentPoint uses same NIP bank codes
-const BANK_CODES = {
-    "Access Bank": "044", "Citibank": "023", "Ecobank": "050", "Fidelity Bank": "070",
-    "First Bank": "011", "FCMB": "214", "GTBank": "058", "GT Bank": "058",
-    "Heritage Bank": "030", "Keystone Bank": "082", "Polaris Bank": "076",
-    "Stanbic IBTC": "221", "Standard Chartered": "068", "Sterling Bank": "232",
-    "Union Bank": "032", "UBA": "033", "Unity Bank": "215", "Wema Bank": "035",
-    "Zenith Bank": "057", "Kuda": "50211", "Opay": "999992", "Palmpay": "999991",
-    "Moniepoint": "50515", "VFD Microfinance": "566", "Carbon": "565",
-    "Rubies MFB": "125", "Sparkle": "51310"
-};
-
-function getBankCode(bankName) {
-    if (!bankName) return null;
-    const cleanName = bankName.trim();
-    const lowerName = cleanName.toLowerCase();
-
-    if (lowerName.includes("gtb") || lowerName.includes("gtbank")) return "058";
-    if (lowerName.includes("firstbank")) return "011";
-    if (lowerName.includes("zenith")) return "057";
-    if (lowerName.includes("access")) return "044";
-    if (lowerName.includes("uba")) return "033";
-    if (lowerName.includes("stanbic")) return "221";
-
-    return BANK_CODES[cleanName] || null;
-}
-
-
-
-// LIST WITHDRAWALS
-app.get("/admin/withdrawals", auth, adminOnly, async (req, res) => {
-  const wds = await pool.query(
-    "SELECT reference, amount, bank_name, account_number, account_name, status, transfer_code, created_at FROM withdrawals WHERE admin_id=$1 ORDER BY created_at DESC",
-    [req.user.id]
-  );
-  res.json(wds.rows);
-});
-
-// REQUEST WITHDRAWAL
-app.post("/admin/withdraw-request", auth, adminOnly, async (req, res) => {
-  const { amount, bank_name, account_number, account_name } = req.body;
-  if (!amount ||!bank_name ||!account_number ||!account_name) {
-    return res.status(400).json({ message: "All fields required" });
-  }
-
-  if (Number(amount) < 100) {
-    return res.status(400).json({ message: "Minimum withdrawal is ₦100" });
-  }
-
-  const user = await getUser(req.user.id);
-  if (Number(user.admin_wallet) < Number(amount)) {
-    return res.status(400).json({ message: "Insufficient admin wallet balance" });
-  }
-
-  const bankCode = getBankCode(bank_name);
-  if (!bankCode) {
-    return res.status(400).json({ message: `Unsupported bank: ${bank_name}` });
-  }
-
-  const reference = "WD-" + uuidv4();
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query(
-      `INSERT INTO withdrawals(admin_id,amount,bank_name,account_number,account_name,reference,status,company)
-       VALUES($1,$2,$3,$4,$5,$6,'PENDING',$7)`,
-      [req.user.id, amount, bank_name, account_number, account_name, reference, user.company]
-    );
-    await client.query("COMMIT");
-    res.json({ message: "Withdrawal request created", reference });
-  } catch (e) {
-    await client.query("ROLLBACK");
-    console.log("WITHDRAW ERROR:", e.message);
-    res.status(500).json({ message: "Withdrawal failed" });
-  } finally {
-    client.release();
-  }
-});
-
-// APPROVE WITHDRAWAL - PAYMENTPOINT for all brands
-app.post("/admin/withdraw/approve", auth, adminOnly, async (req, res) => {
-  const { reference } = req.body;
-  const client = await pool.connect();
-
-  try {
-    await client.query("BEGIN");
-
-    const wdRes = await client.query(
-      "SELECT * FROM withdrawals WHERE reference=$1 AND admin_id=$2 FOR UPDATE",
-      [reference, req.user.id]
-    );
-
-    if (!wdRes.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ message: "Withdrawal not found" });
-    }
-
-    const wd = wdRes.rows[0];
-    if (wd.status!== 'PENDING') {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: `Already ${wd.status}` });
-    }
-
-    const user = await getUser(req.user.id);
-    if (Number(user.admin_wallet) < Number(wd.amount)) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Insufficient admin wallet balance" });
-    }
-
-    const bankCode = getBankCode(wd.bank_name);
-    if (!bankCode) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Unsupported bank code" });
-    }
-
-    const creds = getPaymentPointCreds(user.company);
-    if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "PaymentPoint keys not configured for this company" });
-    }
-
-    // Call PaymentPoint Transfer API
-    const payload = {
-      account_number: wd.account_number,
-      bank_code: bankCode,
-      amount: Number(wd.amount),
-      reference: wd.reference,
-      narration: `Admin Payout ${wd.reference}`,
-      account_name: wd.account_name
-    };
-
-    const signature = crypto
-     .createHmac("sha512", creds.secretKey)
-     .update(JSON.stringify(payload))
-     .digest("hex");
-
-    const transferRes = await axios.post(
-      "https://api.paymentpoint.ng/transfer",
-      payload,
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": creds.apiKey,
-          "x-business-id": creds.businessId,
-          "x-signature": signature
-        },
-        timeout: 30000
-      }
-    );
-
-    const data = transferRes.data;
-
-    if (!data.status || data.status!== "success") {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: data.message || "Transfer failed" });
-    }
-
-    const transferCode = data.data?.transaction_id || wd.reference;
-
-    await client.query(
-      "UPDATE withdrawals SET status='PAID', transfer_code=$1, paid_at=NOW() WHERE reference=$2",
-      [transferCode, reference]
-    );
-    await client.query(
-      "UPDATE users SET admin_wallet = admin_wallet - $1 WHERE id=$2",
-      [wd.amount, req.user.id]
-    );
-
-    await client.query("COMMIT");
-    res.json({
-      message: `₦${wd.amount} sent to ${wd.bank_name} ✅`,
-      transfer_code: transferCode
-    });
-
-  } catch (e) {
-    await client.query("ROLLBACK");
-    console.log("APPROVE WITHDRAW ERROR:", e.response?.data || e.message);
-    res.status(500).json({ message: "Server error during transfer: " + (e.response?.data?.message || e.message) });
-  } finally {
-    client.release();
-  }
-});
 
 
 
