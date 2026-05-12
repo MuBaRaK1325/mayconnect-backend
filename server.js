@@ -1741,14 +1741,7 @@ function getBankCode(bankName) {
     return BANK_CODES[cleanName] || null;
 }
 
-function getPaymentPointCreds(company) {
-    const c = String(company || "").toUpperCase();
-    return {
-        apiKey: process.env[`PAYMENTPOINT_${c}_API_KEY`],
-        secretKey: process.env[`PAYMENTPOINT_${c}_SECRET_KEY`],
-        businessId: process.env[`PAYMENTPOINT_${c}_BUSINESS_ID`]
-    };
-}
+
 
 // LIST WITHDRAWALS
 app.get("/admin/withdrawals", auth, adminOnly, async (req, res) => {
