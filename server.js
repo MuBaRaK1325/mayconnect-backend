@@ -1557,6 +1557,18 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
     return res.status(400).json({ message: "Missing required fields: plan_id, network, name, price, cost, provider, network_id, api_plan_id" });
   }
 
+  // Parse validity to extract number from strings like "30 Days"
+  const parseValidity = (val) => {
+    if (val === '' || val === null) return null;
+    const match = String(val).match(/(\d+)/);
+    return match? Number(match[1]) : NaN;
+  };
+
+  const parsedValidity = parseValidity(validity);
+  if (validity!== '' && validity!== null && isNaN(parsedValidity)) {
+    return res.status(400).json({ message: "validity must contain a valid number" });
+  }
+
   try {
     const result = await pool.query(
       `INSERT INTO plans(plan_id, company, network, name, price, regular_price, top_price, cost, validity, restricted, is_active, provider, network_id, api_plan_id)
@@ -1567,7 +1579,7 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
         regular_price === '' || regular_price === null? null : Number(regular_price),
         top_price === '' || top_price === null? null : Number(top_price),
         Number(cost),
-        validity === '' || validity === null? null : Number(validity),
+        parsedValidity,
         restricted || false,
         provider, Number(network_id), api_plan_id
       ]
@@ -1589,8 +1601,8 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
     const value = req.body[key];
     if (value === undefined) continue;
 
-    // Handle numeric fields - convert empty string to null, string to number
-    if (['price', 'regular_price', 'top_price', 'cost', 'validity', 'network_id'].includes(key)) {
+    // Handle numeric fields
+    if (['price', 'regular_price', 'top_price', 'cost', 'network_id'].includes(key)) {
       if (value === '' || value === null) {
         updates[key] = null;
       } else {
@@ -1600,7 +1612,20 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
         }
         updates[key] = numValue;
       }
-    } else {
+    }
+    // Handle validity separately to parse "30 Days" -> 30
+    else if (key === 'validity') {
+      if (value === '' || value === null) {
+        updates[key] = null;
+      } else {
+        const match = String(value).match(/(\d+)/);
+        if (!match) {
+          return res.status(400).json({ message: `validity must contain a valid number` });
+        }
+        updates[key] = Number(match[1]);
+      }
+    }
+    else {
       updates[key] = value;
     }
   }
