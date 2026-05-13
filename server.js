@@ -3,7 +3,7 @@ const path = require('path');
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { Pool } = require("pg"); // ONLY DECLARE THIS ONCE - AT THE TOP
+const { Pool } = require("pg");
 const http = require("http");
 const WebSocket = require("ws");
 const { v4: uuidv4 } = require("uuid");
@@ -135,7 +135,6 @@ const getUser = async (id) => {
 
 const getPaymentPointCreds = (company) => {
   const c = company.toLowerCase();
-
   const credsMap = {
     mayconnect: {
       apiKey: process.env.PAYMENTPOINT_MAYCONNECT_API_KEY,
@@ -158,13 +157,11 @@ const getPaymentPointCreds = (company) => {
       businessId: process.env.PAYMENTPOINT_BNHABEEB_BUSINESS_ID
     }
   };
-
   return credsMap[c] || {};
 }
 
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
-
   if (!creds.apiKey ||!creds.bearer ||!creds.businessId) {
     throw new Error(
       `PaymentPoint not configured for company: ${user.company}. ` +
@@ -191,14 +188,6 @@ async function createPaymentPointAccount(user) {
     'Content-Type': 'application/json'
   };
 
-  console.log(`[PAYMENTPOINT] Creating account for ${user.username} on ${user.company}`);
-  console.log(`[PAYMENTPOINT] URL: ${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`);
-  console.log(`[PAYMENTPOINT] Business ID: ${creds.businessId}`);
-  console.log(`[PAYMENTPOINT] API Key Length: ${creds.apiKey?.length || 0}`);
-  console.log(`[PAYMENTPOINT] Bearer Length: ${creds.bearer?.length || 0}`);
-  console.log(`[PAYMENTPOINT] Sending Authorization: Bearer ${creds.bearer?.substring(0, 10) || ''}...`);
-  console.log(`[PAYMENTPOINT] Sending api-key: ${creds.apiKey?.substring(0, 10) || ''}...`);
-
   const { data } = await axios.post(
     `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
     payload,
@@ -206,7 +195,6 @@ async function createPaymentPointAccount(user) {
   );
 
   if (data.status!== "success") {
-    console.log("[PAYMENTPOINT] Full Error Response:", JSON.stringify(data));
     throw new Error(data.message || "PaymentPoint account creation failed");
   }
 
@@ -231,8 +219,6 @@ async function createPaymentPointAccount(user) {
     ]
   );
 
-  console.log(`[PAYMENTPOINT] Account created for ${user.username}: ${bankAcc.accountNumber}`);
-
   return {
     account_number: bankAcc.accountNumber,
     account_name: bankAcc.accountName,
@@ -248,7 +234,6 @@ module.exports = {
   createPaymentPointAccount
 };
 
-
 /* ================= WEBSOCKET SETUP ================= */
 const clients = new Map();
 wss.on("connection", (ws, req) => {
@@ -257,7 +242,6 @@ wss.on("connection", (ws, req) => {
     const user = jwt.verify(token, process.env.JWT_SECRET);
     clients.set(user.id, ws);
     ws.on("close", () => clients.delete(user.id));
-    console.log(`WS Connected: user ${user.id}`);
   } catch {
     ws.close();
   }
@@ -278,6 +262,104 @@ function broadcastTopUserUpdate(company) {
   }
 }
 
+/* ================= PAYMENTPOINT WEBHOOK - MUST BE BEFORE express.json() ================= */
+app.post("/api/paymentpoint/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    try {
+      const rawBody = req.body;
+      const signature = req.headers["x-paymentpoint-signature"] || req.headers["paymentpoint-signature"];
+
+      if (!rawBody ||!signature) {
+        return res.sendStatus(400);
+      }
+
+      const event = JSON.parse(rawBody.toString());
+      const customerEmail = event.customer?.email;
+      const amount = Number(event.settlement_amount || event.amount_paid);
+      const reference = event.transaction_id;
+
+      if (!customerEmail ||!amount ||!reference) {
+        return res.sendStatus(400);
+      }
+
+      if (event.notification_status!== "payment_successful" || event.transaction_status!== "success") {
+        return res.sendStatus(200);
+      }
+
+      const userRes = await pool.query(
+        "SELECT id, company FROM users WHERE lower(trim(email)) = lower(trim($1))",
+        [customerEmail]
+      );
+
+      if (!userRes.rows.length) {
+        return res.sendStatus(200);
+      }
+
+      const userId = userRes.rows[0].id;
+      const company = userRes.rows[0].company;
+      const creds = getPaymentPointCreds(company);
+
+      if (!creds?.bearer) {
+        return res.sendStatus(400);
+      }
+
+      const calculatedSignature = crypto
+      .createHmac("sha256", creds.bearer)
+      .update(rawBody)
+      .digest("hex");
+
+      if (calculatedSignature.length!== signature.length ||
+        !crypto.timingSafeEqual(Buffer.from(calculatedSignature), Buffer.from(signature))) {
+        return res.sendStatus(401);
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        const existing = await client.query(
+          "SELECT status FROM transactions WHERE reference=$1 FOR UPDATE",
+          [reference]
+        );
+        if (existing.rows.length && existing.rows[0].status === "SUCCESS") {
+          await client.query("ROLLBACK");
+          return res.sendStatus(200);
+        }
+
+        const update = await client.query(
+          "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
+          [amount, userId]
+        );
+
+        if (!existing.rows.length) {
+          await client.query(
+            `INSERT INTO transactions(user_id, type, amount, reference, status, gateway)
+             VALUES($1, 'WALLET_FUND', $2, $3, 'SUCCESS', 'paymentpoint')`,
+            [userId, amount, reference]
+          );
+        }
+
+        await client.query("COMMIT");
+        sendWalletUpdate(userId, Number(update.rows[0].wallet_balance));
+      } catch (e) {
+        await client.query("ROLLBACK");
+        return res.sendStatus(500);
+      } finally {
+        client.release();
+      }
+
+      res.sendStatus(200);
+    } catch (e) {
+      res.sendStatus(500);
+    }
+  }
+);
+
+/* ================= BODY PARSERS - MUST BE AFTER WEBHOOK ================= */
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 /* ================= PUSH NOTIFICATION ================= */
 app.post('/api/save-push-sub', async (req, res) => {
   try {
@@ -295,7 +377,6 @@ app.post('/api/save-push-sub', async (req, res) => {
     );
     res.json({success: true});
   } catch (err) {
-    console.error('Save push sub error:', err);
     res.status(500).json({success: false});
   }
 });
@@ -314,7 +395,6 @@ async function sendPushNotification(company, user_id, payload) {
     );
     return true;
   } catch (err) {
-    console.error(`Push failed for ${company}:`, err.message);
     if (err.statusCode === 410 || err.statusCode === 404) {
       await pool.query(
         'DELETE FROM push_subscriptions WHERE company = $1 AND user_id = $2',
@@ -412,119 +492,6 @@ async function callSubPadiData(phone, network_id, api_plan_id) {
   if (res.data.Status!== "successful") throw new Error(res.data.message || "SubPadi failed");
   return res.data;
 }
-
-/* ================= PAYMENTPOINT WEBHOOK - MUST BE BEFORE express.json() ================= */
-app.post("/api/paymentpoint/webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    console.log("[PAYMENTPOINT WEBHOOK] HIT");
-    try {
-      const rawBody = req.body;
-      const signature = req.headers["x-paymentpoint-signature"] || req.headers["paymentpoint-signature"];
-
-      if (!rawBody ||!signature) {
-        console.log("[PAYMENTPOINT WEBHOOK] Missing body or signature");
-        return res.sendStatus(400);
-      }
-
-      const event = JSON.parse(rawBody.toString());
-      const customerEmail = event.customer?.email;
-      const amount = Number(event.settlement_amount || event.amount_paid);
-      const reference = event.transaction_id;
-
-      if (!customerEmail ||!amount ||!reference) {
-        console.log("[PAYMENTPOINT WEBHOOK] Missing email, amount, or reference");
-        return res.sendStatus(400);
-      }
-
-      // Only process successful payments early to avoid unnecessary DB calls
-      if (event.notification_status!== "payment_successful" || event.transaction_status!== "success") {
-        return res.sendStatus(200);
-      }
-
-      // Find user by email
-      const userRes = await pool.query(
-        "SELECT id, company FROM users WHERE lower(trim(email)) = lower(trim($1))",
-        [customerEmail]
-      );
-
-      if (!userRes.rows.length) {
-        console.log("[PAYMENTPOINT WEBHOOK] No user with email:", customerEmail);
-        return res.sendStatus(200);
-      }
-
-      const userId = userRes.rows[0].id;
-      const company = userRes.rows[0].company;
-      const creds = getPaymentPointCreds(company);
-
-      if (!creds?.bearer) {
-        console.log(`[PAYMENTPOINT WEBHOOK] No creds found for company: ${company}`);
-        return res.sendStatus(400);
-      }
-
-      // Verify signature - do this before crediting
-      const calculatedSignature = crypto
-       .createHmac("sha256", creds.bearer)
-       .update(rawBody)
-       .digest("hex");
-
-      if (calculatedSignature.length!== signature.length ||
-         !crypto.timingSafeEqual(Buffer.from(calculatedSignature), Buffer.from(signature))) {
-        console.log("[PAYMENTPOINT WEBHOOK] Invalid signature");
-        return res.sendStatus(401);
-      }
-
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-
-        // Prevent double credit
-        const existing = await client.query(
-          "SELECT status FROM transactions WHERE reference=$1 FOR UPDATE",
-          [reference]
-        );
-        if (existing.rows.length && existing.rows[0].status === "SUCCESS") {
-          await client.query("ROLLBACK");
-          return res.sendStatus(200);
-        }
-
-        // Credit wallet
-        const update = await client.query(
-          "UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2 RETURNING wallet_balance",
-          [amount, userId]
-        );
-
-        // Log transaction
-        if (!existing.rows.length) {
-          await client.query(
-            `INSERT INTO transactions(user_id, type, amount, reference, status, gateway)
-             VALUES($1, 'WALLET_FUND', $2, $3, 'SUCCESS', 'paymentpoint')`,
-            [userId, amount, reference]
-          );
-        }
-
-        await client.query("COMMIT");
-        console.log(`[PAYMENTPOINT WEBHOOK] Credited user ${userId} with ${amount}`);
-
-        if (typeof sendWalletUpdate === 'function') {
-          sendWalletUpdate(userId, Number(update.rows[0].wallet_balance));
-        }
-
-      } catch (e) {
-        await client.query("ROLLBACK");
-        console.log("[PAYMENTPOINT WEBHOOK] TX ERROR:", e.message);
-        return res.sendStatus(500);
-      } finally {
-        client.release();
-      }
-
-      res.sendStatus(200);
-    } catch (e) {
-      console.log("[PAYMENTPOINT WEBHOOK] ERROR:", e.message);
-      res.sendStatus(500);
-    }
-  }
-);
 /* ================= AUTH MIDDLEWARE ================= */
 function auth(req, res, next) {
   try {
