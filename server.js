@@ -30,11 +30,28 @@ app.use(express.static('public'));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+/* ================= RATE LIMITERS - MUST BE HERE ================= */
+const loginLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 10,
+  message: { message: "Too many login attempts, try again later" },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const buyDataLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: 20,
+  message: { message: "Too many requests, try again later" },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 const PORT = process.env.PORT || 3000;
 
-/* ================= DATABASE - SINGLE INSTANCE ================= */
+/* ================= DATABASE ================= */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL + '?sslmode=require',
   ssl: { rejectUnauthorized: false }
