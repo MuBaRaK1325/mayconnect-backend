@@ -1559,13 +1559,13 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
 
   // Parse validity to extract number from strings like "30 Days"
   const parseValidity = (val) => {
-    if (val === '' || val === null) return null;
+    if (val === '' || val === null || val === undefined) return null;
     const match = String(val).match(/(\d+)/);
     return match? Number(match[1]) : NaN;
   };
 
   const parsedValidity = parseValidity(validity);
-  if (validity!== '' && validity!== null && isNaN(parsedValidity)) {
+  if (validity!== '' && validity!== null && validity!== undefined && isNaN(parsedValidity)) {
     return res.status(400).json({ message: "validity must contain a valid number" });
   }
 
@@ -1576,8 +1576,8 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
       [
         plan_id, req.user.company, network, name,
         Number(price),
-        regular_price === '' || regular_price === null? null : Number(regular_price),
-        top_price === '' || top_price === null? null : Number(top_price),
+        regular_price === '' || regular_price === null || regular_price === undefined? null : Number(regular_price),
+        top_price === '' || top_price === null || top_price === undefined? null : Number(top_price),
         Number(cost),
         parsedValidity,
         restricted || false,
@@ -1601,9 +1601,9 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
     const value = req.body[key];
     if (value === undefined) continue;
 
-    // Handle numeric fields
+    // Handle numeric fields - only convert empty/null/undefined to null
     if (['price', 'regular_price', 'top_price', 'cost', 'network_id'].includes(key)) {
-      if (value === '' || value === null) {
+      if (value === '' || value === null || value === undefined) {
         updates[key] = null;
       } else {
         const numValue = Number(value);
@@ -1615,7 +1615,7 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
     }
     // Handle validity separately to parse "30 Days" -> 30
     else if (key === 'validity') {
-      if (value === '' || value === null) {
+      if (value === '' || value === null || value === undefined) {
         updates[key] = null;
       } else {
         const match = String(value).match(/(\d+)/);
