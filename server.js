@@ -1551,7 +1551,7 @@ app.get("/admin/plans", auth, adminOnly, async (req, res) => {
 });
 
 app.post("/admin/plans", auth, adminOnly, async (req, res) => {
-  const { plan_id, network, name, price, regular_price, top_price, cost, validity, restricted, provider, network_id, api_plan_id } = req.body;
+  const { plan_id, network, name, price, regular_price, top_price, user_price, cost, validity, restricted, provider, network_id, api_plan_id } = req.body;
 
   if (!plan_id ||!network ||!name ||!price ||!cost ||!provider ||!network_id ||!api_plan_id) {
     return res.status(400).json({ message: "Missing required fields: plan_id, network, name, price, cost, provider, network_id, api_plan_id" });
@@ -1571,13 +1571,14 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `INSERT INTO plans(plan_id, company, network, name, price, regular_price, top_price, cost, validity, restricted, is_active, provider, network_id, api_plan_id)
-       VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, $11, $12, $13) RETURNING *`,
+      `INSERT INTO plans(plan_id, company, network, name, price, regular_price, top_price, user_price, cost, validity, restricted, is_active, provider, network_id, api_plan_id)
+       VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE, $12, $13, $14) RETURNING *`,
       [
         plan_id, req.user.company, network, name,
         Number(price),
         regular_price === '' || regular_price === null || regular_price === undefined? null : Number(regular_price),
         top_price === '' || top_price === null || top_price === undefined? null : Number(top_price),
+        user_price === '' || user_price === null || user_price === undefined? null : Number(user_price),
         Number(cost),
         parsedValidity,
         restricted || false,
@@ -1594,7 +1595,7 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
 
 app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
   const { id } = req.params;
-  const allowed = ['plan_id', 'network', 'name', 'price', 'regular_price', 'top_price', 'cost', 'validity', 'restricted', 'is_active', 'provider', 'network_id', 'api_plan_id'];
+  const allowed = ['plan_id', 'network', 'name', 'price', 'regular_price', 'top_price', 'user_price', 'cost', 'validity', 'restricted', 'is_active', 'provider', 'network_id', 'api_plan_id'];
 
   const updates = {};
   for (const key of allowed) {
@@ -1602,7 +1603,7 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
     if (value === undefined) continue;
 
     // Handle numeric fields - only convert empty/null/undefined to null
-    if (['price', 'regular_price', 'top_price', 'cost', 'network_id'].includes(key)) {
+    if (['price', 'regular_price', 'top_price', 'user_price', 'cost', 'network_id'].includes(key)) {
       if (value === '' || value === null || value === undefined) {
         updates[key] = null;
       } else {
