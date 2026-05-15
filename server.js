@@ -1,6 +1,7 @@
 const express = require("express");
 const path = require('path');
 const cors = require("cors");
+const helmet = require("helmet");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { Pool } = require("pg");
@@ -20,8 +21,14 @@ const {
 } = require('@simplewebauthn/server');
 
 const app = express();
-app.use(express.static('public'));
+
+/* ================= SECURITY & MIDDLEWARE ================= */
+app.use(helmet());
 app.set('trust proxy', 1);
+
+app.use(express.static('public'));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -748,16 +755,24 @@ app.get('/api/ping', (req, res) => {
 /* ================= AUTH ================= */
 function auth(req, res, next) {
   try {
-    const token = req.headers.authorization.split(" ")[1];
+    const authHeader = req.headers.authorization;
+    if (!authHeader ||!authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const token = authHeader.split(" ")[1];
     req.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
-  } catch {
+  } catch (e) {
+    console.error("AUTH ERROR:", e.message);
     res.status(401).json({ message: "Unauthorized" });
   }
 }
 
 function adminOnly(req, res, next) {
-  if (!req.user.is_admin) return res.status(403).json({ message: "Admin only" });
+  if (req.user.role!== 'admin') {
+    return res.status(403).json({ message: "Forbidden" });
+  }
   next();
 }
 
@@ -866,19 +881,58 @@ app.post("/api/signup", async (req, res) => {
 });
 
 /* ================= LOGIN ================= */
-app.post("/api/login", async (req, res) => {
-  const { username, password } = req.body;
-  const user = await pool.query("SELECT * FROM users WHERE username=$1", [username]);
-  if (!user.rows.length) return res.status(400).json({ message: "User not found" });
+app.post("/api/login", loginLimiter, async (req, res) => {
+  try {
+    const { username, password } = req.body;
 
-  const valid = await bcrypt.compare(password, user.rows[0].password);
-  if (!valid) return res.status(400).json({ message: "Wrong password" });
+    // Input validation
+    if (!username ||!password) {
+      return res.status(400).json({ message: "Username and password are required" });
+    }
+    if (typeof username!== 'string' || typeof password!== 'string') {
+      return res.status(400).json({ message: "Invalid input type" });
+    }
 
-  const token = jwt.sign(
-    { id: user.rows[0].id, username: user.rows[0].username, is_admin: user.rows[0].is_admin, company: user.rows[0].company },
-    process.env.JWT_SECRET
-  );
-  res.json({ token });
+    const userRes = await pool.query("SELECT * FROM users WHERE username=$1", [username.trim()]);
+    if (!userRes.rows.length) {
+      // Generic message to avoid username enumeration
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    const user = userRes.rows[0];
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    // Use short expiry for user tokens, include role for auth checks
+    const token = jwt.sign(
+      {
+        id: user.id,
+        username: user.username,
+        is_admin: user.is_admin,
+        role: user.is_admin? 'admin' : 'user',
+        company: user.company
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        company: user.company,
+        is_admin: user.is_admin,
+        wallet_balance: user.wallet_balance
+      }
+    });
+  } catch (e) {
+    console.error("LOGIN ERROR:", e);
+    res.status(500).json({ message: "Login failed. Try again later." });
+  }
 });
 
 /* ================= USER INFO - WITH TIER CHECK ================= */
@@ -1011,19 +1065,33 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     await client.query("BEGIN");
     const { plan_id, phone, pin } = req.body;
 
+    // Input validation
+    if (!plan_id ||!phone) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "plan_id and phone are required" });
+    }
+    if (!/^\d{10,15}$/.test(String(phone))) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Invalid phone number" });
+    }
+
     const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
     const user = userRes.rows[0];
+    if (!user) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "User not found" });
+    }
 
-    // BIOMETRIC BYPASS + NULL PIN CHECK - FIXED
+    // PIN / Biometric check
     if (pin!== 'biometric_verified') {
       if (!user.pin) {
         await client.query("ROLLBACK");
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: "Transaction PIN not set. Please set your PIN in Profile first.",
-          needPin: true 
+          needPin: true
         });
       }
-      
+
       const validPin = await bcrypt.compare(String(pin), String(user.pin));
       if (!validPin) {
         await client.query("ROLLBACK");
@@ -1038,7 +1106,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     }
     const plan = planRes.rows[0];
 
-    // COMPANY ISOLATION: User can only buy plans from their company or unrestricted plans
+    // Company isolation
     if (plan.restricted && plan.company!== user.company) {
       await client.query("ROLLBACK");
       return res.status(403).json({ message: "Plan restricted to company users" });
@@ -1077,17 +1145,17 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         throw new Error("Unknown provider");
       }
     } catch (vtuErr) {
-      console.log("VTU API ERROR:", vtuErr.message);
+      console.error("VTU API ERROR:", vtuErr);
       await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [price, user.id]);
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Purchase failed: " + vtuErr.message });
+      return res.status(400).json({ message: "Purchase failed. Try again later." });
     }
 
     const txRes = await client.query(
-  `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name)
-   VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'SUCCESS',$8) RETURNING *`,
-  [user.id, plan.id, price, cost, phone, plan.network, ref, plan.name]
-);
+      `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name)
+       VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'SUCCESS',$8) RETURNING *`,
+      [user.id, plan.id, price, cost, phone, plan.network, ref, plan.name]
+    );
 
     const adminId = await getCompanyAdmin(user.company);
     const profit = Number(price) - Number(cost);
@@ -1112,64 +1180,83 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     res.json({ success: true, reference: ref, balance: newBalance });
   } catch (e) {
     await client.query("ROLLBACK");
-    console.log("BUY DATA ERROR:", e.message);
-    res.status(500).json({ message: "Purchase failed" });
+    console.error("BUY DATA ERROR:", e);
+    res.status(500).json({ message: "Purchase failed. Try again later." });
   } finally {
     client.release();
   }
 });
 
 /* ================= BUY AIRTIME - CheapDataHub only for MAYCONNECT + BIOMETRIC ================= */
-app.post("/api/buy-airtime", auth, async (req, res) => {
+app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     const { phone, amount, network, pin } = req.body;
 
+    // Input validation
+    if (!phone ||!amount ||!network) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "phone, amount, and network are required" });
+    }
+    if (!/^\d{10,15}$/.test(String(phone))) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Invalid phone number" });
+    }
+    const amt = Number(amount);
+    if (isNaN(amt) || amt < 50 || amt > 50000) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Amount must be between ₦50 and ₦50,000" });
+    }
+
     const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
     const user = userRes.rows[0];
+    if (!user) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "User not found" });
+    }
 
     if (user.company!== "mayconnect") {
       await client.query("ROLLBACK");
       return res.status(403).json({ message: "Airtime only available for Mayconnect" });
     }
 
-    // BIOMETRIC BYPASS
+    // PIN / Biometric check
     if (pin!== 'biometric_verified') {
-      if (!await bcrypt.compare(pin, user.pin)) {
+      if (!user.pin ||!(await bcrypt.compare(String(pin), String(user.pin)))) {
         await client.query("ROLLBACK");
         return res.status(400).json({ message: "Invalid PIN" });
       }
     }
 
-    if (Number(user.wallet_balance) < Number(amount)) {
+    if (Number(user.wallet_balance) < amt) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Insufficient balance" });
     }
 
-    const newBalance = Number(user.wallet_balance) - Number(amount);
+    const newBalance = Number(user.wallet_balance) - amt;
     await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user.id]);
 
     const ref = "AIRTIME-" + uuidv4();
-    const cost = Number(amount) * 0.98;
+    const cost = amt * 0.98;
 
     try {
-      await callCheapDataHubAirtime(phone, network, amount);
+      await callCheapDataHubAirtime(phone, network, amt);
     } catch (vtuErr) {
-      console.log("VTU API ERROR:", vtuErr.message);
-      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [amount, user.id]);
+      console.error("VTU API ERROR:", vtuErr);
+      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [amt, user.id]);
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Purchase failed: " + vtuErr.message });
+      return res.status(400).json({ message: "Purchase failed. Try again later." });
     }
 
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status)
        VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS') RETURNING *`,
-      [user.id, amount, cost, phone, network, ref]
+      [user.id, amt, cost, phone, network, ref]
     );
 
     const adminId = await getCompanyAdmin(user.company);
-    const profit = Number(amount) - cost;
+    const profit = amt - cost;
     if (adminId && profit > 0) {
       await client.query("UPDATE users SET admin_wallet = admin_wallet + $1 WHERE id=$2", [profit, adminId]);
       await client.query(
@@ -1184,15 +1271,15 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
 
     await sendPushNotification(user.company, user.id, {
       title: `${user.company.toUpperCase()} - Airtime Purchase`,
-      body: `Your ₦${amount} airtime for ${phone} was successful`,
+      body: `Your ₦${amt} airtime for ${phone} was successful`,
       url: '/dashboard.html'
     });
 
     res.json({ success: true, reference: ref, balance: newBalance });
   } catch (e) {
     await client.query("ROLLBACK");
-    console.log("BUY AIRTIME ERROR:", e.message);
-    res.status(500).json({ message: "Purchase failed" });
+    console.error("BUY AIRTIME ERROR:", e);
+    res.status(500).json({ message: "Purchase failed. Try again later." });
   } finally {
     client.release();
   }
@@ -1201,15 +1288,33 @@ app.post("/api/buy-airtime", auth, async (req, res) => {
 
 /* ================= CHANGE PASSWORD/PIN ================= */
 app.post("/api/change-password", auth, async (req, res) => {
-  const { oldPass, newPass } = req.body;
-  const user = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
-  if (!await bcrypt.compare(oldPass, user.rows[0].password)) return res.status(400).json({ message: "Wrong old password" });
-  const hash = await bcrypt.hash(newPass, 10);
-  await pool.query("UPDATE users SET password=$1 WHERE id=$2", [hash, user.rows[0].id]);
-  res.json({ message: "Password updated" });
+  try {
+    const { oldPass, newPass } = req.body;
+    if (!oldPass ||!newPass) {
+      return res.status(400).json({ message: "oldPass and newPass are required" });
+    }
+    if (newPass.length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+
+    const userRes = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
+    const user = userRes.rows[0];
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    if (!(await bcrypt.compare(oldPass, user.password))) {
+      return res.status(400).json({ message: "Wrong old password" });
+    }
+
+    const hash = await bcrypt.hash(newPass, 10);
+    await pool.query("UPDATE users SET password=$1 WHERE id=$2", [hash, user.id]);
+    res.json({ message: "Password updated" });
+  } catch (e) {
+    console.error("CHANGE PASSWORD ERROR:", e);
+    res.status(500).json({ message: "Failed to update password" });
+  }
 });
 
-app.post("/api/change-pin", auth, async (req, res) => {
+app.post("/api/change-pin", auth, buyDataLimiter, async (req, res) => {
   try {
     const { oldPin, newPin } = req.body;
 
@@ -1219,6 +1324,7 @@ app.post("/api/change-pin", auth, async (req, res) => {
 
     const userRes = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
     const user = userRes.rows[0];
+    if (!user) return res.status(404).json({ message: "User not found" });
 
     // If user has a PIN, verify oldPin first
     if (user.pin) {
@@ -1230,13 +1336,12 @@ app.post("/api/change-pin", auth, async (req, res) => {
         return res.status(400).json({ message: "Wrong old PIN" });
       }
     }
-    // If user.pin is NULL, skip oldPin check - allow setting for first time
 
     const hash = await bcrypt.hash(String(newPin), 10);
     await pool.query("UPDATE users SET pin=$1 WHERE id=$2", [hash, user.id]);
     res.json({ message: "PIN updated successfully" });
   } catch (e) {
-    console.log("CHANGE PIN ERROR:", e.message);
+    console.error("CHANGE PIN ERROR:", e);
     res.status(500).json({ message: "Failed to update PIN" });
   }
 });
