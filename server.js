@@ -63,7 +63,30 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+/* ================= RATE LIMITERS ================= */
+const loginLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 10,
+  message: { message: "Too many login attempts, try again later" },
+  standardHeaders: true,
+  legacyHeaders: false
+});
 
+const buyDataLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { message: "Too many purchase attempts. Try again in 1 minute." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const fundInitLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 3,
+  message: { message: "Too many funding requests. Try again in 1 minute." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 /* ================= VAPID ================= */
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC;
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE;
@@ -109,22 +132,7 @@ const VTU_PROVIDERS = {
   }
 };
 
-/* ================= RATE LIMITERS ================= */
-const buyDataLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 5,
-  message: { message: "Too many purchase attempts. Try again in 1 minute." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 
-const fundInitLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 3,
-  message: { message: "Too many funding requests. Try again in 1 minute." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 
 /* ================= HELPERS ================= */
 const getCompanyAdmin = async (company) => {
