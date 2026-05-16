@@ -877,6 +877,8 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
 });
 
 /* ================= SIGNUP ================= */
+import { createPaymentPointAccount } from '../services/paymentpoint' // adjust path if needed
+
 app.post("/api/signup", async (req, res) => {
   try {
     const { username, email, password, pin, phone, company } = req.body;
@@ -896,7 +898,8 @@ app.post("/api/signup", async (req, res) => {
 
     try {
       if (userCompany!== "sadeeq") {
-        await createMonnifyAccount(user.rows[0]);
+        // Changed from createMonnifyAccount to createPaymentPointAccount
+        await createPaymentPointAccount(user.rows[0]);
       }
     } catch (e) {
       console.log("ACCOUNT CREATE ERROR ON SIGNUP - continuing anyway:", e.message);
