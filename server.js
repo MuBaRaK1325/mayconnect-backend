@@ -196,7 +196,7 @@ async function createPaymentPointAccount(user) {
   const payload = {
     email: user.email.trim(),
     name: user.username.trim(),
-    phoneNumber: phoneNumber, // 09119507708 format
+    phoneNumber: phoneNumber,
     bankCode: ['20946', '20897'], // Palmpay, Opay
     businessId: creds.businessId
   };
@@ -222,6 +222,22 @@ async function createPaymentPointAccount(user) {
       throw new Error(data.message || "PaymentPoint account creation failed");
     }
 
+    // Save customer_id even if bank accounts fail
+    if (data.customer && data.customer_id) {
+      await pool.query(
+        `UPDATE users SET customer_id=$1 WHERE id=$2`,
+        [data.customer_id, user.id]
+      );
+    }
+
+    // Check if bank accounts were actually created
+    if (!data.bankAccounts || data.bankAccounts.length === 0) {
+      const errMsg = data.errors && data.errors.length > 0
+       ? data.errors.join(', ')
+        : "No bank accounts returned";
+      throw new Error(`Customer created but account generation failed: ${errMsg}`);
+    }
+
     const bankAcc = data.bankAccounts[0];
 
     await pool.query(
@@ -230,15 +246,13 @@ async function createPaymentPointAccount(user) {
         account_name=$2,
         bank_name=$3,
         paymentmethod='paymentpoint',
-        reserved_account_id=$4,
-        customer_id=$5
-       WHERE id=$6`,
+        reserved_account_id=$4
+       WHERE id=$5`,
       [
         bankAcc.accountNumber,
         bankAcc.accountName,
         bankAcc.bankName,
         bankAcc.Reserved_Account_Id,
-        data.customer_id,
         user.id
       ]
     );
@@ -247,10 +261,11 @@ async function createPaymentPointAccount(user) {
       account_number: bankAcc.accountNumber,
       account_name: bankAcc.accountName,
       bank_name: bankAcc.bankName,
-      reserved_account_id: bankAcc.Reserved_Account_Id
+      reserved_account_id: bankAcc.Reserved_Account_Id,
+      customer_id: data.customer_id
     };
   } catch (err) {
-    console.log('[PaymentPoint] Error response:', err.response?.data);
+    console.log('[PaymentPoint] Error response:', err.response?.data || err.message);
     throw err;
   }
 }
