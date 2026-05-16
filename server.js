@@ -310,7 +310,7 @@ app.post("/api/paymentpoint/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     try {
-      const rawBody = req.body;
+      const rawBody = req.body; // this is a Buffer because of express.raw
       const signature = req.headers["x-paymentpoint-signature"] || req.headers["paymentpoint-signature"];
 
       if (!rawBody ||!signature) {
@@ -318,12 +318,11 @@ app.post("/api/paymentpoint/webhook",
         return res.sendStatus(400);
       }
 
-      const event = JSON.parse(rawBody.toString());
+      // Parse ONCE, using the raw buffer
+      const event = JSON.parse(rawBody.toString('utf8'));
       console.log('[PaymentPoint Webhook] Payload:', JSON.stringify(event));
 
       const data = event.data || event;
-
-      // Adjust these to match actual payload
       const amount = Number(data.amount);
       const reference = data.transactionRef || data.reference || data.transaction_id;
       const accountNumber = data.accountNumber;
@@ -335,11 +334,10 @@ app.post("/api/paymentpoint/webhook",
       }
 
       if (status!== "success" && status!== "successful" && event.notification_status!== "payment_successful") {
-        console.log('[Webhook] Ignored status:', status);
         return res.sendStatus(200);
       }
 
-      // Look up by account_number, not email. More reliable.
+      // Lookup by account_number
       const userRes = await pool.query(
         "SELECT id, company FROM users WHERE account_number = $1",
         [accountNumber]
@@ -355,21 +353,21 @@ app.post("/api/paymentpoint/webhook",
       const creds = getPaymentPointCreds(company);
 
       if (!creds?.secretKey) {
-        console.log('[Webhook] Missing creds for company:', company);
         return res.sendStatus(400);
       }
 
-      // Verify signature if PaymentPoint sends it
+      // Verify signature against RAW buffer
       const calculatedSignature = crypto
-       .createHmac("sha256", creds.secretKey)
-       .update(rawBody)
-       .digest("hex");
+      .createHmac("sha256", creds.secretKey)
+      .update(rawBody)
+      .digest("hex");
 
       if (calculatedSignature!== signature) {
         console.log('[Webhook] Signature mismatch');
         return res.sendStatus(401);
       }
 
+      //... rest of your DB transaction code here
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
@@ -400,7 +398,6 @@ app.post("/api/paymentpoint/webhook",
         await client.query("COMMIT");
         sendWalletUpdate(userId, Number(update.rows[0].wallet_balance));
 
-        console.log('[Webhook] Credited user', userId, 'amount', amount);
       } catch (e) {
         await client.query("ROLLBACK");
         console.error('[Webhook] DB Error:', e);
@@ -410,6 +407,7 @@ app.post("/api/paymentpoint/webhook",
       }
 
       res.sendStatus(200);
+
     } catch (e) {
       console.error('[Webhook] Fatal Error:', e);
       res.sendStatus(500);
