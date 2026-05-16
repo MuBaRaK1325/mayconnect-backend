@@ -169,24 +169,18 @@ async function createPaymentPointAccount(user) {
 
   console.log(`[PaymentPoint] Creating account for ${user.username}, company: ${user.company}`);
   console.log('[PaymentPoint] Raw user.phone from DB:', JSON.stringify(user.phone));
-  console.log('[PaymentPoint] Raw user.email from DB:', JSON.stringify(user.email));
 
   if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
-    throw new Error(
-      `PaymentPoint not configured for company: ${user.company}. ` +
-      `Check PAYMENTPOINT_${user.company.toUpperCase()}_API_KEY, ` +
-      `PAYMENTPOINT_${user.company.toUpperCase()}_SECRET_KEY, and ` +
-      `PAYMENTPOINT_${user.company.toUpperCase()}_BUSINESS_ID`
-    );
+    throw new Error(`PaymentPoint not configured for company: ${user.company}`);
   }
   if (!user.phone) {
-    throw new Error("Phone number is NULL/empty in DB. Update users.phone before calling PaymentPoint.");
+    throw new Error("Phone number is NULL/empty in DB.");
   }
   if (!user.email) {
-    throw new Error("Email is NULL/empty in DB. Update users.email before calling PaymentPoint.");
+    throw new Error("Email is NULL/empty in DB.");
   }
 
-  // Normalize phone to 234xxxxxxxxxx
+  // Normalize to 234xxxxxxxxxx
   let phone = String(user.phone).trim().replace(/\s+/g, '').replace(/-/g, '');
   if (phone.startsWith('0')) {
     phone = '234' + phone.slice(1);
@@ -198,17 +192,11 @@ async function createPaymentPointAccount(user) {
     phone = '234' + phone;
   }
 
-  if (phone.length < 11) {
-    throw new Error(`Phone number too short after normalization: ${phone}`);
-  }
-
-  console.log('[PaymentPoint] Final phone sent:', phone);
-
   const payload = {
     businessId: creds.businessId,
     name: user.username,
     email: user.email.trim(),
-    customerPhone: phone,
+    phone: phone, // v2 uses 'phone'
     bvn: "",
     narration: `DVA for ${user.username}`
   };
@@ -216,9 +204,9 @@ async function createPaymentPointAccount(user) {
   const timestamp = Date.now().toString();
   const stringToSign = timestamp + JSON.stringify(payload);
   const signature = crypto
-   .createHmac('sha512', creds.secretKey)
-   .update(stringToSign)
-   .digest('hex');
+  .createHmac('sha512', creds.secretKey)
+  .update(stringToSign)
+  .digest('hex');
 
   const headers = {
     'Authorization': `Bearer ${creds.secretKey}`,
@@ -232,7 +220,7 @@ async function createPaymentPointAccount(user) {
 
   try {
     const { data } = await axios.post(
-      `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
+      `${PAYMENTPOINT_BASE}/api/v2/createVirtualAccount`, // changed to v2
       payload,
       { headers, timeout: 30000 }
     );
@@ -241,10 +229,6 @@ async function createPaymentPointAccount(user) {
 
     if (!data || data.status!== "success") {
       throw new Error(data.message || "PaymentPoint account creation failed");
-    }
-
-    if (!data.bankAccounts || data.bankAccounts.length === 0) {
-      throw new Error('PaymentPoint did not return any bank accounts: ' + JSON.stringify(data));
     }
 
     const bankAcc = data.bankAccounts[0];
