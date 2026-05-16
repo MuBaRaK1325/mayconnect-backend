@@ -167,8 +167,7 @@ const getPaymentPointCreds = (company) => {
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
-  console.log(`[PaymentPoint] Creating account for ${user.username}, company: ${user.company}`);
-  console.log('[PaymentPoint] Raw user.phone from DB:', JSON.stringify(user.phone));
+  console.log('[PaymentPoint] Full user object from DB:', JSON.stringify(user));
 
   if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
     throw new Error(`PaymentPoint not configured for company: ${user.company}`);
@@ -181,15 +180,12 @@ async function createPaymentPointAccount(user) {
   }
 
   // Normalize to 10 digits: 09119507708 -> 9119507708
-  let phone = String(user.phone).trim().replace(/\s+/g, '').replace(/-/g, '');
+  let phone = String(user.phone).replace(/\D/g, '');
   if (phone.startsWith('0')) {
     phone = phone.slice(1);
   }
   if (phone.startsWith('234')) {
     phone = phone.slice(3);
-  }
-  if (phone.startsWith('+234')) {
-    phone = phone.slice(4);
   }
 
   if (phone.length!== 10) {
@@ -198,9 +194,9 @@ async function createPaymentPointAccount(user) {
 
   const payload = {
     businessId: creds.businessId,
-    name: user.username,
+    name: user.username.trim(),
     email: user.email.trim(),
-    phone: phone, // use 'phone' not 'customer_phone' for this account
+    phone: Number(phone), // number, not string
     bvn: "",
     narration: `DVA for ${user.username}`
   };
@@ -208,9 +204,9 @@ async function createPaymentPointAccount(user) {
   const timestamp = Date.now().toString();
   const stringToSign = timestamp + JSON.stringify(payload);
   const signature = crypto
-   .createHmac('sha512', creds.secretKey)
-   .update(stringToSign)
-   .digest('hex');
+ .createHmac('sha512', creds.secretKey)
+ .update(stringToSign)
+ .digest('hex');
 
   const headers = {
     'Authorization': `Bearer ${creds.secretKey}`,
@@ -220,8 +216,8 @@ async function createPaymentPointAccount(user) {
     'Content-Type': 'application/json'
   };
 
-  console.log('[PaymentPoint] String to sign:', stringToSign);
   console.log('[PaymentPoint] Sending payload:', JSON.stringify(payload));
+  console.log('[PaymentPoint] String to sign:', stringToSign);
 
   try {
     const { data } = await axios.post(
@@ -257,24 +253,12 @@ async function createPaymentPointAccount(user) {
       ]
     );
 
-    return {
-      account_number: bankAcc.accountNumber,
-      account_name: bankAcc.accountName,
-      bank_name: bankAcc.bankName,
-      reserved_account_id: bankAcc.Reserved_Account_Id
-    };
+    return bankAcc;
   } catch (err) {
     console.log('[PaymentPoint] Error response:', err.response?.data);
     throw err;
   }
 }
-
-module.exports = {
-  getCompanyAdmin,
-  getUser,
-  getPaymentPointCreds,
-  createPaymentPointAccount
-};
 
 /* ================= WEBSOCKET SETUP ================= */
 const clients = new Map();
