@@ -531,56 +531,56 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC ================= */
-const psl = require('psl'); // run: npm i psl
 const rpName = 'MAYCONNECT';
 
-// Base domain for all brands. All credentials will be tied to this
-const BASE_DOMAIN = 'teevershdataplug.com.ng';
+// Your Relying Party ID must be the domain without protocol or port
+// Use the main domain for all your subdomains. Since you have multiple brands,
+// use 'mayconnect.com.ng' as the base, or keep it per-project if you prefer isolation
+const rpID = 'mayconnect.com.ng'; // or use process.env.RP_ID
 
-// Whitelist of allowed frontend ORIGINS for CORS and origin validation
-const ALLOWED_ORIGINS = [
+// Whitelist of allowed frontend origins for WebAuthn
+const ALLOWED_FRONTENDS = [
   // New custom domains
-  'https://teevershdataplug.com.ng',
-  'https://www.teevershdataplug.com.ng',
   'https://mayconnect.com.ng',
   'https://www.mayconnect.com.ng',
+  'https://teevershdataplug.com.ng', 
+  'https://www.teevershdataplug.com.ng',
   'https://sadeeqdatahub.com.ng',
   'https://www.sadeeqdatahub.com.ng',
   'https://bnhabeebdatahub.com.ng',
   'https://www.bnhabeebdatahub.com.ng',
-
+  
   // Old Render domains for backward compatibility
-  'https://teeversh-frontend.onrender.com',
   'https://mayconnect-frontend.onrender.com',
-  'https://bnhabeeb-frontend.onrender.com',
+  'https://teeversh-frontend.onrender.com',
+  'https://bnhabeeb-frontend.onrender.com', 
   'https://sadeeq-frontend.onrender.com',
-
+  
   // Local dev
   'http://localhost:3000',
   'http://localhost:5173'
 ];
 
-// Helper: extract registrable domain from hostname
-function getRegistrableDomain(hostname) {
-  const parsed = psl.parse(hostname);
-  if (parsed.domain) return parsed.domain;
-  return hostname; // fallback for localhost
-}
-
-// Helper to get rpID - always return the base domain
+// Helper to get rpID from request origin with validation
 function getRpID(req) {
   if (process.env.NODE_ENV!== 'production') return 'localhost';
-  return BASE_DOMAIN;
+
+  const origin = req.headers.origin || req.headers.referer;
+  if (origin) {
+    const hostname = new URL(origin).hostname;
+    if (ALLOWED_FRONTENDS.includes(hostname)) return hostname;
+    throw new Error(`Unauthorized origin: ${hostname}`);
+  }
+
+  const host = req.headers.host;
+  if (host && ALLOWED_FRONTENDS.includes(host)) return host;
+  throw new Error('No origin or valid host header');
 }
 
-// Helper to validate origin and get it for verification
+// Helper to get origin for verification - must match browser's origin exactly
 function getExpectedOrigin(req) {
   const origin = req.headers.origin;
   if (!origin) throw new Error('No origin header');
-
-  if (!ALLOWED_ORIGINS.includes(origin)) {
-    throw new Error(`Unauthorized origin: ${origin}`);
-  }
   return origin;
 }
 
@@ -598,7 +598,7 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   } catch (e) {
     console.error('Check enabled error:', e.message);
     if (e.code === '42703') {
-      return res.json({ enabled: false });
+      return res.json({ enabled: false }); // column doesn't exist yet
     }
     res.status(500).json({ error: e.message });
   }
@@ -609,7 +609,6 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const user = await getUser(req.user.id);
     const userID = new TextEncoder().encode(user.id.toString());
     const rpId = getRpID(req);
-    const origin = getExpectedOrigin(req);
 
     const existingCreds = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
@@ -622,15 +621,15 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const options = await generateRegistrationOptions({
       rpName,
-      rpID: rpId,
+      rpID: rpId, // v10+ uses rpID not rpId
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
       attestationType: 'none',
       authenticatorSelection: {
-        authenticatorAttachment: 'platform',
+        authenticatorAttachment: 'platform', // FORCE PHONE SENSOR - no QR code
         userVerification: 'required',
-        residentKey: 'discouraged'
+        residentKey: 'discouraged' // KEY FIX: prevents cross-device passkey
       },
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 },
@@ -638,7 +637,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       ]
     });
 
-    options.rpID = rpId;
+    options.rpID = rpId; // v10+ expects rpID in response too
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
     res.json(options);
@@ -660,16 +659,17 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
       expectedRPID: rpId,
-      requireUserVerification: true
+      requireUserVerification: true // Set to true for fingerprint
     });
 
     if (verification.verified) {
       const { credential } = verification.registrationInfo;
-
+      
       if (!credential ||!credential.id ||!credential.publicKey) {
         return res.status(400).json({ verified: false, error: 'Incomplete credential data' });
       }
 
+      // v10+ returns Buffer, convert to base64url
       const credentialID = Buffer.from(credential.id).toString('base64url');
       const publicKey = Buffer.from(credential.publicKey).toString('base64url');
 
@@ -698,7 +698,6 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     if (!user.rows.length) return res.status(400).json({ error: 'User not found' });
 
     const rpId = getRpID(req);
-    const origin = getExpectedOrigin(req);
 
     const creds = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
@@ -707,12 +706,12 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     if (!creds.rows.length) return res.status(400).json({ error: 'Biometric not enabled for this user' });
 
     const options = await generateAuthenticationOptions({
-      rpID: rpId,
-      userVerification: 'required',
+      rpID: rpId, // v10+ uses rpID
+      userVerification: 'required', // Force fingerprint on login
       allowCredentials: creds.rows.map(c => ({
-        id: c.credential_id,
+        id: c.credential_id, // v10+ accepts base64url string directly
         type: 'public-key',
-        transports: ['internal']
+        transports: ['internal'] // Force local device
       }))
     });
 
@@ -877,8 +876,6 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
 });
 
 /* ================= SIGNUP ================= */
-import { createPaymentPointAccount } from '../services/paymentpoint' // adjust path if needed
-
 app.post("/api/signup", async (req, res) => {
   try {
     const { username, email, password, pin, phone, company } = req.body;
@@ -898,8 +895,7 @@ app.post("/api/signup", async (req, res) => {
 
     try {
       if (userCompany!== "sadeeq") {
-        // Changed from createMonnifyAccount to createPaymentPointAccount
-        await createPaymentPointAccount(user.rows[0]);
+        await createMonnifyAccount(user.rows[0]);
       }
     } catch (e) {
       console.log("ACCOUNT CREATE ERROR ON SIGNUP - continuing anyway:", e.message);
