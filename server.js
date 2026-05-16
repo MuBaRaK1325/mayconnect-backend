@@ -185,7 +185,7 @@ async function createPaymentPointAccount(user) {
 
   const payload = {
     businessId: creds.businessId,
-    accountName: user.username,
+    name: user.username, // PaymentPoint expects 'name', not 'accountName'
     customerEmail: user.email,
     customerPhone: user.phone,
     bvn: "",
@@ -195,9 +195,9 @@ async function createPaymentPointAccount(user) {
   const timestamp = Date.now().toString();
   const stringToSign = timestamp + JSON.stringify(payload);
   const signature = crypto
- .createHmac('sha512', creds.secretKey)
- .update(stringToSign)
- .digest('hex');
+   .createHmac('sha512', creds.secretKey)
+   .update(stringToSign)
+   .digest('hex');
 
   const headers = {
     'Authorization': `Bearer ${creds.secretKey}`,
