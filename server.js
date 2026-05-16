@@ -182,11 +182,14 @@ async function createPaymentPointAccount(user) {
   if (!user.phone) {
     throw new Error("Phone number required to create virtual account. Please update your profile.");
   }
+  if (!user.email) {
+    throw new Error("Email required to create virtual account. Please update your profile.");
+  }
 
   const payload = {
     businessId: creds.businessId,
-    name: user.username, // PaymentPoint expects 'name', not 'accountName'
-    customerEmail: user.email,
+    name: user.username,
+    email: user.email, // changed from customerEmail
     customerPhone: user.phone,
     bvn: "",
     narration: `DVA for ${user.username}`
@@ -195,9 +198,9 @@ async function createPaymentPointAccount(user) {
   const timestamp = Date.now().toString();
   const stringToSign = timestamp + JSON.stringify(payload);
   const signature = crypto
-   .createHmac('sha512', creds.secretKey)
-   .update(stringToSign)
-   .digest('hex');
+  .createHmac('sha512', creds.secretKey)
+  .update(stringToSign)
+  .digest('hex');
 
   const headers = {
     'Authorization': `Bearer ${creds.secretKey}`,
