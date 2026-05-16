@@ -49,9 +49,16 @@ pool.connect((err, client, release) => {
   }
 });
 
-/* ================= CORS ================= */
 app.use(cors({
   origin: [
+    'https://teevershdataplug.com.ng',
+    'https://www.teevershdataplug.com.ng',
+    'https://sadeeqdatahub.com.ng',
+    'https://www.sadeeqdatahub.com.ng',
+    'https://bnhabeebdatahub.com.ng',
+    'https://www.bnhabeebdatahub.com.ng',
+    'https://mayconnect.com.ng',
+    'https://www.mayconnect.com.ng',
     'https://teeversh-frontend.onrender.com',
     'https://mayconnect-frontend.onrender.com',
     'https://sadeeq-frontend.onrender.com',
@@ -526,13 +533,32 @@ function adminOnly(req, res, next) {
 /* ================= WEBAUTHN - BIOMETRIC ================= */
 const rpName = 'MAYCONNECT';
 
-// Whitelist of allowed frontend domains
+// Your Relying Party ID must be the domain without protocol or port
+// Use the main domain for all your subdomains. Since you have multiple brands,
+// use 'mayconnect.com.ng' as the base, or keep it per-project if you prefer isolation
+const rpID = 'mayconnect.com.ng'; // or use process.env.RP_ID
+
+// Whitelist of allowed frontend origins for WebAuthn
 const ALLOWED_FRONTENDS = [
-  'mayconnect-frontend.onrender.com',
-  'teeversh-frontend.onrender.com',
-  'bnhabeeb-frontend.onrender.com', 
-  'sadeeq-frontend.onrender.com',
-  'localhost'
+  // New custom domains
+  'https://mayconnect.com.ng',
+  'https://www.mayconnect.com.ng',
+  'https://teevershdataplug.com.ng', 
+  'https://www.teevershdataplug.com.ng',
+  'https://sadeeqdatahub.com.ng',
+  'https://www.sadeeqdatahub.com.ng',
+  'https://bnhabeebdatahub.com.ng',
+  'https://www.bnhabeebdatahub.com.ng',
+  
+  // Old Render domains for backward compatibility
+  'https://mayconnect-frontend.onrender.com',
+  'https://teeversh-frontend.onrender.com',
+  'https://bnhabeeb-frontend.onrender.com', 
+  'https://sadeeq-frontend.onrender.com',
+  
+  // Local dev
+  'http://localhost:3000',
+  'http://localhost:5173'
 ];
 
 // Helper to get rpID from request origin with validation
