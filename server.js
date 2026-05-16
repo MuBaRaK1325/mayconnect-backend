@@ -1187,12 +1187,28 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     }
 
     const price = user.is_top_user? (plan.top_price || plan.price) : plan.price;
-    if (Number(user.wallet_balance) < Number(price)) {
+
+    // Debug log + clearer balance check
+    const balanceNum = Number(user.wallet_balance);
+    const priceNum = Number(price);
+
+    console.log('[BUY DATA]', {
+      userId: user.id,
+      username: user.username,
+      balance: balanceNum,
+      price: priceNum,
+      planId: plan.id,
+      planName: plan.name
+    });
+
+    if (balanceNum < priceNum) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Insufficient balance" });
+      return res.status(400).json({
+        message: `Insufficient balance. You have ₦${balanceNum.toFixed(2)}, this plan costs ₦${priceNum.toFixed(2)}`
+      });
     }
 
-    const newBalance = Number(user.wallet_balance) - Number(price);
+    const newBalance = balanceNum - priceNum;
     await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user.id]);
 
     const ref = "DATA-" + uuidv4();
@@ -1210,7 +1226,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       }
     } catch (vtuErr) {
       console.error("VTU API ERROR:", vtuErr);
-      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [price, user.id]);
+      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [priceNum, user.id]);
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Purchase failed. Try again later." });
     }
@@ -1218,11 +1234,11 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name)
        VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'SUCCESS',$8) RETURNING *`,
-      [user.id, plan.id, price, cost, phone, plan.network, ref, plan.name]
+      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name]
     );
 
     const adminId = await getCompanyAdmin(user.company);
-    const profit = Number(price) - Number(cost);
+    const profit = priceNum - Number(cost);
     if (adminId && profit > 0) {
       await client.query("UPDATE users SET admin_wallet = admin_wallet + $1 WHERE id=$2", [profit, adminId]);
       await client.query(
