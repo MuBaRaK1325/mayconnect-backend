@@ -180,27 +180,27 @@ async function createPaymentPointAccount(user) {
     throw new Error("Email is NULL/empty in DB.");
   }
 
-  // Normalize to 10-digit format without country code for v1
+  // Normalize to 10 digits: 09119507708 -> 9119507708
   let phone = String(user.phone).trim().replace(/\s+/g, '').replace(/-/g, '');
   if (phone.startsWith('0')) {
-    phone = phone.slice(1); // 09119507708 -> 9119507708
+    phone = phone.slice(1);
   }
   if (phone.startsWith('234')) {
-    phone = phone.slice(3); // 2349119507708 -> 9119507708
+    phone = phone.slice(3);
   }
   if (phone.startsWith('+234')) {
     phone = phone.slice(4);
   }
 
   if (phone.length!== 10) {
-    throw new Error(`Phone must be 10 digits after normalization. Got: ${phone}`);
+    throw new Error(`Phone must be 10 digits. Got: ${phone}`);
   }
 
   const payload = {
     businessId: creds.businessId,
     name: user.username,
     email: user.email.trim(),
-    customer_phone: phone, // 10 digits, no 234
+    phone: phone, // use 'phone' not 'customer_phone' for this account
     bvn: "",
     narration: `DVA for ${user.username}`
   };
@@ -208,9 +208,9 @@ async function createPaymentPointAccount(user) {
   const timestamp = Date.now().toString();
   const stringToSign = timestamp + JSON.stringify(payload);
   const signature = crypto
-.createHmac('sha512', creds.secretKey)
-.update(stringToSign)
-.digest('hex');
+   .createHmac('sha512', creds.secretKey)
+   .update(stringToSign)
+   .digest('hex');
 
   const headers = {
     'Authorization': `Bearer ${creds.secretKey}`,
