@@ -158,9 +158,9 @@ const getUser = async (id) => {
 const getPaymentPointCreds = (company) => {
   const c = company.toLowerCase();
   return {
-    apiKey: process.env[`PAYMENTPOINT_${c.toUpperCase()}_API_KEY`],
-    secretKey: process.env[`PAYMENTPOINT_${c.toUpperCase()}_SECRET_KEY`],
-    businessId: process.env[`PAYMENTPOINT_${c.toUpperCase()}_BUSINESS_ID`]
+    apiKey: (process.env[`PAYMENTPOINT_${c.toUpperCase()}_API_KEY`] || "").trim(),
+    secretKey: (process.env[`PAYMENTPOINT_${c.toUpperCase()}_SECRET_KEY`] || "").trim(),
+    businessId: (process.env[`PAYMENTPOINT_${c.toUpperCase()}_BUSINESS_ID`] || "").trim()
   };
 }
 
@@ -168,7 +168,7 @@ async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
   console.log(`[PaymentPoint] Creating account for ${user.username}, company: ${user.company}`);
-  console.log(`[PaymentPoint] Creds check: apiKey=${!!creds.apiKey}, secret=${!!creds.secretKey}, businessId=${!!creds.businessId}`);
+  console.log(`[PaymentPoint] Creds check: apiKey=${!!creds.apiKey} len=${creds.apiKey.length}, secret=${!!creds.secretKey}, businessId=${!!creds.businessId}`);
   console.log(`[PaymentPoint] Base URL: ${PAYMENTPOINT_BASE}`);
 
   if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
@@ -195,63 +195,68 @@ async function createPaymentPointAccount(user) {
   const timestamp = Date.now().toString();
   const stringToSign = timestamp + JSON.stringify(payload);
   const signature = crypto
-   .createHmac('sha512', creds.secretKey)
-   .update(stringToSign)
-   .digest('hex');
+  .createHmac('sha512', creds.secretKey)
+  .update(stringToSign)
+  .digest('hex');
 
   const headers = {
-    'api-key': creds.apiKey,
-    'secret-key': creds.secretKey,
-    'timestamp': timestamp,
-    'signature': signature,
+    'Authorization': `Bearer ${creds.apiKey}`,
+    'Timestamp': timestamp,
+    'Signature': signature,
     'Content-Type': 'application/json'
   };
 
   console.log('[PaymentPoint] Sending payload:', JSON.stringify(payload));
+  console.log('[PaymentPoint] Auth header:', `Bearer ${creds.apiKey.slice(0, 10)}...`);
 
-  const { data } = await axios.post(
-    `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
-    payload,
-    { headers, timeout: 30000 }
-  );
+  try {
+    const { data } = await axios.post(
+      `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
+      payload,
+      { headers, timeout: 30000 }
+    );
 
-  console.log('[PaymentPoint] Full response:', JSON.stringify(data));
+    console.log('[PaymentPoint] Full response:', JSON.stringify(data));
 
-  if (!data || data.status!== "success") {
-    throw new Error(data.message || "PaymentPoint account creation failed");
+    if (!data || data.status!== "success") {
+      throw new Error(data.message || "PaymentPoint account creation failed");
+    }
+
+    if (!data.bankAccounts || data.bankAccounts.length === 0) {
+      throw new Error('PaymentPoint did not return any bank accounts: ' + JSON.stringify(data));
+    }
+
+    const bankAcc = data.bankAccounts[0];
+
+    await pool.query(
+      `UPDATE users SET
+        account_number=$1,
+        account_name=$2,
+        bank_name=$3,
+        paymentmethod='paymentpoint',
+        reserved_account_id=$4,
+        customer_id=$5
+       WHERE id=$6`,
+      [
+        bankAcc.accountNumber,
+        bankAcc.accountName,
+        bankAcc.bankName,
+        bankAcc.Reserved_Account_Id,
+        data.customer_id,
+        user.id
+      ]
+    );
+
+    return {
+      account_number: bankAcc.accountNumber,
+      account_name: bankAcc.accountName,
+      bank_name: bankAcc.bankName,
+      reserved_account_id: bankAcc.Reserved_Account_Id
+    };
+  } catch (err) {
+    console.log('[PaymentPoint] Error response:', err.response?.data);
+    throw err;
   }
-
-  if (!data.bankAccounts || data.bankAccounts.length === 0) {
-    throw new Error('PaymentPoint did not return any bank accounts: ' + JSON.stringify(data));
-  }
-
-  const bankAcc = data.bankAccounts[0];
-
-  await pool.query(
-    `UPDATE users SET
-      account_number=$1,
-      account_name=$2,
-      bank_name=$3,
-      paymentmethod='paymentpoint',
-      reserved_account_id=$4,
-      customer_id=$5
-     WHERE id=$6`,
-    [
-      bankAcc.accountNumber,
-      bankAcc.accountName,
-      bankAcc.bankName,
-      bankAcc.Reserved_Account_Id,
-      data.customer_id,
-      user.id
-    ]
-  );
-
-  return {
-    account_number: bankAcc.accountNumber,
-    account_name: bankAcc.accountName,
-    bank_name: bankAcc.bankName,
-    reserved_account_id: bankAcc.Reserved_Account_Id
-  };
 }
 
 module.exports = {
