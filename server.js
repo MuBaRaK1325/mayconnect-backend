@@ -316,38 +316,52 @@ app.post("/api/paymentpoint/webhook",
   async (req, res) => {
     try {
       const rawBody = req.rawBody;
-      const event = req.body; // already parsed
-      const signature = req.headers["x-paymentpoint-signature"] || req.headers["paymentpoint-signature"];
+      const event = req.body;
 
+      // Check multiple possible header names
+      const signature = req.headers["x-paymentpoint-signature"]
+                       || req.headers["paymentpoint-signature"]
+                       || req.headers["x-paymentpoint-signature".toLowerCase()];
+
+      console.log('[PaymentPoint Webhook] Headers:', JSON.stringify(req.headers));
       console.log('[PaymentPoint Webhook] Payload:', JSON.stringify(event));
 
-      if (!rawBody ||!signature) {
-        console.log('[Webhook] Missing body or signature');
+      if (!rawBody) {
+        console.log('[Webhook] Missing rawBody');
         return res.sendStatus(400);
       }
 
-      const data = event.data || event;
-      const amount = Number(data.amount);
-      const reference = data.transactionRef || data.reference || data.transaction_id;
-      const accountNumber = data.accountNumber;
-      const status = data.status || event.transaction_status;
-
-      if (!amount ||!reference ||!accountNumber) {
-        console.log('[Webhook] Missing fields:', { amount, reference, accountNumber });
+      if (!signature) {
+        console.log('[Webhook] Missing signature header');
         return res.sendStatus(400);
       }
 
-      if (status!== "success" && status!== "successful" && event.notification_status!== "payment_successful") {
+      // Extract fields from actual payload structure
+      const amount = Number(event.settlement_amount || event.amount_paid);
+      const reference = event.transaction_id;
+      const customerEmail = event.customer?.email;
+      const notificationStatus = event.notification_status;
+      const transactionStatus = event.transaction_status;
+
+      if (!amount ||!reference ||!customerEmail) {
+        console.log('[Webhook] Missing required fields:', { amount, reference, customerEmail });
+        return res.sendStatus(400);
+      }
+
+      // Only process successful payments
+      if (notificationStatus!== "payment_successful" || transactionStatus!== "success") {
+        console.log('[Webhook] Ignored non-success status:', { notificationStatus, transactionStatus });
         return res.sendStatus(200);
       }
 
+      // Lookup user by email
       const userRes = await pool.query(
-        "SELECT id, company FROM users WHERE account_number = $1",
-        [accountNumber]
+        "SELECT id, company FROM users WHERE lower(trim(email)) = lower(trim($1))",
+        [customerEmail]
       );
 
       if (!userRes.rows.length) {
-        console.log('[Webhook] No user found for account_number:', accountNumber);
+        console.log('[Webhook] No user found for email:', customerEmail);
         return res.sendStatus(200);
       }
 
@@ -356,21 +370,22 @@ app.post("/api/paymentpoint/webhook",
       const creds = getPaymentPointCreds(company);
 
       if (!creds?.secretKey) {
+        console.log('[Webhook] Missing creds for company:', company);
         return res.sendStatus(400);
       }
 
       // Verify signature using raw buffer
       const calculatedSignature = crypto
-       .createHmac("sha256", creds.secretKey)
-       .update(rawBody)
-       .digest("hex");
+      .createHmac("sha256", creds.secretKey)
+      .update(rawBody)
+      .digest("hex");
 
       if (calculatedSignature!== signature) {
-        console.log('[Webhook] Signature mismatch');
+        console.log('[Webhook] Signature mismatch. Expected:', calculatedSignature, 'Got:', signature);
         return res.sendStatus(401);
       }
 
-      // DB transaction
+      // DB transaction with idempotency
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
@@ -382,6 +397,7 @@ app.post("/api/paymentpoint/webhook",
 
         if (existing.rows.length && existing.rows[0].status === "SUCCESS") {
           await client.query("ROLLBACK");
+          console.log('[Webhook] Transaction already processed:', reference);
           return res.sendStatus(200);
         }
 
@@ -401,7 +417,7 @@ app.post("/api/paymentpoint/webhook",
         await client.query("COMMIT");
         sendWalletUpdate(userId, Number(update.rows[0].wallet_balance));
 
-        console.log('[Webhook] Credited user', userId, 'amount', amount);
+        console.log('[Webhook] Credited user', userId, 'amount', amount, 'ref', reference);
       } catch (e) {
         await client.query("ROLLBACK");
         console.error('[Webhook] DB Error:', e);
