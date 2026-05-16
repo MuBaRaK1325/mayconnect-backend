@@ -193,17 +193,21 @@ async function createPaymentPointAccount(user) {
   };
 
   const timestamp = Date.now().toString();
+  const stringToSign = timestamp + JSON.stringify(payload);
   const signature = crypto
    .createHmac('sha512', creds.secretKey)
-   .update(timestamp + JSON.stringify(payload))
+   .update(stringToSign)
    .digest('hex');
 
   const headers = {
-    'Authorization': `Bearer ${creds.apiKey}`,
-    'Timestamp': timestamp,
-    'Signature': signature,
+    'api-key': creds.apiKey,
+    'secret-key': creds.secretKey,
+    'timestamp': timestamp,
+    'signature': signature,
     'Content-Type': 'application/json'
   };
+
+  console.log('[PaymentPoint] Sending payload:', JSON.stringify(payload));
 
   const { data } = await axios.post(
     `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
