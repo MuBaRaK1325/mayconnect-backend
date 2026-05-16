@@ -167,7 +167,8 @@ const getPaymentPointCreds = (company) => {
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
-  console.log('[PaymentPoint] Full user object from DB:', JSON.stringify(user));
+  console.log(`[PaymentPoint] Creating account for ${user.username}, company: ${user.company}`);
+  console.log('[PaymentPoint] Raw user.phone from DB:', JSON.stringify(user.phone));
 
   if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
     throw new Error(`PaymentPoint not configured for company: ${user.company}`);
@@ -179,45 +180,34 @@ async function createPaymentPointAccount(user) {
     throw new Error("Email is NULL/empty in DB.");
   }
 
-  // Normalize to 10 digits: 09119507708 -> 9119507708
-  let phone = String(user.phone).replace(/\D/g, '');
-  if (phone.startsWith('0')) {
-    phone = phone.slice(1);
+  // Normalize to 11 digits starting with 0 for Nigeria
+  let phoneNumber = String(user.phone).replace(/\D/g, '');
+  if (phoneNumber.startsWith('234')) {
+    phoneNumber = '0' + phoneNumber.slice(3);
   }
-  if (phone.startsWith('234')) {
-    phone = phone.slice(3);
-  }
-
-  if (phone.length!== 10) {
-    throw new Error(`Phone must be 10 digits. Got: ${phone}`);
+  if (phoneNumber.startsWith('0') && phoneNumber.length === 11) {
+    // good
+  } else if (phoneNumber.length === 10) {
+    phoneNumber = '0' + phoneNumber;
+  } else {
+    throw new Error(`Invalid phone format: ${phoneNumber}`);
   }
 
   const payload = {
-    businessId: creds.businessId,
-    name: user.username.trim(),
     email: user.email.trim(),
-    phone: Number(phone), // number, not string
-    bvn: "",
-    narration: `DVA for ${user.username}`
+    name: user.username.trim(),
+    phoneNumber: phoneNumber, // 09119507708 format
+    bankCode: ['20946', '20897'], // Palmpay, Opay
+    businessId: creds.businessId
   };
-
-  const timestamp = Date.now().toString();
-  const stringToSign = timestamp + JSON.stringify(payload);
-  const signature = crypto
- .createHmac('sha512', creds.secretKey)
- .update(stringToSign)
- .digest('hex');
 
   const headers = {
     'Authorization': `Bearer ${creds.secretKey}`,
     'api-key': creds.apiKey,
-    'Timestamp': timestamp,
-    'Signature': signature,
     'Content-Type': 'application/json'
   };
 
   console.log('[PaymentPoint] Sending payload:', JSON.stringify(payload));
-  console.log('[PaymentPoint] String to sign:', stringToSign);
 
   try {
     const { data } = await axios.post(
@@ -253,12 +243,24 @@ async function createPaymentPointAccount(user) {
       ]
     );
 
-    return bankAcc;
+    return {
+      account_number: bankAcc.accountNumber,
+      account_name: bankAcc.accountName,
+      bank_name: bankAcc.bankName,
+      reserved_account_id: bankAcc.Reserved_Account_Id
+    };
   } catch (err) {
     console.log('[PaymentPoint] Error response:', err.response?.data);
     throw err;
   }
 }
+
+module.exports = {
+  getCompanyAdmin,
+  getUser,
+  getPaymentPointCreds,
+  createPaymentPointAccount
+};
 
 /* ================= WEBSOCKET SETUP ================= */
 const clients = new Map();
