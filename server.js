@@ -898,8 +898,9 @@ app.post("/api/signup", async (req, res) => {
     );
 
     try {
-      if (userCompany!== "sadeeq") {
-        await createMonnifyAccount(user.rows[0]);
+      const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
+      if (paymentpointCompanies.includes(userCompany.toLowerCase())) {
+        await createPaymentPointAccount(user.rows[0]);
       }
     } catch (e) {
       console.log("ACCOUNT CREATE ERROR ON SIGNUP - continuing anyway:", e.message);
@@ -917,13 +918,11 @@ app.post("/api/signup", async (req, res) => {
     res.status(500).json({ message: "Signup failed" });
   }
 });
-
 /* ================= LOGIN ================= */
 app.post("/api/login", loginLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    // Input validation
     if (!username ||!password) {
       return res.status(400).json({ message: "Username and password are required" });
     }
@@ -933,7 +932,6 @@ app.post("/api/login", loginLimiter, async (req, res) => {
 
     const userRes = await pool.query("SELECT * FROM users WHERE username=$1", [username.trim()]);
     if (!userRes.rows.length) {
-      // Generic message to avoid username enumeration
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
@@ -943,7 +941,6 @@ app.post("/api/login", loginLimiter, async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Use short expiry for user tokens, include role for auth checks
     const token = jwt.sign(
       {
         id: user.id,
@@ -972,17 +969,17 @@ app.post("/api/login", loginLimiter, async (req, res) => {
     res.status(500).json({ message: "Login failed. Try again later." });
   }
 });
-
 /* ================= USER INFO - WITH TIER CHECK ================= */
 app.get("/api/me", auth, async (req, res) => {
   try {
     let user = await pool.query("SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet, account_number, bank_name, account_name FROM users WHERE id = $1", [req.user.id]);
     if (!user.rows.length) return res.status(404).json({ message: "User not found" });
 
-    // Auto-create DVA if missing for Monnify companies
-    if (!user.rows[0].account_number && user.rows[0].company!== "sadeeq" && user.rows[0].phone) {
+    // Auto-create DVA if missing for PaymentPoint companies
+    const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
+    if (!user.rows[0].account_number && paymentpointCompanies.includes(user.rows[0].company.toLowerCase()) && user.rows[0].phone) {
       try {
-        await createMonnifyAccount(user.rows[0]);
+        await createPaymentPointAccount(user.rows[0]);
         user = await pool.query("SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet, account_number, bank_name, account_name FROM users WHERE id = $1", [req.user.id]);
       } catch (e) {
         console.log("Account creation failed on /me:", e.message);
@@ -1004,17 +1001,16 @@ app.get("/api/me", auth, async (req, res) => {
     res.status(500).json({ message: "Failed to fetch user" });
   }
 });
-
 /* ================= GENERATE ACCOUNT ================= */
 app.post("/api/generate-account", auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
 
     if (user.account_number && user.paymentmethod === "paymentpoint") {
-      return res.json({ 
-        message: "PaymentPoint account already exists", 
+      return res.json({
+        message: "PaymentPoint account already exists",
         account: user,
-        user_id: user.id 
+        user_id: user.id
       });
     }
 
@@ -1026,18 +1022,16 @@ app.post("/api/generate-account", auth, async (req, res) => {
     let acc;
 
     if (paymentpointCompanies.includes(user.company.toLowerCase())) {
-      // Use PaymentPoint for these companies
       acc = await createPaymentPointAccount(user);
     } else {
-      // Fallback to Monnify for other users
-      acc = await createMonnifyAccount(user);
+      return res.status(400).json({ message: "Account creation not supported for this company" });
     }
 
-    res.json({ 
-      message: "Account created successfully", 
+    res.json({
+      message: "Account created successfully",
       account: acc,
-      user_id: user.id,        // included for webhook debugging
-      company: user.company    // included so you know which company it went to
+      user_id: user.id,
+      company: user.company
     });
 
   } catch (e) {
