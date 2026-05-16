@@ -168,25 +168,20 @@ async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
   console.log(`[PaymentPoint] Creating account for ${user.username}, company: ${user.company}`);
-  console.log(`[PaymentPoint] Creds check: apiKey=${!!creds.apiKey} len=${creds.apiKey.length}, secret=${!!creds.secretKey}, businessId=${!!creds.businessId}`);
-  console.log(`[PaymentPoint] Base URL: ${PAYMENTPOINT_BASE}`);
 
   if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
     throw new Error(
-      `PaymentPoint not configured for company: ${user.company}. ` +
-      `Check PAYMENTPOINT_${user.company.toUpperCase()}_API_KEY, ` +
-      `PAYMENTPOINT_${user.company.toUpperCase()}_SECRET_KEY, and ` +
-      `PAYMENTPOINT_${user.company.toUpperCase()}_BUSINESS_ID`
+      `PaymentPoint not configured for company: ${user.company}.`
     );
   }
   if (!user.phone) {
-    throw new Error("Phone number required to create virtual account. Please update your profile.");
+    throw new Error("Phone number required to create virtual account.");
   }
   if (!user.email) {
-    throw new Error("Email required to create virtual account. Please update your profile.");
+    throw new Error("Email required to create virtual account.");
   }
 
-  // Normalize phone to international format: 234xxxxxxxxxx
+  // Normalize to 234xxxxxxxxxx
   let phone = user.phone.replace(/\s+/g, '').replace(/-/g, '');
   if (phone.startsWith('0')) {
     phone = '234' + phone.slice(1);
@@ -202,7 +197,7 @@ async function createPaymentPointAccount(user) {
     businessId: creds.businessId,
     name: user.username,
     email: user.email,
-    phone: phone,
+    customerPhone: phone, // use customerPhone for this endpoint
     bvn: "",
     narration: `DVA for ${user.username}`
   };
@@ -210,9 +205,9 @@ async function createPaymentPointAccount(user) {
   const timestamp = Date.now().toString();
   const stringToSign = timestamp + JSON.stringify(payload);
   const signature = crypto
- .createHmac('sha512', creds.secretKey)
- .update(stringToSign)
- .digest('hex');
+  .createHmac('sha512', creds.secretKey)
+  .update(stringToSign)
+  .digest('hex');
 
   const headers = {
     'Authorization': `Bearer ${creds.secretKey}`,
@@ -223,7 +218,6 @@ async function createPaymentPointAccount(user) {
   };
 
   console.log('[PaymentPoint] Sending payload:', JSON.stringify(payload));
-  console.log('[PaymentPoint] Auth header:', `Bearer ${creds.secretKey.slice(0, 10)}...`);
 
   try {
     const { data } = await axios.post(
@@ -236,10 +230,6 @@ async function createPaymentPointAccount(user) {
 
     if (!data || data.status!== "success") {
       throw new Error(data.message || "PaymentPoint account creation failed");
-    }
-
-    if (!data.bankAccounts || data.bankAccounts.length === 0) {
-      throw new Error('PaymentPoint did not return any bank accounts: ' + JSON.stringify(data));
     }
 
     const bankAcc = data.bankAccounts[0];
