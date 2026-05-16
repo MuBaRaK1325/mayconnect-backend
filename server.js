@@ -186,11 +186,23 @@ async function createPaymentPointAccount(user) {
     throw new Error("Email required to create virtual account. Please update your profile.");
   }
 
+  // Normalize phone to international format: 234xxxxxxxxxx
+  let phone = user.phone.replace(/\s+/g, '').replace(/-/g, '');
+  if (phone.startsWith('0')) {
+    phone = '234' + phone.slice(1);
+  }
+  if (phone.startsWith('+234')) {
+    phone = phone.slice(1);
+  }
+  if (!phone.startsWith('234')) {
+    phone = '234' + phone;
+  }
+
   const payload = {
     businessId: creds.businessId,
     name: user.username,
     email: user.email,
-    phone: user.phone, // fixed: was customerPhone
+    phone: phone,
     bvn: "",
     narration: `DVA for ${user.username}`
   };
