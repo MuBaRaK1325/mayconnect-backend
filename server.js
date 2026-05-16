@@ -533,37 +533,35 @@ function adminOnly(req, res, next) {
 /* ================= WEBAUTHN - BIOMETRIC ================= */
 const rpName = 'MAYCONNECT';
 
-// Your Relying Party ID must be the domain without protocol or port
-// Use the main domain for all your subdomains. Since you have multiple brands,
-// use 'mayconnect.com.ng' as the base, or keep it per-project if you prefer isolation
-const rpID = 'mayconnect.com.ng'; // or use process.env.RP_ID
+// Base domain for RP ID. Use the main domain you want all brands to share.
+// If you want isolation per brand, set this dynamically per request.
+const rpID = 'mayconnect.com.ng'; 
 
-// Whitelist of allowed frontend origins for WebAuthn
+// Whitelist of allowed hostnames only - no protocol
 const ALLOWED_FRONTENDS = [
   // New custom domains
-  'https://mayconnect.com.ng',
-  'https://www.mayconnect.com.ng',
-  'https://teevershdataplug.com.ng', 
-  'https://www.teevershdataplug.com.ng',
-  'https://sadeeqdatahub.com.ng',
-  'https://www.sadeeqdatahub.com.ng',
-  'https://bnhabeebdatahub.com.ng',
-  'https://www.bnhabeebdatahub.com.ng',
+  'mayconnect.com.ng',
+  'www.mayconnect.com.ng',
+  'teevershdataplug.com.ng', 
+  'www.teevershdataplug.com.ng',
+  'sadeeqdatahub.com.ng',
+  'www.sadeeqdatahub.com.ng',
+  'bnhabeebdatahub.com.ng',
+  'www.bnhabeebdatahub.com.ng',
   
   // Old Render domains for backward compatibility
-  'https://mayconnect-frontend.onrender.com',
-  'https://teeversh-frontend.onrender.com',
-  'https://bnhabeeb-frontend.onrender.com', 
-  'https://sadeeq-frontend.onrender.com',
+  'mayconnect-frontend.onrender.com',
+  'teeversh-frontend.onrender.com',
+  'bnhabeeb-frontend.onrender.com', 
+  'sadeeq-frontend.onrender.com',
   
   // Local dev
-  'http://localhost:3000',
-  'http://localhost:5173'
+  'localhost'
 ];
 
 // Helper to get rpID from request origin with validation
 function getRpID(req) {
-  if (process.env.NODE_ENV!== 'production') return 'localhost';
+  if (process.env.NODE_ENV !== 'production') return 'localhost';
 
   const origin = req.headers.origin || req.headers.referer;
   if (origin) {
@@ -861,6 +859,12 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     }
 
     const account = await createPaymentPointAccount(user);
+    
+    if (!account || !account.account_number) {
+      console.error('PaymentPoint returned empty account:', account);
+      return res.status(500).json({ error: 'Failed to create virtual account. Check server logs.' });
+    }
+
     res.json({
       success: true,
       account_number: account.account_number,
@@ -870,7 +874,7 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('DVA Error:', error.response?.data || error.message);
+    console.error('DVA Error:', error.response?.data || error.message, error.stack);
     res.status(500).json({ error: error.message || 'Failed to create virtual account' });
   }
 });
