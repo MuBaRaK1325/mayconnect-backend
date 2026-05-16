@@ -305,22 +305,26 @@ function broadcastTopUserUpdate(company) {
   }
 }
 
-/* ================= PAYMENTPOINT WEBHOOK - MUST BE BEFORE express.json() ================= */
+/* ================= PAYMENTPOINT WEBHOOK ================= */
 app.post("/api/paymentpoint/webhook",
-  express.raw({ type: "application/json" }),
+  express.json({
+    type: '*/*',
+    verify: (req, res, buf) => {
+      req.rawBody = buf; // store raw buffer for signature check
+    }
+  }),
   async (req, res) => {
     try {
-      const rawBody = req.body; // this is a Buffer because of express.raw
+      const rawBody = req.rawBody;
+      const event = req.body; // already parsed
       const signature = req.headers["x-paymentpoint-signature"] || req.headers["paymentpoint-signature"];
+
+      console.log('[PaymentPoint Webhook] Payload:', JSON.stringify(event));
 
       if (!rawBody ||!signature) {
         console.log('[Webhook] Missing body or signature');
         return res.sendStatus(400);
       }
-
-      // Parse ONCE, using the raw buffer
-      const event = JSON.parse(rawBody.toString('utf8'));
-      console.log('[PaymentPoint Webhook] Payload:', JSON.stringify(event));
 
       const data = event.data || event;
       const amount = Number(data.amount);
@@ -337,7 +341,6 @@ app.post("/api/paymentpoint/webhook",
         return res.sendStatus(200);
       }
 
-      // Lookup by account_number
       const userRes = await pool.query(
         "SELECT id, company FROM users WHERE account_number = $1",
         [accountNumber]
@@ -356,18 +359,18 @@ app.post("/api/paymentpoint/webhook",
         return res.sendStatus(400);
       }
 
-      // Verify signature against RAW buffer
+      // Verify signature using raw buffer
       const calculatedSignature = crypto
-      .createHmac("sha256", creds.secretKey)
-      .update(rawBody)
-      .digest("hex");
+       .createHmac("sha256", creds.secretKey)
+       .update(rawBody)
+       .digest("hex");
 
       if (calculatedSignature!== signature) {
         console.log('[Webhook] Signature mismatch');
         return res.sendStatus(401);
       }
 
-      //... rest of your DB transaction code here
+      // DB transaction
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
@@ -398,6 +401,7 @@ app.post("/api/paymentpoint/webhook",
         await client.query("COMMIT");
         sendWalletUpdate(userId, Number(update.rows[0].wallet_balance));
 
+        console.log('[Webhook] Credited user', userId, 'amount', amount);
       } catch (e) {
         await client.query("ROLLBACK");
         console.error('[Webhook] DB Error:', e);
@@ -415,7 +419,7 @@ app.post("/api/paymentpoint/webhook",
   }
 );
 
-/* ================= BODY PARSERS - MUST BE AFTER WEBHOOK ================= */
+/* ================= GLOBAL BODY PARSERS - MUST BE AFTER WEBHOOK ================= */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
