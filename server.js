@@ -70,6 +70,7 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 /* ================= RATE LIMITERS ================= */
 const loginLimiter = rateLimit({
   windowMs: 10 * 60 * 1000, // 10 minutes
@@ -94,6 +95,7 @@ const fundInitLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
 /* ================= VAPID ================= */
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC;
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE;
@@ -138,6 +140,84 @@ const VTU_PROVIDERS = {
     token: process.env.SUBPADI_TOKEN
   }
 };
+
+/* ================= PAYMENTPOINT HELPERS ================= */
+function getPaymentPointCreds(company) {
+  const prefix = company.toUpperCase();
+  return {
+    apiKey: process.env[`PAYMENTPOINT_${prefix}_API_KEY`],
+    secretKey: process.env[`PAYMENTPOINT_${prefix}_SECRET_KEY`],
+    businessId: process.env[`PAYMENTPOINT_${prefix}_BUSINESS_ID`]
+  };
+}
+
+async function createPaymentPointAccount(user) {
+  const company = user.company.toLowerCase();
+  const creds = getPaymentPointCreds(company);
+
+  if (!creds.apiKey || !creds.secretKey || !creds.businessId) {
+    throw new Error(`PaymentPoint creds missing for company: ${company}`);
+  }
+
+  const payload = {
+    businessId: creds.businessId,
+    accountName: user.username,
+    customerEmail: user.email,
+    customerPhone: user.phone,
+    bvn: "",
+    narration: `DVA for ${user.username}`
+  };
+
+  const timestamp = Date.now().toString();
+  const signature = crypto
+    .createHmac('sha512', creds.secretKey)
+    .update(timestamp + JSON.stringify(payload))
+    .digest('hex');
+
+  const headers = {
+    'Authorization': `Bearer ${creds.apiKey}`,
+    'Timestamp': timestamp,
+    'Signature': signature,
+    'Content-Type': 'application/json'
+  };
+
+  console.log(`[PaymentPoint] Creating account for ${user.username}, company: ${company}`);
+  console.log(`[PaymentPoint] Creds check: apiKey=${!!creds.apiKey}, secret=${!!creds.secretKey}, businessId=${!!creds.businessId}`);
+  console.log(`[PaymentPoint] Base URL: ${PAYMENTPOINT_BASE}`);
+
+  const { data } = await axios.post(
+    `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
+    payload,
+    { headers, timeout: 30000 }
+  );
+
+  console.log('[PaymentPoint] Full response:', JSON.stringify(data));
+
+  if (!data || data.status !== 'success') {
+    throw new Error(data.message || 'PaymentPoint account creation failed');
+  }
+
+  if (!data.bankAccounts || data.bankAccounts.length === 0) {
+    throw new Error('PaymentPoint did not return any bank accounts: ' + JSON.stringify(data));
+  }
+
+  const bankAcc = data.bankAccounts[0];
+
+  await pool.query(
+    `UPDATE users
+     SET account_number=$1, bank_name=$2, account_name=$3, paymentmethod='paymentpoint'
+     WHERE id=$4`,
+    [bankAcc.accountNumber, bankAcc.bankName, bankAcc.accountName, user.id]
+  );
+
+  console.log(`[PaymentPoint] Account created: ${bankAcc.accountNumber} for ${user.username}`);
+
+  return {
+    accountNumber: bankAcc.accountNumber,
+    bankName: bankAcc.bankName,
+    accountName: bankAcc.accountName
+  };
+}
 
 
 
