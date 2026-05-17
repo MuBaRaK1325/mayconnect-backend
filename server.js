@@ -273,6 +273,9 @@ const getPaymentPointCreds = (company) => {
   };
 }
 
+// Make sure PAYMENTPOINT_BASE is declared once at the top of server.js
+// const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE_URL;
+
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
@@ -305,7 +308,7 @@ async function createPaymentPointAccount(user) {
     email: user.email.trim(),
     name: user.username.trim(),
     phoneNumber: phoneNumber,
-    bankCode: ['20946', '20897'], // 20946=Fidelity, 20897=Sterling
+    bankCode: ['20946', '20897'], // 20946=Palmpay, 20897=Sterling
     businessId: creds.businessId
   };
 
@@ -330,46 +333,54 @@ async function createPaymentPointAccount(user) {
       throw new Error(data.message || "PaymentPoint account creation failed");
     }
 
-    // Save customer_id even if bank accounts fail
-    if (data.customer && data.customer_id) {
+    // Save customer_id if returned
+    if (data.customer?.customer_id) {
       await pool.query(
         `UPDATE users SET customer_id=$1 WHERE id=$2`,
         [data.customer_id, user.id]
       );
     }
 
-    // Check if bank accounts were actually created
-    if (!data.customer?.accounts || data.customer.accounts.length === 0) {
-      const errMsg = data.message || "No bank accounts returned";
-      throw new Error(`Customer created but account generation failed: ${errMsg}`);
+    // Paymentpoint returns accounts in data.bankAccounts
+    const bankAccounts = data.bankAccounts || [];
+
+    // Case 1: Success with accounts
+    if (bankAccounts.length > 0) {
+      const bankAcc = bankAccounts[0];
+
+      await pool.query(
+        `UPDATE users SET
+          account_number=$1,
+          account_name=$2,
+          bank_name=$3,
+          paymentmethod='paymentpoint',
+          reserved_account_id=$4
+         WHERE id=$5`,
+        [
+          bankAcc.accountNumber,
+          bankAcc.accountName,
+          bankAcc.bankName,
+          bankAcc.Reserved_Account_Id,
+          user.id
+        ]
+      );
+
+      return {
+        success: true,
+        account_number: bankAcc.accountNumber,
+        account_name: bankAcc.accountName,
+        bank_name: bankAcc.bankName,
+        reserved_account_id: bankAcc.Reserved_Account_Id,
+        customer_id: data.customer?.customer_id
+      };
     }
 
-    const bankAcc = data.customer.accounts[0];
+    // Case 2: Customer created but no accounts yet
+    const errMsg = data.errors && data.errors.length > 0
+     ? data.errors.join('; ')
+      : data.message || "No bank accounts returned";
+    throw new Error(`Customer created but account generation failed: ${errMsg}`);
 
-    await pool.query(
-      `UPDATE users SET
-        account_number=$1,
-        account_name=$2,
-        bank_name=$3,
-        paymentmethod='paymentpoint',
-        reserved_account_id=$4
-       WHERE id=$5`,
-      [
-        bankAcc.account_number,
-        bankAcc.account_name,
-        bankAcc.bank_name,
-        bankAcc.id,
-        user.id
-      ]
-    );
-
-    return {
-      account_number: bankAcc.account_number,
-      account_name: bankAcc.account_name,
-      bank_name: bankAcc.bank_name,
-      reserved_account_id: bankAcc.id,
-      customer_id: data.customer_id
-    };
   } catch (err) {
     console.log('[PaymentPoint] Error response:', err.response?.data || err.message);
     throw err;
