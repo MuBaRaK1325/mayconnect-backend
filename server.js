@@ -273,7 +273,9 @@ const getPaymentPointCreds = (company) => {
   };
 }
 
-const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE_URL;
+// Use this if PAYMENTPOINT_BASE is already declared elsewhere
+// If not, uncomment the line below and comment out the one above
+// const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE_URL;
 
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
