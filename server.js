@@ -273,6 +273,8 @@ const getPaymentPointCreds = (company) => {
   };
 }
 
+const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE_URL;
+
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
@@ -289,24 +291,22 @@ async function createPaymentPointAccount(user) {
     throw new Error("Email is NULL/empty in DB.");
   }
 
-  // Normalize to 11 digits starting with 0 for Nigeria
+  // Normalize to E.164 234xxxxxxxxx for Paymentpoint
   let phoneNumber = String(user.phone).replace(/\D/g, '');
-  if (phoneNumber.startsWith('234')) {
-    phoneNumber = '0' + phoneNumber.slice(3);
+  if (phoneNumber.startsWith('0')) {
+    phoneNumber = '234' + phoneNumber.slice(1);
+  } else if (!phoneNumber.startsWith('234')) {
+    phoneNumber = '234' + phoneNumber;
   }
-  if (phoneNumber.startsWith('0') && phoneNumber.length === 11) {
-    // good
-  } else if (phoneNumber.length === 10) {
-    phoneNumber = '0' + phoneNumber;
-  } else {
-    throw new Error(`Invalid phone format: ${phoneNumber}`);
+  if (phoneNumber.length < 12) {
+    throw new Error(`Invalid phone format after normalization: ${phoneNumber}`);
   }
 
   const payload = {
     email: user.email.trim(),
     name: user.username.trim(),
     phoneNumber: phoneNumber,
-    bankCode: ['20946', '20897'], // Palmpay, Opay
+    bankCode: ['20946', '20897'], // 20946=Fidelity, 20897=Sterling
     businessId: creds.businessId
   };
 
@@ -340,14 +340,12 @@ async function createPaymentPointAccount(user) {
     }
 
     // Check if bank accounts were actually created
-    if (!data.bankAccounts || data.bankAccounts.length === 0) {
-      const errMsg = data.errors && data.errors.length > 0
-      ? data.errors.join(', ')
-        : "No bank accounts returned";
+    if (!data.customer?.accounts || data.customer.accounts.length === 0) {
+      const errMsg = data.message || "No bank accounts returned";
       throw new Error(`Customer created but account generation failed: ${errMsg}`);
     }
 
-    const bankAcc = data.bankAccounts[0];
+    const bankAcc = data.customer.accounts[0];
 
     await pool.query(
       `UPDATE users SET
@@ -358,19 +356,19 @@ async function createPaymentPointAccount(user) {
         reserved_account_id=$4
        WHERE id=$5`,
       [
-        bankAcc.accountNumber,
-        bankAcc.accountName,
-        bankAcc.bankName,
-        bankAcc.Reserved_Account_Id,
+        bankAcc.account_number,
+        bankAcc.account_name,
+        bankAcc.bank_name,
+        bankAcc.id,
         user.id
       ]
     );
 
     return {
-      account_number: bankAcc.accountNumber,
-      account_name: bankAcc.accountName,
-      bank_name: bankAcc.bankName,
-      reserved_account_id: bankAcc.Reserved_Account_Id,
+      account_number: bankAcc.account_number,
+      account_name: bankAcc.account_name,
+      bank_name: bankAcc.bank_name,
+      reserved_account_id: bankAcc.id,
       customer_id: data.customer_id
     };
   } catch (err) {
@@ -879,18 +877,34 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     const user = await getUser(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
+    // Already has Paymentpoint account
     if (user.account_number && user.paymentmethod === "paymentpoint") {
       return res.json({
         message: "Account already exists",
-        account: user,
+        account: {
+          account_number: user.account_number,
+          bank_name: user.bank_name,
+          account_name: user.account_name
+        },
         method: "paymentpoint"
       });
     }
-    if (!user.phone) {
-      return res.status(400).json({ error: 'Phone number missing. Update profile first.' });
+
+    // Validate phone
+    if (!user.phone || user.phone.trim().length < 10) {
+      return res.status(400).json({ error: 'Phone number missing or invalid. Update profile first.' });
     }
 
-    const account = await createPaymentPointAccount(user);
+    // Format phone to E.164 for Paymentpoint: 09165644513 -> 2349165644513
+    let phoneNumber = user.phone.replace(/\D/g, '');
+    if (phoneNumber.startsWith('0')) {
+      phoneNumber = '234' + phoneNumber.slice(1);
+    } else if (!phoneNumber.startsWith('234')) {
+      phoneNumber = '234' + phoneNumber;
+    }
+
+    // Call Paymentpoint with formatted phone
+    const account = await createPaymentPointAccount({ ...user, phone: phoneNumber });
     
     if (!account || !account.account_number) {
       console.error('PaymentPoint returned empty account:', account);
@@ -1041,27 +1055,41 @@ app.post("/api/generate-account", auth, async (req, res) => {
     if (user.account_number && user.paymentmethod === "paymentpoint") {
       return res.json({
         message: "PaymentPoint account already exists",
-        account: user,
+        account: {
+          account_number: user.account_number,
+          bank_name: user.bank_name,
+          account_name: user.account_name
+        },
         user_id: user.id
       });
     }
 
-    if (!user.phone) {
+    if (!user.phone || user.phone.trim().length < 10) {
       return res.status(400).json({ message: "Please update your phone number in profile first" });
     }
 
     const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
-    let acc;
-
-    if (paymentpointCompanies.includes(user.company.toLowerCase())) {
-      acc = await createPaymentPointAccount(user);
-    } else {
+    if (!paymentpointCompanies.includes(user.company.toLowerCase())) {
       return res.status(400).json({ message: "Account creation not supported for this company" });
     }
 
+    // Format phone to E.164 for Paymentpoint
+    let phoneNumber = user.phone.replace(/\D/g, '');
+    if (phoneNumber.startsWith('0')) {
+      phoneNumber = '234' + phoneNumber.slice(1);
+    } else if (!phoneNumber.startsWith('234')) {
+      phoneNumber = '234' + phoneNumber;
+    }
+
+    const acc = await createPaymentPointAccount({ ...user, phone: phoneNumber });
+
     res.json({
       message: "Account created successfully",
-      account: acc,
+      account: {
+        account_number: acc.account_number,
+        bank_name: acc.bank_name,
+        account_name: acc.account_name
+      },
       user_id: user.id,
       company: user.company
     });
