@@ -511,47 +511,76 @@ async function callMaitamaData(phone, network_id, api_plan_id, company) {
 
 async function callCheapDataHubData(phone, network_id, api_plan_id) {
   const { base_url, api_key } = VTU_PROVIDERS.cheapdatahub;
+  if (!api_key) throw new Error("No CheapDataHub API key configured");
+
   const res = await axios.post(
     `${base_url}/data/purchase/`,
     {
-      provider_id: network_id,
-      phone_number: phone,
-      bundle_id: api_plan_id
+      provider_id: Number(network_id),
+      phone_number: String(phone),
+      bundle_id: Number(api_plan_id)
     },
-    { headers: { Authorization: `Bearer ${api_key}` } }
+    {
+      headers: {
+        Authorization: `Bearer ${api_key}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 30000
+    }
   );
+
   if (res.data.status!== "true") throw new Error(res.data.message || "CheapDataHub failed");
   return res.data;
 }
 
 async function callCheapDataHubAirtime(phone, network_id, amount) {
   const { base_url, api_key } = VTU_PROVIDERS.cheapdatahub;
+  if (!api_key) throw new Error("No CheapDataHub API key configured");
+
   const res = await axios.post(
     `${base_url}/airtime/purchase/`,
     {
-      provider_id: network_id,
-      phone_number: phone,
-      amount: amount
+      provider_id: Number(network_id),
+      phone_number: String(phone),
+      amount: Number(amount)
     },
-    { headers: { Authorization: `Bearer ${api_key}` } }
+    {
+      headers: {
+        Authorization: `Bearer ${api_key}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 30000
+    }
   );
+
   if (res.data.status!== "true") throw new Error(res.data.message || "CheapDataHub failed");
   return res.data;
 }
 
 async function callSubPadiData(phone, network_id, api_plan_id) {
   const { base_url, token } = VTU_PROVIDERS.subpadi;
+  if (!token) throw new Error("No SubPadi token configured");
+
   const res = await axios.post(
     `${base_url}/v1/data/`,
     {
-      mobile_number: phone,
-      network: network_id,
-      plan: api_plan_id,
+      mobile_number: String(phone),
+      network: Number(network_id),
+      plan: Number(api_plan_id),
       Ported_number: false
     },
-    { headers: { Authorization: `Token ${token}` } }
+    {
+      headers: {
+        Authorization: `Token ${token}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 30000
+    }
   );
-  if (res.data.Status!== "successful") throw new Error(res.data.message || "SubPadi failed");
+
+  if (res.data.Status!== "successful") {
+    throw new Error(res.data.message || res.data.Status || "SubPadi purchase failed");
+  }
   return res.data;
 }
 /* ================= AUTH MIDDLEWARE ================= */
@@ -1236,7 +1265,8 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       balance: balanceNum,
       price: priceNum,
       planId: plan.id,
-      planName: plan.name
+      planName: plan.name,
+      provider: plan.provider
     });
 
     if (balanceNum < priceNum) {
@@ -1250,7 +1280,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user.id]);
 
     const ref = "DATA-" + uuidv4();
-    const cost = plan.cost;
+    const cost = Number(plan.cost);
 
     try {
       if (plan.provider === "maitama") {
@@ -1263,10 +1293,12 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         throw new Error("Unknown provider");
       }
     } catch (vtuErr) {
-      console.error("VTU API ERROR:", vtuErr);
+      console.error("VTU API ERROR:", vtuErr.response?.data || vtuErr.message);
       await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [priceNum, user.id]);
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Purchase failed. Try again later." });
+      return res.status(400).json({
+        message: vtuErr.response?.data?.message || vtuErr.message || "Purchase failed. Try again later."
+      });
     }
 
     const txRes = await client.query(
@@ -1276,7 +1308,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     );
 
     const adminId = await getCompanyAdmin(user.company);
-    const profit = priceNum - Number(cost);
+    const profit = priceNum - cost;
     if (adminId && profit > 0) {
       await client.query("UPDATE users SET admin_wallet = admin_wallet + $1 WHERE id=$2", [profit, adminId]);
       await client.query(
