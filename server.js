@@ -1253,7 +1253,10 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       return res.status(403).json({ message: "This provider is only available for Mayconnect" });
     }
 
-    const price = user.is_top_user? (plan.top_price || plan.price) : plan.price;
+    // Check tier using top_users table instead of is_top_user column
+    const tierRes = await client.query("SELECT 1 FROM top_users WHERE id=$1", [user.id]);
+    const isTopUser = tierRes.rows.length > 0;
+    const price = isTopUser? (plan.top_price || plan.price) : plan.price;
 
     // Debug log + clearer balance check
     const balanceNum = Number(user.wallet_balance);
@@ -1262,6 +1265,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     console.log('[BUY DATA]', {
       userId: user.id,
       username: user.username,
+      isTopUser,
       balance: balanceNum,
       price: priceNum,
       planId: plan.id,
@@ -1277,7 +1281,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     }
 
     const newBalance = balanceNum - priceNum;
-    await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user.id]);
+    await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
 
     const ref = "DATA-" + uuidv4();
     const cost = Number(plan.cost);
@@ -1294,7 +1298,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       }
     } catch (vtuErr) {
       console.error("VTU API ERROR:", vtuErr.response?.data || vtuErr.message);
-      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [priceNum, user.id]);
+      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [priceNum, user.id]);
       await client.query("ROLLBACK");
       return res.status(400).json({
         message: vtuErr.response?.data?.message || vtuErr.message || "Purchase failed. Try again later."
@@ -1310,7 +1314,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     const adminId = await getCompanyAdmin(user.company);
     const profit = priceNum - cost;
     if (adminId && profit > 0) {
-      await client.query("UPDATE users SET admin_wallet = admin_wallet + $1 WHERE id=$2", [profit, adminId]);
+      await client.query("UPDATE users SET admin_wallet = admin_wallet + $1, updated_at=NOW() WHERE id=$2", [profit, adminId]);
       await client.query(
         `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
          VALUES($1,'sale',$2,$3,$4)`,
@@ -1327,7 +1331,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       url: '/dashboard.html'
     });
 
-    res.json({ success: true, reference: ref, balance: newBalance });
+    res.json({ success: true, reference: ref, balance: newBalance, tier: isTopUser? 'top' : 'default' });
   } catch (e) {
     await client.query("ROLLBACK");
     console.error("BUY DATA ERROR:", e);
@@ -1722,6 +1726,7 @@ app.get("/admin/users", auth, adminOnly, async (req, res) => {
 });
 
 app.post("/admin/users/set-tier", auth, adminOnly, async (req, res) => {
+  const client = await pool.connect();
   try {
     const { user_id, tier } = req.body;
 
@@ -1729,34 +1734,43 @@ app.post("/admin/users/set-tier", auth, adminOnly, async (req, res) => {
       return res.status(400).json({ message: "Invalid tier. Only 'default', 'top', or 'regular' allowed" });
     }
 
-    const check = await pool.query(
+    const check = await client.query(
       "SELECT id FROM users WHERE id = $1 AND company = $2",
       [user_id, req.user.company]
     );
-    if (!check.rows.length) return res.status(404).json({ message: "User not found" });
+    if (!check.rows.length) {
+      await client.release();
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    await client.query("BEGIN");
 
     // Remove user from all tier tables first
-    await pool.query("DELETE FROM top_users WHERE id = $1", [user_id]);
-    await pool.query("DELETE FROM regular_users WHERE user_id = $1", [user_id]);
+    await client.query("DELETE FROM top_users WHERE id = $1", [user_id]);
+    await client.query("DELETE FROM regular_users WHERE user_id = $1", [user_id]);
 
     // Add to the selected tier table
     if (tier === 'top') {
-      await pool.query(
+      await client.query(
         `INSERT INTO top_users(id) VALUES($1) ON CONFLICT (id) DO NOTHING`,
         [user_id]
       );
     } else if (tier === 'regular') {
-      await pool.query(
+      await client.query(
         `INSERT INTO regular_users(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING`,
         [user_id]
       );
     }
 
+    await client.query("COMMIT");
     broadcastTopUserUpdate(req.user.company);
     res.json({ success: true, tier, message: `User tier updated to ${tier}` });
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("Set tier error:", err);
     res.status(500).json({ message: "Failed to update tier" });
+  } finally {
+    client.release();
   }
 });
 
@@ -1775,13 +1789,15 @@ app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
     }
 
     const result = await pool.query(
-      `UPDATE users SET wallet_balance=$1 WHERE id=$2 AND company=$3 RETURNING id,username,email,wallet_balance,company`,
+      `UPDATE users SET wallet_balance=$1, updated_at=NOW()
+       WHERE id=$2 AND company=$3
+       RETURNING id,username,email,wallet_balance,company`,
       [numBalance, id, req.user.company]
     );
     if (!result.rows.length) return res.status(404).json({ message: "User not found" });
 
-    // Only top_users table has wallet_balance column
-    await pool.query(`UPDATE top_users SET wallet_balance=$1 WHERE id=$2`, [numBalance, id]);
+    // Removed: top_users table doesn't have wallet_balance column
+    // If you need to sync balance there, add the column first
 
     res.json({ message: "User updated", user: result.rows[0] });
   } catch (err) {
