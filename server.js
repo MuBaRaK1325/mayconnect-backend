@@ -273,10 +273,6 @@ const getPaymentPointCreds = (company) => {
   };
 }
 
-// Use this if PAYMENTPOINT_BASE is already declared elsewhere
-// If not, uncomment the line below and comment out the one above
-// const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE_URL;
-
 async function createPaymentPointAccount(user) {
   const creds = getPaymentPointCreds(user.company);
 
@@ -293,15 +289,16 @@ async function createPaymentPointAccount(user) {
     throw new Error("Email is NULL/empty in DB.");
   }
 
-  // Normalize to E.164 234xxxxxxxxx for Paymentpoint
+  // Normalize to 11 digits starting with 0 for Paymentpoint
   let phoneNumber = String(user.phone).replace(/\D/g, '');
-  if (phoneNumber.startsWith('0')) {
-    phoneNumber = '234' + phoneNumber.slice(1);
-  } else if (!phoneNumber.startsWith('234')) {
-    phoneNumber = '234' + phoneNumber;
+  if (phoneNumber.startsWith('234')) {
+    phoneNumber = '0' + phoneNumber.slice(3);
   }
-  if (phoneNumber.length < 12) {
-    throw new Error(`Invalid phone format after normalization: ${phoneNumber}`);
+  if (phoneNumber.length === 10) {
+    phoneNumber = '0' + phoneNumber;
+  }
+  if (phoneNumber.length!== 11 ||!phoneNumber.startsWith('0')) {
+    throw new Error(`Invalid phone format for Paymentpoint: ${phoneNumber}. Must be 11 digits starting with 0`);
   }
 
   const payload = {
