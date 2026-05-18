@@ -246,7 +246,12 @@ const VTU_PROVIDERS = {
   },
   subpadi: {
     base_url: "https://api.subpadi.com",
-    token: process.env.SUBPADI_TOKEN
+    tokens: {
+      mayconnect: process.env.SUBPADI_TOKEN_MAYCONNECT,
+      teeversh: process.env.SUBPADI_TOKEN_TEEVERSH,
+      sadeeq: process.env.SUBPADI_TOKEN_SADEEQ,
+      bnhabeeb: process.env.SUBPADI_TOKEN_BNHABEEB
+    }
   }
 };
 
@@ -557,29 +562,30 @@ async function callCheapDataHubAirtime(phone, network_id, amount) {
   return res.data;
 }
 
-async function callSubPadiData(phone, network_id, api_plan_id) {
-  const { base_url, token } = VTU_PROVIDERS.subpadi;
-  if (!token) throw new Error("No SubPadi token configured");
+async function callSubPadiData(phone, product_id, company) {
+  const { base_url, tokens } = VTU_PROVIDERS.subpadi;
+  const token = tokens[company];
+  if (!token) throw new Error(`No SubPadi token configured for ${company}`);
+  if (!product_id) throw new Error("No SubPadi product_id configured for this plan");
 
   const res = await axios.post(
     `${base_url}/v1/data/`,
     {
-      mobile_number: String(phone),
-      network: Number(network_id),
-      plan: Number(api_plan_id),
-      Ported_number: false
+      product_id: Number(product_id),
+      phone: String(phone)
     },
     {
       headers: {
         Authorization: `Token ${token}`,
         "Content-Type": "application/json"
       },
-      timeout: 30000
+      timeout: 60000
     }
   );
 
-  if (res.data.Status!== "successful") {
-    throw new Error(res.data.message || res.data.Status || "SubPadi purchase failed");
+  const status = res.data.status || res.data.Status;
+  if (!["success", "successful", "pending"].includes(status?.toLowerCase())) {
+    throw new Error(res.data.message || res.data.error || "SubPadi purchase failed");
   }
   return res.data;
 }
@@ -1243,17 +1249,17 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       return res.status(403).json({ message: "Plan restricted to company users" });
     }
 
-    if (!plan.provider ||!plan.network_id ||!plan.api_plan_id) {
+    // Validation: subpadi uses api_plan_id as product_id, maitama/cheapdatahub use network_id + api_plan_id
+    if (!plan.provider ||!plan.api_plan_id) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
     }
-
-    if ((plan.provider === "cheapdatahub" || plan.provider === "subpadi") && user.company!== "mayconnect") {
+    if (plan.provider!== "subpadi" &&!plan.network_id) {
       await client.query("ROLLBACK");
-      return res.status(403).json({ message: "This provider is only available for Mayconnect" });
+      return res.status(400).json({ message: "Plan not configured with network_id. Contact admin." });
     }
 
-    // Check tier using top_users table instead of is_top_user column
+    // Check tier using top_users table
     const tierRes = await client.query("SELECT 1 FROM top_users WHERE id=$1", [user.id]);
     const isTopUser = tierRes.rows.length > 0;
     const price = isTopUser? (plan.top_price || plan.price) : plan.price;
@@ -1292,7 +1298,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       } else if (plan.provider === "cheapdatahub") {
         await callCheapDataHubData(phone, plan.network_id, plan.api_plan_id);
       } else if (plan.provider === "subpadi") {
-        await callSubPadiData(phone, plan.network_id, plan.api_plan_id);
+        await callSubPadiData(phone, plan.api_plan_id, user.company);
       } else {
         throw new Error("Unknown provider");
       }
