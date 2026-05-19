@@ -1506,7 +1506,106 @@ app.post("/api/change-pin", auth, buyDataLimiter, async (req, res) => {
   }
 });
 
+// 1. ADMIN: Create reset link for a user - multi-domain support
+app.post('/api/admin/create-reset-link', async (req, res) => {
+  const { username, domain } = req.body;
 
+  if (!username) {
+    return res.status(400).json({ message: 'Username or email required' });
+  }
+
+  // Whitelist your domains
+  const allowedDomains = [
+    'mayconnect.com.ng',
+    'teevershdataplug.com.ng',
+    'sadeeqdatahub.com.ng',
+    'bnhabeebdatahub.com.ng'
+  ];
+
+  const targetDomain = domain && allowedDomains.includes(domain)
+   ? domain
+    : 'mayconnect.com.ng'; // default fallback
+
+  try {
+    const result = await pool.query(
+      'SELECT id, email, username FROM users WHERE username = $1 OR email = $1',
+      [username]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const user = result.rows[0];
+    const token = crypto.randomBytes(32).toString('hex');
+    const expires = Date.now() + 1000 * 60 * 60; // 1 hour
+
+    await pool.query(
+      'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE id = $3',
+      [token, expires, user.id]
+    );
+
+    // Build URL with the correct domain
+    const resetUrl = `https://${targetDomain}/reset-password.html?token=${token}&email=${encodeURIComponent(user.email)}`;
+
+    res.json({
+      success: true,
+      message: 'Reset link created',
+      resetUrl: resetUrl,
+      username: user.username,
+      domain: targetDomain,
+      expires_in: '1 hour'
+    });
+
+  } catch (err) {
+    console.error('Create reset link error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// 2. USER: Set new password - same as before, works for all domains
+app.post('/api/reset-password', async (req, res) => {
+  const { email, token, password } = req.body;
+
+  if (!email ||!token ||!password) {
+    return res.status(400).json({ message: 'Email, token and password required' });
+  }
+
+  if (password.length < 6) {
+    return res.status(400).json({ message: 'Password must be at least 6 characters' });
+  }
+
+  try {
+    const result = await pool.query(
+      'SELECT id, reset_token_expires FROM users WHERE email = $1 AND reset_token = $2',
+      [email, token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ message: 'Invalid reset link' });
+    }
+
+    const user = result.rows[0];
+
+    if (Date.now() > Number(user.reset_token_expires)) {
+      return res.status(400).json({ message: 'Reset link expired. Contact support for a new one.' });
+    }
+
+    const hash = await bcrypt.hash(password, 12);
+
+    // Change to password_hash if that's your column name
+    await pool.query(
+      'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2',
+      [hash, user.id]
+    );
+
+    res.json({ success: true, message: 'Password updated successfully' });
+
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 /* ================= ADMIN: WALLET TRANSACTIONS MANAGER ================= */
 
 // GET admin wallet transactions log
