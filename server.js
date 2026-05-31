@@ -281,7 +281,7 @@ const getPaymentPointCreds = (company) => {
 // Make sure PAYMENTPOINT_BASE is declared once at the top of server.js
 // const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE_URL;
 
-async function createPaymentPointAccount(user) {
+async function createPaymentPointAccount(user, kycData = {}) {
   const creds = getPaymentPointCreds(user.company);
 
   console.log(`[PaymentPoint] Creating account for ${user.username}, company: ${user.company}`);
@@ -317,6 +317,25 @@ async function createPaymentPointAccount(user) {
     businessId: creds.businessId
   };
 
+  // NEW: Add KYC fields if provided, with validation
+  if (kycData.bvn || kycData.nin) {
+    if (kycData.bvn) {
+      const cleanBvn = String(kycData.bvn).replace(/\D/g, '');
+      if (cleanBvn.length!== 11) {
+        throw new Error('BVN must be exactly 11 digits');
+      }
+      payload.idType = 'bvn';
+      payload.idNumber = cleanBvn;
+    } else if (kycData.nin) {
+      const cleanNin = String(kycData.nin).replace(/\D/g, '');
+      if (cleanNin.length!== 11) {
+        throw new Error('NIN must be exactly 11 digits');
+      }
+      payload.idType = 'nin';
+      payload.idNumber = cleanNin;
+    }
+  }
+
   const headers = {
     'Authorization': `Bearer ${creds.secretKey}`,
     'api-key': creds.apiKey,
@@ -342,7 +361,7 @@ async function createPaymentPointAccount(user) {
     if (data.customer?.customer_id) {
       await pool.query(
         `UPDATE users SET customer_id=$1 WHERE id=$2`,
-        [data.customer_id, user.id]
+        [data.customer.customer_id, user.id]
       );
     }
 
@@ -925,6 +944,7 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     // Already has Paymentpoint account
     if (user.account_number && user.paymentmethod === "paymentpoint") {
       return res.json({
+        success: true,
         message: "Account already exists",
         account: {
           account_number: user.account_number,
@@ -940,6 +960,18 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       return res.status(400).json({ error: 'Phone number missing or invalid. Update profile first.' });
     }
 
+    // NEW: Get KYC data from request body
+    const { bvn, nin } = req.body;
+
+    // NEW: If no customer_id and no KYC sent, trigger modal
+    if (!bvn &&!nin &&!user.customer_id) {
+      return res.status(400).json({
+        success: false,
+        requireKyc: true,
+        message: 'BVN or NIN required to generate your account number'
+      });
+    }
+
     // Format phone to E.164 for Paymentpoint: 09165644513 -> 2349165644513
     let phoneNumber = user.phone.replace(/\D/g, '');
     if (phoneNumber.startsWith('0')) {
@@ -948,10 +980,13 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       phoneNumber = '234' + phoneNumber;
     }
 
-    // Call Paymentpoint with formatted phone
-    const account = await createPaymentPointAccount({ ...user, phone: phoneNumber });
+    // Call Paymentpoint with formatted phone + KYC data
+    const account = await createPaymentPointAccount(
+      { ...user, phone: phoneNumber }, 
+      { bvn, nin } // Pass KYC here
+    );
     
-    if (!account || !account.account_number) {
+    if (!account ||!account.account_number) {
       console.error('PaymentPoint returned empty account:', account);
       return res.status(500).json({ error: 'Failed to create virtual account. Check server logs.' });
     }
@@ -966,6 +1001,10 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
 
   } catch (error) {
     console.error('DVA Error:', error.response?.data || error.message, error.stack);
+    // Send specific validation errors back to frontend
+    if (error.message.includes('BVN must be') || error.message.includes('NIN must be')) {
+      return res.status(400).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message || 'Failed to create virtual account' });
   }
 });
