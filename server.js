@@ -166,8 +166,8 @@ app.use(cors({
     'https://www.sadeeqdatahub.com.ng',
     'https://bnhabeebdatahub.com.ng',
     'https://www.bnhabeebdatahub.com.ng',
-    'https://mayconnect.com.ng',
-    'https://www.mayconnect.com.ng',
+    'https://mayconnectdataplug.com.ng',
+    'https://www.mayconnectdataplug.com.ng',
     'https://teeversh-frontend.onrender.com',
     'https://mayconnect-frontend.onrender.com',
     'https://sadeeq-frontend.onrender.com',
@@ -610,13 +610,13 @@ const rpName = 'MAYCONNECT';
 
 // Base domain for RP ID. Use the main domain you want all brands to share.
 // If you want isolation per brand, set this dynamically per request.
-const rpID = 'mayconnect.com.ng'; 
+const rpID = 'mayconnectdataplug.com.ng'; 
 
 // Whitelist of allowed hostnames only - no protocol
 const ALLOWED_FRONTENDS = [
   // New custom domains
-  'mayconnect.com.ng',
-  'www.mayconnect.com.ng',
+  'mayconnectdataplug.com.ng',
+  'www.mayconnectdataplug.com.ng',
   'teevershdataplug.com.ng', 
   'www.teevershdataplug.com.ng',
   'sadeeqdatahub.com.ng',
