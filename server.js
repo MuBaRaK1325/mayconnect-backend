@@ -960,17 +960,8 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       return res.status(400).json({ error: 'Phone number missing or invalid. Update profile first.' });
     }
 
-    // NEW: Get KYC data from request body
+    // Get KYC data from request body
     const { bvn, nin } = req.body;
-
-    // NEW: If no customer_id and no KYC sent, trigger modal
-    if (!bvn &&!nin &&!user.customer_id) {
-      return res.status(400).json({
-        success: false,
-        requireKyc: true,
-        message: 'BVN or NIN required to generate your account number'
-      });
-    }
 
     // Format phone to E.164 for Paymentpoint: 09165644513 -> 2349165644513
     let phoneNumber = user.phone.replace(/\D/g, '');
@@ -981,30 +972,83 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     }
 
     // Call Paymentpoint with formatted phone + KYC data
-    const account = await createPaymentPointAccount(
-      { ...user, phone: phoneNumber }, 
-      { bvn, nin } // Pass KYC here
+    const ppResponse = await createPaymentPointAccount(
+      {...user, phone: phoneNumber },
+      { bvn, nin }
     );
-    
+
+    console.log('[PaymentPoint] Full response:', ppResponse);
+
+    // Handle case: Customer created but no bank accounts due to KYC requirement
+    if (ppResponse.status === "success" && (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0)) {
+      const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
+
+      // Check if error indicates KYC/BVN/NIN required
+      if (errorString.includes('kyc') ||
+          errorString.includes('bvn') ||
+          errorString.includes('nin') ||
+          errorString.includes('verification') ||
+          errorString.includes('reserved account')) {
+        return res.status(400).json({
+          success: false,
+          requireKyc: true,
+          error: 'BVN or NIN required to generate your account number'
+        });
+      }
+
+      // Other bank errors
+      return res.status(500).json({
+        error: 'Failed to create virtual account: ' + (ppResponse.errors?.join(", ") || 'Bank temporarily unavailable')
+      });
+    }
+
+    const account = ppResponse.bankAccounts?.[0];
     if (!account ||!account.account_number) {
-      console.error('PaymentPoint returned empty account:', account);
+      console.error('PaymentPoint returned empty account:', ppResponse);
       return res.status(500).json({ error: 'Failed to create virtual account. Check server logs.' });
     }
+
+    // Save account details to user
+    await updateUser(userId, {
+      account_number: account.account_number,
+      bank_name: account.bank_name,
+      account_name: account.account_name,
+      paymentmethod: "paymentpoint",
+      customer_id: ppResponse.customer?.customer_id,
+      bvn: bvn || user.bvn,
+      nin: nin || user.nin
+    });
 
     res.json({
       success: true,
       account_number: account.account_number,
       bank_name: account.bank_name,
       account_name: account.account_name,
+      reference: account.reference,
       method: "paymentpoint"
     });
 
   } catch (error) {
     console.error('DVA Error:', error.response?.data || error.message, error.stack);
+
+    // Catch KYC errors thrown from createPaymentPointAccount
+    const errMsg = error.message?.toLowerCase() || "";
+    if (errMsg.includes('bvn') ||
+        errMsg.includes('nin') ||
+        errMsg.includes('kyc') ||
+        errMsg.includes('verification')) {
+      return res.status(400).json({
+        success: false,
+        requireKyc: true,
+        error: 'BVN or NIN required to generate your account number'
+      });
+    }
+
     // Send specific validation errors back to frontend
     if (error.message.includes('BVN must be') || error.message.includes('NIN must be')) {
       return res.status(400).json({ error: error.message });
     }
+
     res.status(500).json({ error: error.message || 'Failed to create virtual account' });
   }
 });
