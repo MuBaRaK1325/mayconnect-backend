@@ -891,33 +891,28 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
   }
 });
 
-/* ================= DVA ROUTE ================= */
+/* ================= DVA ROUTE - FINAL VERSION ================= */
 app.post('/api/wallet/create-dva', auth, async (req, res) => {
   try {
     const userId = req.user.id;
     const user = await getUser(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // Already has Paymentpoint account
+    // Already has account
     if (user.account_number && user.paymentmethod === "paymentpoint") {
       return res.json({
         success: true,
         message: "Account already exists",
-        account: {
-          account_number: user.account_number,
-          bank_name: user.bank_name,
-          account_name: user.account_name
-        },
-        method: "paymentpoint"
+        account_number: user.account_number,
+        bank_name: user.bank_name,
+        account_name: user.account_name
       });
     }
 
-    // Validate phone
     if (!user.phone || user.phone.trim().length < 10) {
       return res.status(400).json({ error: 'Phone number missing or invalid. Update profile first.' });
     }
 
-    // Get KYC data from request body
     const { bvn, nin } = req.body;
 
     // Format phone to E.164 for Paymentpoint: 09165644513 -> 2349165644513
@@ -928,80 +923,81 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       phoneNumber = '234' + phoneNumber;
     }
 
-    // Call Paymentpoint with formatted phone + KYC data
+    // Call PaymentPoint
     const ppResponse = await createPaymentPointAccount(
       {...user, phone: phoneNumber },
       { bvn, nin }
     );
 
-    console.log('[PaymentPoint] Full response:', ppResponse);
+    console.log('[DVA Route] PP Response:', JSON.stringify(ppResponse));
 
-    // Handle case: Customer created but no bank accounts due to KYC requirement
+    // KEY CHECK: Customer created but no bank accounts = KYC required
     if (ppResponse.status === "success" && (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0)) {
       const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
 
-      // Check if error indicates KYC/BVN/NIN required
+      // Check if errors indicate KYC/BVN/NIN/verification needed
       if (errorString.includes('kyc') ||
           errorString.includes('bvn') ||
           errorString.includes('nin') ||
           errorString.includes('verification') ||
-          errorString.includes('reserved account')) {
-        return res.status(400).json({
+          errorString.includes('reserved account') ||
+          errorString.includes('failed to create')) {
+
+        console.log('[DVA Route] KYC required - triggering modal');
+        return res.status(200).json({
           success: false,
           requireKyc: true,
-          error: 'BVN or NIN required to generate your account number'
+          message: 'BVN or NIN required to generate your account number'
         });
       }
 
-      // Other bank errors
-      return res.status(500).json({
-        error: 'Failed to create virtual account: ' + (ppResponse.errors?.join(", ") || 'Bank temporarily unavailable')
+      // Other errors
+      return res.status(400).json({
+        success: false,
+        error: ppResponse.errors?.join("; ") || 'Bank temporarily unavailable'
       });
     }
 
+    // Success - has bank accounts
     const account = ppResponse.bankAccounts?.[0];
-    if (!account ||!account.account_number) {
-      console.error('PaymentPoint returned empty account:', ppResponse);
-      return res.status(500).json({ error: 'Failed to create virtual account. Check server logs.' });
+    if (!account ||!account.accountNumber) {
+      return res.status(500).json({ error: 'PaymentPoint returned no account details' });
     }
 
-    // Save account details to user
-    await updateUser(userId, {
-      account_number: account.account_number,
-      bank_name: account.bank_name,
-      account_name: account.account_name,
-      paymentmethod: "paymentpoint",
-      customer_id: ppResponse.customer?.customer_id,
-      bvn: bvn || user.bvn,
-      nin: nin || user.nin
-    });
+    // Save to DB
+    await pool.query(
+      `UPDATE users SET
+        account_number=$1,
+        account_name=$2,
+        bank_name=$3,
+        paymentmethod='paymentpoint',
+        customer_id=$4,
+        bvn=$5,
+        nin=$6
+       WHERE id=$7`,
+      [
+        account.accountNumber,
+        account.accountName,
+        account.bankName,
+        ppResponse.customer?.customer_id,
+        bvn || null,
+        nin || null,
+        userId
+      ]
+    );
 
-    res.json({
+    return res.json({
       success: true,
-      account_number: account.account_number,
-      bank_name: account.bank_name,
-      account_name: account.account_name,
-      reference: account.reference,
+      account_number: account.accountNumber,
+      bank_name: account.bankName,
+      account_name: account.accountName,
       method: "paymentpoint"
     });
 
   } catch (error) {
-    console.error('DVA Error:', error.response?.data || error.message, error.stack);
+    console.error('DVA Error:', error.message, error.stack);
 
-    // Catch KYC errors thrown from createPaymentPointAccount
-    const errMsg = error.message?.toLowerCase() || "";
-    if (errMsg.includes('bvn') ||
-        errMsg.includes('nin') ||
-        errMsg.includes('kyc') ||
-        errMsg.includes('verification')) {
-      return res.status(400).json({
-        success: false,
-        requireKyc: true,
-        error: 'BVN or NIN required to generate your account number'
-      });
-    }
-
-    // Send specific validation errors back to frontend
+    // Catch validation errors from createPaymentPointAccount
     if (error.message.includes('BVN must be') || error.message.includes('NIN must be')) {
       return res.status(400).json({ error: error.message });
     }
