@@ -276,10 +276,7 @@ const getPaymentPointCreds = (company) => {
     secretKey: (process.env[`PAYMENTPOINT_${c.toUpperCase()}_SECRET_KEY`] || "").trim(),
     businessId: (process.env[`PAYMENTPOINT_${c.toUpperCase()}_BUSINESS_ID`] || "").trim()
   };
-}
-
-// Make sure PAYMENTPOINT_BASE is declared once at the top of server.js
-// const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE_URL;
+};
 
 async function createPaymentPointAccount(user, kycData = {}) {
   const creds = getPaymentPointCreds(user.company);
@@ -352,18 +349,13 @@ async function createPaymentPointAccount(user, kycData = {}) {
     );
 
     console.log('[PaymentPoint] Full response:', JSON.stringify(data));
-
-    // Return full response - let DVA route handle KYC vs success logic
     return data;
 
   } catch (err) {
     console.log('[PaymentPoint] Error response:', err.response?.data || err.message);
-
-    // If PaymentPoint returned error data, return it instead of throwing
     if (err.response?.data) {
       return err.response.data;
     }
-
     throw err;
   }
 }
@@ -944,7 +936,6 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     if (ppResponse.status === "success" && (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0)) {
       const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
 
-      // Check if errors indicate KYC/BVN/NIN/verification needed
       if (errorString.includes('kyc') ||
           errorString.includes('bvn') ||
           errorString.includes('nin') ||
@@ -960,7 +951,6 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
         });
       }
 
-      // Other errors - no accounts and not KYC related
       return res.status(400).json({
         success: false,
         error: ppResponse.errors?.join("; ") || 'Bank temporarily unavailable. Try again later.'
@@ -1010,7 +1000,6 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
   } catch (error) {
     console.error('DVA Error:', error.message, error.stack);
 
-    // Catch validation errors from createPaymentPointAccount helper
     if (error.message.includes('BVN must be') ||
         error.message.includes('NIN must be') ||
         error.message.includes('Phone number') ||
