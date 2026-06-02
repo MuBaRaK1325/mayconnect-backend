@@ -339,11 +339,14 @@ async function createPaymentPointAccount(user, kycData = {}) {
     'Content-Type': 'application/json'
   };
 
-  console.log('[PaymentPoint] Sending payload:', JSON.stringify(payload));
+  console.log('[PaymentPoint] Sending payload:', JSON.stringify({
+   ...payload,
+    idNumber: payload.idNumber? '***' + payload.idNumber.slice(-4) : undefined
+  }));
 
   try {
     const { data } = await axios.post(
-      `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
+      `${PAYMENTPOINT_BASE}/api/v2/createVirtualAccount`, // CHANGE: v1 -> v2
       payload,
       { headers, timeout: 30000 }
     );
