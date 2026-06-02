@@ -892,7 +892,7 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
 });
 
 /* ================= DVA ROUTE - FINAL VERSION ================= */
-const { createPaymentPointAccount, getUser } = require('./helpers'); // Import from helpers
+const { createPaymentPointAccount, getUser } = require('./helpers');
 
 app.post('/api/wallet/create-dva', auth, async (req, res) => {
   try {
