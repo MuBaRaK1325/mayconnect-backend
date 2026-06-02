@@ -349,13 +349,34 @@ async function createPaymentPointAccount(user, kycData = {}) {
     );
 
     console.log('[PaymentPoint] Full response:', JSON.stringify(data));
+
+    // Log specific case: customer created but no bank accounts
+    if (data.status === "success" && (!data.bankAccounts || data.bankAccounts.length === 0)) {
+      console.log('[PaymentPoint] WARNING: Customer created but no bank accounts. Errors:', data.errors);
+    }
+
     return data;
 
   } catch (err) {
-    console.log('[PaymentPoint] Error response:', err.response?.data || err.message);
+    console.log('[PaymentPoint] Error details:', {
+      message: err.message,
+      code: err.code,
+      status: err.response?.status,
+      data: err.response?.data
+    });
+
+    if (err.code === 'ECONNABORTED') {
+      throw new Error('PaymentPoint API timeout. Customer may have been created. Please try again in 30 seconds.');
+    }
+
+    if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
+      throw new Error('Cannot connect to PaymentPoint. Check PAYMENTPOINT_BASE URL.');
+    }
+
     if (err.response?.data) {
       return err.response.data;
     }
+
     throw err;
   }
 }
