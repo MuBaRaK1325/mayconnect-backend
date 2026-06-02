@@ -282,55 +282,16 @@ async function createPaymentPointAccount(user, kycData = {}) {
   const creds = getPaymentPointCreds(user.company);
 
   console.log(`[PaymentPoint] Creating account for ${user.username}, company: ${user.company}`);
-  console.log('[PaymentPoint] Raw user.phone from DB:', JSON.stringify(user.phone));
 
   if (!creds.apiKey ||!creds.secretKey ||!creds.businessId) {
     throw new Error(`PaymentPoint not configured for company: ${user.company}`);
   }
-  if (!user.phone) {
-    throw new Error("Phone number is NULL/empty in DB.");
-  }
-  if (!user.email) {
-    throw new Error("Email is NULL/empty in DB.");
-  }
 
-  // Normalize to 11 digits starting with 0 for Paymentpoint
   let phoneNumber = String(user.phone).replace(/\D/g, '');
-  if (phoneNumber.startsWith('234')) {
-    phoneNumber = '0' + phoneNumber.slice(3);
-  }
-  if (phoneNumber.length === 10) {
-    phoneNumber = '0' + phoneNumber;
-  }
+  if (phoneNumber.startsWith('234')) phoneNumber = '0' + phoneNumber.slice(3);
+  if (phoneNumber.length === 10) phoneNumber = '0' + phoneNumber;
   if (phoneNumber.length!== 11 ||!phoneNumber.startsWith('0')) {
-    throw new Error(`Invalid phone format for Paymentpoint: ${phoneNumber}. Must be 11 digits starting with 0`);
-  }
-
-  const payload = {
-    email: user.email.trim(),
-    name: user.username.trim(),
-    phoneNumber: phoneNumber,
-    bankCode: ['20946', '20897'], // 20946=Palmpay, 20897=Sterling
-    businessId: creds.businessId
-  };
-
-  // Add KYC fields if provided, with validation
-  if (kycData.bvn || kycData.nin) {
-    if (kycData.bvn) {
-      const cleanBvn = String(kycData.bvn).replace(/\D/g, '');
-      if (cleanBvn.length!== 11) {
-        throw new Error('BVN must be exactly 11 digits');
-      }
-      payload.idType = 'bvn';
-      payload.idNumber = cleanBvn;
-    } else if (kycData.nin) {
-      const cleanNin = String(kycData.nin).replace(/\D/g, '');
-      if (cleanNin.length!== 11) {
-        throw new Error('NIN must be exactly 11 digits');
-      }
-      payload.idType = 'nin';
-      payload.idNumber = cleanNin;
-    }
+    throw new Error(`Invalid phone format: ${phoneNumber}`);
   }
 
   const headers = {
@@ -339,49 +300,74 @@ async function createPaymentPointAccount(user, kycData = {}) {
     'Content-Type': 'application/json'
   };
 
-  console.log('[PaymentPoint] Sending payload:', JSON.stringify({
-   ...payload,
-    idNumber: payload.idNumber? '***' + payload.idNumber.slice(-4) : undefined
-  }));
+  // STEP 1: Create customer with KYC if provided
+  let customerId = null;
+  if (kycData.bvn || kycData.nin) {
+    const customerPayload = {
+      email: user.email.trim(),
+      name: user.username.trim(),
+      phoneNumber: phoneNumber,
+      businessId: creds.businessId
+    };
 
-  try {
-    const { data } = await axios.post(
-      `${PAYMENTPOINT_BASE}/api/v2/createVirtualAccount`, // CHANGE: v1 -> v2
-      payload,
-      { headers, timeout: 30000 }
-    );
-
-    console.log('[PaymentPoint] Full response:', JSON.stringify(data));
-
-    // Log specific case: customer created but no bank accounts
-    if (data.status === "success" && (!data.bankAccounts || data.bankAccounts.length === 0)) {
-      console.log('[PaymentPoint] WARNING: Customer created but no bank accounts. Errors:', data.errors);
+    if (kycData.bvn) {
+      const cleanBvn = String(kycData.bvn).replace(/\D/g, '');
+      if (cleanBvn.length!== 11) throw new Error('BVN must be 11 digits');
+      customerPayload.idType = 'bvn';
+      customerPayload.idNumber = cleanBvn;
+    } else if (kycData.nin) {
+      const cleanNin = String(kycData.nin).replace(/\D/g, '');
+      if (cleanNin.length!== 11) throw new Error('NIN must be 11 digits');
+      customerPayload.idType = 'nin';
+      customerPayload.idNumber = cleanNin;
     }
 
-    return data;
+    console.log('[PaymentPoint] Creating customer with KYC:', {...customerPayload, idNumber: '***' + customerPayload.idNumber.slice(-4) });
 
-  } catch (err) {
-    console.log('[PaymentPoint] Error details:', {
-      message: err.message,
-      code: err.code,
-      status: err.response?.status,
-      data: err.response?.data
-    });
-
-    if (err.code === 'ECONNABORTED') {
-      throw new Error('PaymentPoint API timeout. Customer may have been created. Please try again in 30 seconds.');
+    try {
+      const { data: custRes } = await axios.post(
+        `${PAYMENTPOINT_BASE}/api/v1/customer/create`,
+        customerPayload,
+        { headers, timeout: 20000 }
+      );
+      customerId = custRes.customer_id || custRes.data?.customer_id;
+      console.log('[PaymentPoint] Customer created:', customerId);
+    } catch (err) {
+      // Customer might already exist - try to fetch
+      if (err.response?.data?.message?.includes('already exists')) {
+        console.log('[PaymentPoint] Customer exists, fetching...');
+        const { data: fetchRes } = await axios.get(
+          `${PAYMENTPOINT_BASE}/api/v1/customer?email=${user.email}`,
+          { headers }
+        );
+        customerId = fetchRes.customer_id || fetchRes.data?.customer_id;
+      } else {
+        throw err;
+      }
     }
-
-    if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
-      throw new Error('Cannot connect to PaymentPoint. Check PAYMENTPOINT_BASE URL.');
-    }
-
-    if (err.response?.data) {
-      return err.response.data;
-    }
-
-    throw err;
   }
+
+  // STEP 2: Create virtual account
+  const accountPayload = {
+    email: user.email.trim(),
+    name: user.username.trim(),
+    phoneNumber: phoneNumber,
+    bankCode: ['20946', '20897'],
+    businessId: creds.businessId
+  };
+
+  if (customerId) accountPayload.customer_id = customerId;
+
+  console.log('[PaymentPoint] Creating DVA with payload:', accountPayload);
+
+  const { data } = await axios.post(
+    `${PAYMENTPOINT_BASE}/api/v1/createVirtualAccount`,
+    accountPayload,
+    { headers, timeout: 30000 }
+  );
+
+  console.log('[PaymentPoint] Full response:', JSON.stringify(data));
+  return data;
 }
 
 /* ================= WEBSOCKET SETUP ================= */
