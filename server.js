@@ -360,13 +360,6 @@ async function createPaymentPointAccount(user, kycData = {}) {
   }
 }
 
-module.exports = {
-  getCompanyAdmin,
-  getUser,
-  getPaymentPointCreds,
-  createPaymentPointAccount
-};
-
 /* ================= WEBSOCKET SETUP ================= */
 const clients = new Map();
 wss.on("connection", (ws, req) => {
@@ -860,32 +853,61 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
   const reference = "FUND-" + uuidv4();
 
   try {
-    let account = await pool.query(
+    let accountData = await pool.query(
       "SELECT account_number, bank_name, account_name, paymentmethod FROM users WHERE id=$1",
       [user.id]
     );
 
-    if (!account.rows[0]?.account_number || account.rows[0].paymentmethod!== "paymentpoint") {
-      account = { rows: [await createPaymentPointAccount(user)] };
+    if (!accountData.rows[0]?.account_number || accountData.rows[0].paymentmethod!== "paymentpoint") {
+      const ppResponse = await createPaymentPointAccount(user);
+
+      if (ppResponse.status === "success" && ppResponse.bankAccounts?.length > 0) {
+        const newAccount = ppResponse.bankAccounts[0];
+        await pool.query(
+          `UPDATE users SET
+            account_number = $1,
+            account_name = $2,
+            bank_name = $3,
+            paymentmethod = 'paymentpoint',
+            customer_id = $4
+           WHERE id = $5`,
+          [
+            newAccount.accountNumber,
+            newAccount.accountName,
+            newAccount.bankName,
+            ppResponse.customer?.customer_id || null,
+            user.id
+          ]
+        );
+
+        accountData = {
+          rows: [{
+            account_number: newAccount.accountNumber,
+            bank_name: newAccount.bankName,
+            account_name: newAccount.accountName,
+            paymentmethod: "paymentpoint"
+          }]
+        };
+      } else {
+        throw new Error(ppResponse.errors?.join("; ") || "Failed to create virtual account");
+      }
     }
 
     res.json({
-      bank_name: account.rows[0].bank_name,
-      account_number: account.rows[0].account_number,
-      account_name: account.rows[0].account_name,
+      bank_name: accountData.rows[0].bank_name,
+      account_number: accountData.rows[0].account_number,
+      account_name: accountData.rows[0].account_name,
       reference,
       method: "paymentpoint"
     });
 
   } catch (e) {
     console.log("FUND INIT ERROR:", e.response?.data || e.message);
-    res.status(500).json({ message: "Unable to initialize payment" });
+    res.status(500).json({ message: e.message || "Unable to initialize payment" });
   }
 });
 
 /* ================= DVA ROUTE - FINAL VERSION ================= */
-const { createPaymentPointAccount, getUser } = require('./helpers');
-
 app.post('/api/wallet/create-dva', auth, async (req, res) => {
   try {
     const userId = req.user.id;
@@ -1039,7 +1061,26 @@ app.post("/api/signup", async (req, res) => {
     try {
       const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
       if (paymentpointCompanies.includes(userCompany.toLowerCase())) {
-        await createPaymentPointAccount(user.rows[0]);
+        const ppResponse = await createPaymentPointAccount(user.rows[0]);
+        if (ppResponse.status === "success" && ppResponse.bankAccounts?.length > 0) {
+          const account = ppResponse.bankAccounts[0];
+          await pool.query(
+            `UPDATE users SET
+              account_number = $1,
+              account_name = $2,
+              bank_name = $3,
+              paymentmethod = 'paymentpoint',
+              customer_id = $4
+             WHERE id = $5`,
+            [
+              account.accountNumber,
+              account.accountName,
+              account.bankName,
+              ppResponse.customer?.customer_id || null,
+              user.rows[0].id
+            ]
+          );
+        }
       }
     } catch (e) {
       console.log("ACCOUNT CREATE ERROR ON SIGNUP - continuing anyway:", e.message);
@@ -1048,7 +1089,8 @@ app.post("/api/signup", async (req, res) => {
     const updatedUser = await getUser(user.rows[0].id);
     const token = jwt.sign(
       { id: updatedUser.id, username: updatedUser.username, is_admin: updatedUser.is_admin, company: updatedUser.company },
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
     );
     res.json({ token, message: "Signup successful" });
   } catch (e) {
@@ -1057,6 +1099,7 @@ app.post("/api/signup", async (req, res) => {
     res.status(500).json({ message: "Signup failed" });
   }
 });
+
 /* ================= LOGIN ================= */
 app.post("/api/login", loginLimiter, async (req, res) => {
   try {
@@ -1108,6 +1151,7 @@ app.post("/api/login", loginLimiter, async (req, res) => {
     res.status(500).json({ message: "Login failed. Try again later." });
   }
 });
+
 /* ================= USER INFO - WITH TIER CHECK ================= */
 app.get("/api/me", auth, async (req, res) => {
   try {
@@ -1118,8 +1162,27 @@ app.get("/api/me", auth, async (req, res) => {
     const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
     if (!user.rows[0].account_number && paymentpointCompanies.includes(user.rows[0].company.toLowerCase()) && user.rows[0].phone) {
       try {
-        await createPaymentPointAccount(user.rows[0]);
-        user = await pool.query("SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet, account_number, bank_name, account_name FROM users WHERE id = $1", [req.user.id]);
+        const ppResponse = await createPaymentPointAccount(user.rows[0]);
+        if (ppResponse.status === "success" && ppResponse.bankAccounts?.length > 0) {
+          const account = ppResponse.bankAccounts[0];
+          await pool.query(
+            `UPDATE users SET
+              account_number = $1,
+              account_name = $2,
+              bank_name = $3,
+              paymentmethod = 'paymentpoint',
+              customer_id = $4
+             WHERE id = $5`,
+            [
+              account.accountNumber,
+              account.accountName,
+              account.bankName,
+              ppResponse.customer?.customer_id || null,
+              user.rows[0].id
+            ]
+          );
+          user = await pool.query("SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet, account_number, bank_name, account_name FROM users WHERE id = $1", [req.user.id]);
+        }
       } catch (e) {
         console.log("Account creation failed on /me:", e.message);
       }
@@ -1140,6 +1203,7 @@ app.get("/api/me", auth, async (req, res) => {
     res.status(500).json({ message: "Failed to fetch user" });
   }
 });
+
 /* ================= GENERATE ACCOUNT ================= */
 app.post("/api/generate-account", auth, async (req, res) => {
   try {
@@ -1166,22 +1230,36 @@ app.post("/api/generate-account", auth, async (req, res) => {
       return res.status(400).json({ message: "Account creation not supported for this company" });
     }
 
-    // Format phone to E.164 for Paymentpoint
-    let phoneNumber = user.phone.replace(/\D/g, '');
-    if (phoneNumber.startsWith('0')) {
-      phoneNumber = '234' + phoneNumber.slice(1);
-    } else if (!phoneNumber.startsWith('234')) {
-      phoneNumber = '234' + phoneNumber;
+    const ppResponse = await createPaymentPointAccount(user);
+
+    if (ppResponse.status!== "success" ||!ppResponse.bankAccounts?.length) {
+      throw new Error(ppResponse.errors?.join("; ") || "Failed to create virtual account");
     }
 
-    const acc = await createPaymentPointAccount({ ...user, phone: phoneNumber });
+    const account = ppResponse.bankAccounts[0];
+    await pool.query(
+      `UPDATE users SET
+        account_number = $1,
+        account_name = $2,
+        bank_name = $3,
+        paymentmethod = 'paymentpoint',
+        customer_id = $4
+       WHERE id = $5`,
+      [
+        account.accountNumber,
+        account.accountName,
+        account.bankName,
+        ppResponse.customer?.customer_id || null,
+        user.id
+      ]
+    );
 
     res.json({
       message: "Account created successfully",
       account: {
-        account_number: acc.account_number,
-        bank_name: acc.bank_name,
-        account_name: acc.account_name
+        account_number: account.accountNumber,
+        bank_name: account.bankName,
+        account_name: account.accountName
       },
       user_id: user.id,
       company: user.company
