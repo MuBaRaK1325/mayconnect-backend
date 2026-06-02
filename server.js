@@ -898,9 +898,9 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     const user = await getUser(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // Already has account
+    // 1. Already has account
     if (user.account_number && user.paymentmethod === "paymentpoint") {
-      return res.json({
+      return res.status(200).json({
         success: true,
         message: "Account already exists",
         account_number: user.account_number,
@@ -909,13 +909,22 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       });
     }
 
+    // 2. Validate phone
     if (!user.phone || user.phone.trim().length < 10) {
-      return res.status(400).json({ error: 'Phone number missing or invalid. Update profile first.' });
+      return res.status(400).json({
+        error: 'Phone number missing or invalid. Update your profile first.'
+      });
+    }
+
+    if (!user.email) {
+      return res.status(400).json({
+        error: 'Email missing. Update your profile first.'
+      });
     }
 
     const { bvn, nin } = req.body;
 
-    // Format phone to E.164 for Paymentpoint: 09165644513 -> 2349165644513
+    // 3. Format phone to E.164 for PaymentPoint: 09165644513 -> 2349165644513
     let phoneNumber = user.phone.replace(/\D/g, '');
     if (phoneNumber.startsWith('0')) {
       phoneNumber = '234' + phoneNumber.slice(1);
@@ -923,7 +932,7 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       phoneNumber = '234' + phoneNumber;
     }
 
-    // Call PaymentPoint
+    // 4. Call PaymentPoint - only use banks you have enabled
     const ppResponse = await createPaymentPointAccount(
       {...user, phone: phoneNumber },
       { bvn, nin }
@@ -931,7 +940,7 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
 
     console.log('[DVA Route] PP Response:', JSON.stringify(ppResponse));
 
-    // KEY CHECK: Customer created but no bank accounts = KYC required
+    // 5. KEY CHECK: Customer created but no bank accounts = KYC required
     if (ppResponse.status === "success" && (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0)) {
       const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
 
@@ -951,42 +960,46 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
         });
       }
 
-      // Other errors
+      // Other errors - no accounts and not KYC related
       return res.status(400).json({
         success: false,
-        error: ppResponse.errors?.join("; ") || 'Bank temporarily unavailable'
+        error: ppResponse.errors?.join("; ") || 'Bank temporarily unavailable. Try again later.'
       });
     }
 
-    // Success - has bank accounts
+    // 6. Success - has bank accounts even if some banks failed
     const account = ppResponse.bankAccounts?.[0];
     if (!account ||!account.accountNumber) {
-      return res.status(500).json({ error: 'PaymentPoint returned no account details' });
+      return res.status(500).json({
+        success: false,
+        error: 'PaymentPoint returned no account details'
+      });
     }
 
-    // Save to DB
+    // 7. Save to DB
     await pool.query(
       `UPDATE users SET
-        account_number=$1,
-        account_name=$2,
-        bank_name=$3,
-        paymentmethod='paymentpoint',
-        customer_id=$4,
-        bvn=$5,
-        nin=$6
-       WHERE id=$7`,
+        account_number = $1,
+        account_name = $2,
+        bank_name = $3,
+        paymentmethod = 'paymentpoint',
+        customer_id = $4,
+        bvn = COALESCE($5, bvn),
+        nin = COALESCE($6, nin),
+        updated_at = NOW()
+       WHERE id = $7`,
       [
         account.accountNumber,
         account.accountName,
         account.bankName,
-        ppResponse.customer?.customer_id,
+        ppResponse.customer?.customer_id || null,
         bvn || null,
         nin || null,
         userId
       ]
     );
 
-    return res.json({
+    return res.status(200).json({
       success: true,
       account_number: account.accountNumber,
       bank_name: account.bankName,
@@ -998,13 +1011,66 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     console.error('DVA Error:', error.message, error.stack);
 
     // Catch validation errors from createPaymentPointAccount
-    if (error.message.includes('BVN must be') || error.message.includes('NIN must be')) {
-      return res.status(400).json({ error: error.message });
+    if (error.message.includes('BVN must be') ||
+        error.message.includes('NIN must be') ||
+        error.message.includes('Phone number') ||
+        error.message.includes('Email')) {
+      return res.status(400).json({
+        success: false,
+        error: error.message
+      });
     }
 
-    res.status(500).json({ error: error.message || 'Failed to create virtual account' });
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to create virtual account. Please try again.'
+    });
   }
 });
+
+// ================= createPaymentPointAccount helper =================
+async function createPaymentPointAccount(user, { bvn, nin }) {
+  const { PAYMENTPOINT_SECRET_KEY, PAYMENTPOINT_BUSINESS_ID } = process.env;
+
+  if (!PAYMENTPOINT_SECRET_KEY ||!PAYMENTPOINT_BUSINESS_ID) {
+    throw new Error('PaymentPoint credentials not configured');
+  }
+
+  // Only request banks that are active on your PaymentPoint account
+  const bankCodes = ["20946"]; // Palmpay only. Add more if enabled: "20897" for Moniepoint
+
+  const payload = {
+    email: user.email,
+    name: user.username || user.name,
+    phoneNumber: user.phone,
+    bankCode: bankCodes,
+    businessId: PAYMENTPOINT_BUSINESS_ID
+  };
+
+  // Add BVN/NIN if provided
+  if (bvn) payload.bvn = bvn;
+  if (nin) payload.nin = nin;
+
+  console.log('[PaymentPoint] Sending payload:', JSON.stringify(payload));
+
+  const response = await fetch('https://api.paymentpoint.co/api/v1/customer', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${PAYMENTPOINT_SECRET_KEY}`
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json();
+  console.log('[PaymentPoint] Full response:', JSON.stringify(data));
+
+  if (!response.ok && data.status!== "success") {
+    throw new Error(data.message || 'PaymentPoint API error');
+  }
+
+  return data;
+}
 
 /* ================= SIGNUP ================= */
 app.post("/api/signup", async (req, res) => {
