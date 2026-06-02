@@ -971,34 +971,68 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     const { bvn, nin } = req.body;
 
     // 3. Call helper - it handles phone formatting + multi-company creds
-    const ppResponse = await createPaymentPointAccount(user, { bvn, nin });
+    const creds = getPaymentPointCreds(user.company);
+    let ppResponse = await createPaymentPointAccount(user, { bvn, nin });
 
     console.log('[DVA Route] PP Response:', JSON.stringify(ppResponse));
 
-    // 4. KEY CHECK: Customer created but no bank accounts = KYC required
-    // Keep this as KYC - PaymentPoint may create account async on retry
+    // 4. KEY: If success but no accounts, PP v1 may be provisioning async. Wait + refetch once
     if (ppResponse.status === "success" && (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0)) {
       const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
 
-      if (errorString.includes('kyc') ||
-          errorString.includes('bvn') ||
-          errorString.includes('nin') ||
-          errorString.includes('verification') ||
-          errorString.includes('reserved account') ||
-          errorString.includes('failed to create')) {
+      // Only retry if error suggests pending/reserved account, not hard KYC fail
+      if (errorString.includes('reserved account') || errorString.includes('failed to create')) {
+        console.log('[DVA Route] No accounts yet, waiting 3s for PP provisioning...');
+        await new Promise(r => setTimeout(r, 3000));
 
-        console.log('[DVA Route] KYC required - triggering modal');
-        return res.status(200).json({
-          success: false,
-          requireKyc: true,
-          message: 'BVN or NIN required to generate your account number'
-        });
+        try {
+          const { data: fetchRes } = await axios.get(
+            `${PAYMENTPOINT_BASE}/api/v1/customer?email=${encodeURIComponent(user.email)}`,
+            {
+              headers: {
+                'Authorization': `Bearer ${creds.secretKey}`,
+                'api-key': creds.apiKey,
+                'Content-Type': 'application/json'
+              },
+              timeout: 15000
+            }
+          );
+          console.log('[DVA Route] Refetch response:', JSON.stringify(fetchRes));
+
+          // If refetch has accounts, use it
+          if (fetchRes.bankAccounts?.length > 0) {
+            ppResponse = fetchRes;
+          }
+        } catch (e) {
+          console.log('[DVA Route] Refetch failed:', e.message);
+        }
       }
 
-      return res.status(400).json({
-        success: false,
-        error: ppResponse.errors?.join("; ") || 'Bank temporarily unavailable. Try again later.'
-      });
+      // Re-check after refetch attempt
+      if (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0) {
+        const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
+
+        if (errorString.includes('kyc') ||
+            errorString.includes('bvn') ||
+            errorString.includes('nin') ||
+            errorString.includes('verification') ||
+            errorString.includes('reserved account') ||
+            errorString.includes('failed to create')) {
+
+          console.log('[DVA Route] KYC required or pending - triggering modal');
+          return res.status(200).json({
+            success: false,
+            requireKyc: true,
+            message: 'BVN or NIN required. If already submitted, please wait 10 seconds and try again.',
+            pp: ppResponse
+          });
+        }
+
+        return res.status(400).json({
+          success: false,
+          error: ppResponse.errors?.join("; ") || 'Bank temporarily unavailable. Try again later.'
+        });
+      }
     }
 
     // 5. Success - has bank accounts even if some banks failed
