@@ -975,16 +975,24 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
 
     console.log('[DVA Route] PP Response:', JSON.stringify(ppResponse));
 
-    // 4. KEY CHECK: Customer created but no bank accounts = KYC required
+    // 4. KEY CHECK: Customer created but no bank accounts
     if (ppResponse.status === "success" && (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0)) {
       const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
 
+      // 4a. Business not DVA-enabled - don't ask for KYC
+      if (errorString.includes('reserved account') || errorString.includes('failed to create reserved')) {
+        console.log('[DVA Route] Business not DVA enabled');
+        return res.status(400).json({
+          success: false,
+          error: 'Account creation temporarily unavailable for your company. Our team has been notified.'
+        });
+      }
+
+      // 4b. Actual KYC required
       if (errorString.includes('kyc') ||
           errorString.includes('bvn') ||
           errorString.includes('nin') ||
-          errorString.includes('verification') ||
-          errorString.includes('reserved account') ||
-          errorString.includes('failed to create')) {
+          errorString.includes('verification')) {
 
         console.log('[DVA Route] KYC required - triggering modal');
         return res.status(200).json({
@@ -1047,7 +1055,8 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
         error.message.includes('NIN must be') ||
         error.message.includes('Phone number') ||
         error.message.includes('Email') ||
-        error.message.includes('PaymentPoint not configured')) {
+        error.message.includes('PaymentPoint not configured') ||
+        error.message.includes('timeout')) {
       return res.status(400).json({
         success: false,
         error: error.message
@@ -1101,6 +1110,8 @@ app.post("/api/signup", async (req, res) => {
               user.rows[0].id
             ]
           );
+        } else if (ppResponse.errors?.some(e => e.toLowerCase().includes('reserved account'))) {
+          console.log("SIGNUP: DVA not enabled for company", userCompany);
         }
       }
     } catch (e) {
