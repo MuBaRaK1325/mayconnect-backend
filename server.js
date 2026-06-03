@@ -252,6 +252,15 @@ const VTU_PROVIDERS = {
       sadeeq: process.env.SUBPADI_TOKEN_SADEEQ,
       bnhabeeb: process.env.SUBPADI_TOKEN_BNHABEEB
     }
+  },
+  arrahuz: {
+    base_url: "https://alrahuzdata.com.ng",
+    tokens: {
+      mayconnect: process.env.ARRAHUZ_TOKEN_MAYCONNECT,
+      teeversh: process.env.ARRAHUZ_TOKEN_TEEVERSH,
+      sadeeq: process.env.ARRAHUZ_TOKEN_SADEEQ,
+      bnhabeeb: process.env.ARRAHUZ_TOKEN_BNHABEEB
+    }
   }
 };
 
@@ -570,6 +579,75 @@ async function callSubPadiData(phone, product_id, company) {
     throw new Error(res.data.message || res.data.error || "SubPadi purchase failed");
   }
   return res.data;
+}
+
+// NEW: Arrahuz Data
+async function callArrahuzData(phone, network_id, api_plan_id, company) {
+  const { base_url, tokens } = VTU_PROVIDERS.arrahuz;
+  const token = tokens[company];
+  if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
+  if (!api_plan_id) throw new Error("No Arrahuz plan_id configured for this plan");
+
+  const payload = {
+    network: Number(network_id), // 1=MTN, 2=Glo, 3=Airtel, 4=9mobile
+    mobile_number: String(phone),
+    plan: Number(api_plan_id), // Arrahuz specific plan ID
+    Ported_number: true
+  };
+
+  const res = await axios.post(
+    `${base_url}/api/data/`,
+    payload,
+    {
+      headers: {
+        "Authorization": `Token ${token}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 60000
+    }
+  );
+
+  // Arrahuz doesn't return response body in docs, but check for common success patterns
+  const status = res.data?.Status || res.data?.status;
+  if (res.data && status &&!["success", "successful", "pending"].includes(status?.toLowerCase())) {
+    throw new Error(res.data.message || res.data.error || "Arrahuz purchase failed");
+  }
+
+  return res.data || { status: "success", message: "Request sent to Arrahuz" };
+}
+
+// NEW: Arrahuz Airtime
+async function callArrahuzAirtime(phone, network_id, amount, company) {
+  const { base_url, tokens } = VTU_PROVIDERS.arrahuz;
+  const token = tokens[company];
+  if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
+
+  const payload = {
+    network: Number(network_id), // 1=MTN, 2=Glo, 3=Airtel, 4=9mobile
+    amount: Number(amount),
+    mobile_number: String(phone),
+    Ported_number: true,
+    airtime_type: "VTU"
+  };
+
+  const res = await axios.post(
+    `${base_url}/api/topup/`,
+    payload,
+    {
+      headers: {
+        "Authorization": `Token ${token}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 60000
+    }
+  );
+
+  const status = res.data?.Status || res.data?.status;
+  if (res.data && status &&!["success", "successful", "pending"].includes(status?.toLowerCase())) {
+    throw new Error(res.data.message || res.data.error || "Arrahuz airtime failed");
+  }
+
+  return res.data || { status: "success", message: "Request sent to Arrahuz" };
 }
 /* ================= AUTH MIDDLEWARE ================= */
 function auth(req, res, next) {
@@ -929,14 +1007,35 @@ app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
 });
 
 /* ================= DVA ROUTE - FINAL VERSION ================= */
-app.post('/api/wallet/create-dva', auth, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const user = await getUser(userId);
-    if (!user) return res.status(404).json({ error: 'User not found' });
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-    // 1. Already has account
+// Use Redis in production. This Set is only for single-instance
+const generatingUsers = new Set();
+
+app.post('/api/wallet/create-dva', auth, async (req, res) => {
+  const userId = req.user.id;
+  const lockKey = `gen_dva_${userId}`;
+
+  // 1. Prevent double clicks - 90s lock
+  if (generatingUsers.has(lockKey)) {
+    return res.status(429).json({
+      success: false,
+      error: 'Account generation in progress. Please wait 1-2 minutes...'
+    });
+  }
+  generatingUsers.add(lockKey);
+  setTimeout(() => generatingUsers.delete(lockKey), 90000);
+
+  try {
+    const user = await getUser(userId);
+    if (!user) {
+      generatingUsers.delete(lockKey);
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    // 2. Already has account
     if (user.account_number && user.paymentmethod === "paymentpoint") {
+      generatingUsers.delete(lockKey);
       return res.status(200).json({
         success: true,
         message: "Account already exists",
@@ -946,8 +1045,9 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       });
     }
 
-    // 2. Validate required DB fields
+    // 3. Validate required DB fields
     if (!user.phone || String(user.phone).trim().length < 10) {
+      generatingUsers.delete(lockKey);
       return res.status(400).json({
         success: false,
         error: 'Phone number missing or invalid. Update your profile first.'
@@ -955,6 +1055,7 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     }
 
     if (!user.email) {
+      generatingUsers.delete(lockKey);
       return res.status(400).json({
         success: false,
         error: 'Email missing. Update your profile first.'
@@ -962,6 +1063,7 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
     }
 
     if (!user.company) {
+      generatingUsers.delete(lockKey);
       return res.status(400).json({
         success: false,
         error: 'Company not set for user. Contact support.'
@@ -970,81 +1072,134 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
 
     const { bvn, nin } = req.body;
 
-    // 3. Call helper - it handles phone formatting + multi-company creds
+    // 4. Require BVN or NIN
+    if (!bvn &&!nin) {
+      generatingUsers.delete(lockKey);
+      return res.status(422).json({
+        success: false,
+        requireKyc: true,
+        message: 'Valid BVN or NIN is required to generate account'
+      });
+    }
+
+    if ((bvn &&!/^\d{11}$/.test(bvn)) || (nin &&!/^\d{11}$/.test(nin))) {
+      generatingUsers.delete(lockKey);
+      return res.status(422).json({
+        success: false,
+        error: 'BVN/NIN must be 11 digits'
+      });
+    }
+
+    // 5. CRITICAL: Wait 20s BEFORE first PaymentPoint call
+    console.log(`[User ${userId}] Waiting 20s for PaymentPoint warmup...`);
+    await sleep(20000);
+
+    // 6. Call helper with retry logic
     const creds = getPaymentPointCreds(user.company);
-    let ppResponse = await createPaymentPointAccount(user, { bvn, nin });
+    let attempts = 0;
+    const maxAttempts = 3;
+    let ppResponse = null;
+    let lastError = null;
 
-    console.log('[DVA Route] PP Response:', JSON.stringify(ppResponse));
+    while (attempts < maxAttempts) {
+      attempts++;
+      console.log(`[User ${userId}] PaymentPoint attempt ${attempts}/${maxAttempts}`);
 
-    // 4. KEY: If success but no accounts, PP v1 may be provisioning async. Wait + refetch once
-    if (ppResponse.status === "success" && (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0)) {
-      const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
+      try {
+        ppResponse = await createPaymentPointAccount(user, { bvn, nin });
+        console.log('[DVA Route] PP Response:', JSON.stringify(ppResponse));
 
-      // Only retry if error suggests pending/reserved account, not hard KYC fail
-      if (errorString.includes('reserved account') || errorString.includes('failed to create')) {
-        console.log('[DVA Route] No accounts yet, waiting 3s for PP provisioning...');
-        await new Promise(r => setTimeout(r, 3000));
+        // If we got accounts, break
+        if (ppResponse.status === "success" && ppResponse.bankAccounts?.length > 0) {
+          break;
+        }
 
-        try {
-          const { data: fetchRes } = await axios.get(
-            `${PAYMENTPOINT_BASE}/api/v1/customer?email=${encodeURIComponent(user.email)}`,
-            {
-              headers: {
-                'Authorization': `Bearer ${creds.secretKey}`,
-                'api-key': creds.apiKey,
-                'Content-Type': 'application/json'
-              },
-              timeout: 15000
+        // If success but no accounts, wait and refetch
+        if (ppResponse.status === "success" && (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0)) {
+          const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
+
+          if (errorString.includes('reserved account') || errorString.includes('failed to create')) {
+            console.log('[DVA Route] No accounts yet, waiting 10s for PP provisioning...');
+            await sleep(10000);
+
+            try {
+              const { data: fetchRes } = await axios.get(
+                `${PAYMENTPOINT_BASE}/api/v1/customer?email=${encodeURIComponent(user.email)}`,
+                {
+                  headers: {
+                    'Authorization': `Bearer ${creds.secretKey}`,
+                    'api-key': creds.apiKey,
+                    'Content-Type': 'application/json'
+                  },
+                  timeout: 60000
+                }
+              );
+              console.log('[DVA Route] Refetch response:', JSON.stringify(fetchRes));
+
+              if (fetchRes.bankAccounts?.length > 0) {
+                ppResponse = fetchRes;
+                break;
+              }
+            } catch (e) {
+              console.log('[DVA Route] Refetch failed:', e.message);
             }
-          );
-          console.log('[DVA Route] Refetch response:', JSON.stringify(fetchRes));
-
-          // If refetch has accounts, use it
-          if (fetchRes.bankAccounts?.length > 0) {
-            ppResponse = fetchRes;
           }
-        } catch (e) {
-          console.log('[DVA Route] Refetch failed:', e.message);
+        }
+
+        lastError = ppResponse.errors?.join("; ") || 'No accounts returned';
+
+      } catch (err) {
+        console.error(`[User ${userId}] Attempt ${attempts} failed:`, err.message);
+        lastError = err.message;
+
+        // Don't retry on validation errors
+        if (err.message.includes('BVN') || err.message.includes('NIN') || err.message.includes('Phone')) {
+          break;
         }
       }
 
-      // Re-check after refetch attempt
-      if (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0) {
-        const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
-
-        if (errorString.includes('kyc') ||
-            errorString.includes('bvn') ||
-            errorString.includes('nin') ||
-            errorString.includes('verification') ||
-            errorString.includes('reserved account') ||
-            errorString.includes('failed to create')) {
-
-          console.log('[DVA Route] KYC required or pending - triggering modal');
-          return res.status(200).json({
-            success: false,
-            requireKyc: true,
-            message: 'BVN or NIN required. If already submitted, please wait 10 seconds and try again.',
-            pp: ppResponse
-          });
-        }
-
-        return res.status(400).json({
-          success: false,
-          error: ppResponse.errors?.join("; ") || 'Bank temporarily unavailable. Try again later.'
-        });
+      // Wait 10s before next retry
+      if (attempts < maxAttempts) {
+        await sleep(10000);
       }
     }
 
-    // 5. Success - has bank accounts even if some banks failed
-    const account = ppResponse.bankAccounts?.[0];
-    if (!account ||!account.accountNumber) {
+    // 7. Final check after all retries
+    if (!ppResponse?.bankAccounts || ppResponse.bankAccounts.length === 0) {
+      generatingUsers.delete(lockKey);
+      const errorString = ppResponse?.errors?.join(" ").toLowerCase() || "";
+
+      if (errorString.includes('kyc') ||
+          errorString.includes('bvn') ||
+          errorString.includes('nin') ||
+          errorString.includes('verification') ||
+          errorString.includes('reserved account') ||
+          errorString.includes('failed to create')) {
+
+        return res.status(200).json({
+          success: false,
+          requireKyc: true,
+          message: 'BVN or NIN required, or account still provisioning. Please wait 30s and try again.',
+          pp: ppResponse
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        error: lastError || 'Bank temporarily unavailable. Try again later.'
+      });
+    }
+
+    // 8. Success - save to DB
+    const account = ppResponse.bankAccounts[0];
+    if (!account?.accountNumber) {
+      generatingUsers.delete(lockKey);
       return res.status(500).json({
         success: false,
         error: 'PaymentPoint returned no account details'
       });
     }
 
-    // 6. Save to DB
     await pool.query(
       `UPDATE users SET
         account_number = $1,
@@ -1067,6 +1222,7 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       ]
     );
 
+    generatingUsers.delete(lockKey);
     return res.status(200).json({
       success: true,
       account_number: account.accountNumber,
@@ -1077,6 +1233,7 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
 
   } catch (error) {
     console.error('DVA Error:', error.message, error.stack);
+    generatingUsers.delete(lockKey);
 
     if (error.message.includes('BVN must be') ||
         error.message.includes('NIN must be') ||
@@ -1494,14 +1651,27 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       return res.status(403).json({ message: "Plan restricted to company users" });
     }
 
-    // Validation: subpadi uses api_plan_id as product_id, maitama/cheapdatahub use network_id + api_plan_id
-    if (!plan.provider ||!plan.api_plan_id) {
+    // Validation: subpadi uses api_plan_id as product_id, others use network_id + api_plan_id/arrahuz_plan_id
+    if (!plan.provider) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
     }
-    if (plan.provider!== "subpadi" &&!plan.network_id) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Plan not configured with network_id. Contact admin." });
+
+    if (plan.provider === "subpadi") {
+      if (!plan.api_plan_id) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "Plan not configured with product_id. Contact admin." });
+      }
+    } else if (plan.provider === "arrahuz") {
+      if (!plan.arrahuz_plan_id ||!plan.network_id) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "Plan not configured with Arrahuz plan ID or network_id. Contact admin." });
+      }
+    } else {
+      if (!plan.api_plan_id ||!plan.network_id) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "Plan not configured with provider plan ID or network_id. Contact admin." });
+      }
     }
 
     // Check tier using top_users table
@@ -1544,6 +1714,8 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         await callCheapDataHubData(phone, plan.network_id, plan.api_plan_id);
       } else if (plan.provider === "subpadi") {
         await callSubPadiData(phone, plan.api_plan_id, user.company);
+      } else if (plan.provider === "arrahuz") {
+        await callArrahuzData(phone, plan.network_id, plan.arrahuz_plan_id, user.company);
       } else {
         throw new Error("Unknown provider");
       }
@@ -1592,7 +1764,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   }
 });
 
-/* ================= BUY AIRTIME - CheapDataHub only for MAYCONNECT + BIOMETRIC ================= */
+/* ================= BUY AIRTIME - Arrahuz for all companies + BIOMETRIC ================= */
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1621,14 +1793,18 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    if (user.company!== "mayconnect") {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ message: "Airtime only available for Mayconnect" });
-    }
-
     // PIN / Biometric check
     if (pin!== 'biometric_verified') {
-      if (!user.pin ||!(await bcrypt.compare(String(pin), String(user.pin)))) {
+      if (!user.pin) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: "Transaction PIN not set. Please set your PIN in Profile first.",
+          needPin: true
+        });
+      }
+
+      const validPin = await bcrypt.compare(String(pin), String(user.pin));
+      if (!validPin) {
         await client.query("ROLLBACK");
         return res.status(400).json({ message: "Invalid PIN" });
       }
@@ -1640,18 +1816,20 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     }
 
     const newBalance = Number(user.wallet_balance) - amt;
-    await client.query("UPDATE users SET wallet_balance=$1 WHERE id=$2", [newBalance, user.id]);
+    await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
 
     const ref = "AIRTIME-" + uuidv4();
-    const cost = amt * 0.98;
+    const cost = amt * 0.98; // Adjust discount if Arrahuz rate is different
 
     try {
-      await callCheapDataHubAirtime(phone, network, amt);
+      await callArrahuzAirtime(phone, network, amt, user.company);
     } catch (vtuErr) {
-      console.error("VTU API ERROR:", vtuErr);
-      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id=$2", [amt, user.id]);
+      console.error("VTU API ERROR:", vtuErr.response?.data || vtuErr.message);
+      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [amt, user.id]);
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Purchase failed. Try again later." });
+      return res.status(400).json({
+        message: vtuErr.response?.data?.message || vtuErr.message || "Purchase failed. Try again later."
+      });
     }
 
     const txRes = await client.query(
@@ -1663,7 +1841,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const adminId = await getCompanyAdmin(user.company);
     const profit = amt - cost;
     if (adminId && profit > 0) {
-      await client.query("UPDATE users SET admin_wallet = admin_wallet + $1 WHERE id=$2", [profit, adminId]);
+      await client.query("UPDATE users SET admin_wallet = admin_wallet + $1, updated_at=NOW() WHERE id=$2", [profit, adminId]);
       await client.query(
         `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
          VALUES($1,'sale',$2,$3,$4)`,
