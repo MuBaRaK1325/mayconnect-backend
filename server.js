@@ -1672,7 +1672,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       return res.status(403).json({ message: "Plan restricted to company users" });
     }
 
-    // Validation: subpadi uses api_plan_id as product_id, others use network_id + api_plan_id/arrahuz_plan_id
+    // Validation: subpadi uses api_plan_id as product_id, others use network_id + api_plan_id
     if (!plan.provider) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
@@ -1684,7 +1684,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         return res.status(400).json({ message: "Plan not configured with product_id. Contact admin." });
       }
     } else if (plan.provider === "arrahuz") {
-      if (!plan.arrahuz_plan_id ||!plan.network_id) {
+      if (!plan.api_plan_id ||!plan.network_id) {
         await client.query("ROLLBACK");
         return res.status(400).json({ message: "Plan not configured with Arrahuz plan ID or network_id. Contact admin." });
       }
@@ -1736,7 +1736,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       } else if (plan.provider === "subpadi") {
         await callSubPadiData(phone, plan.api_plan_id, user.company);
       } else if (plan.provider === "arrahuz") {
-        await callArrahuzData(phone, plan.network_id, plan.arrahuz_plan_id, user.company);
+        await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
       } else {
         throw new Error("Unknown provider");
       }
