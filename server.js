@@ -133,7 +133,28 @@ app.post("/api/paymentpoint/webhook",
     }
   }
 );
+/* ================== ALRAHUZ WEBHOOK ================== */
+app.post("/webhooks/alrahuz", async (req, res) => {
+    try {
+        const data = req.body; // This works because express.json() runs later
+        console.log('[Alrahuz Webhook] Payload:', JSON.stringify(data));
 
+        const { transaction_id, status, reference, plan, phone } = data;
+        
+        // Update your DB here
+        // await pool.query(
+        //   `UPDATE transactions 
+        //    SET status = $1, api_response = $2, updated_at = NOW() 
+        //    WHERE ref_id = $3 AND provider = 'alrahuz'`,
+        //   [status, JSON.stringify(data), reference || transaction_id]
+        // );
+
+        return res.status(200).json({ received: true });
+    } catch (error) {
+        console.error('[Alrahuz Webhook] Error:', error);
+        return res.status(200).json({ error: true }); // Still return 200
+    }
+});
 /* ================= GLOBAL MIDDLEWARE - AFTER WEBHOOK ================= */
 app.use(express.static('public'));
 app.use(express.json({ limit: '1mb' }));
