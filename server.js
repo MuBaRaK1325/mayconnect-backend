@@ -140,13 +140,13 @@ app.post("/webhooks/alrahuz", async (req, res) => {
         console.log('[Alrahuz Webhook] Payload:', JSON.stringify(data));
 
         const { transaction_id, status, reference, plan, phone } = data;
-        
-        // Update your DB here
+
+        // Update your DB here - uncomment and adjust when ready
         // await pool.query(
-        //   `UPDATE transactions 
-        //    SET status = $1, api_response = $2, updated_at = NOW() 
-        //    WHERE ref_id = $3 AND provider = 'alrahuz'`,
-        //   [status, JSON.stringify(data), reference || transaction_id]
+        // `UPDATE transactions
+        // SET status = $1, api_response = $2, updated_at = NOW()
+        // WHERE reference = $3 AND provider = 'alrahuz'`,
+        // [status, JSON.stringify(data), reference || transaction_id]
         // );
 
         return res.status(200).json({ received: true });
@@ -155,6 +155,64 @@ app.post("/webhooks/alrahuz", async (req, res) => {
         return res.status(200).json({ error: true }); // Still return 200
     }
 });
+
+/* ================= ARRAHUZ API HELPERS ================= */
+// Arrahuz network IDs: 1=MTN, 2=Glo, 3=Airtel, 4=9mobile
+const ARRAHUZ_NETWORK_MAP = {
+  'mtn': 1,
+  'glo': 2,
+  'airtel': 3,
+  '9mobile': 4,
+  'etisalat': 4
+};
+
+// Normalize phone to 11 digits starting with 0
+function formatPhoneForArrahuz(phone) {
+  let p = String(phone).replace(/\D/g, '');
+  if (p.startsWith('234')) p = '0' + p.slice(3);
+  if (p.length === 10) p = '0' + p; // handle 803xxxxxxx
+  return p;
+}
+
+async function callArrahuzAirtime(phone, network, amount) {
+  const networkId = ARRAHUZ_NETWORK_MAP[String(network).toLowerCase()];
+  if (!networkId) throw new Error(`Unsupported network: ${network}`);
+
+  const formattedPhone = formatPhoneForArrahuz(phone);
+  if (formattedPhone.length!== 11 ||!formattedPhone.startsWith('0')) {
+    throw new Error('Phone must be 11 digits starting with 0');
+  }
+
+  const payload = {
+    network: networkId,
+    amount: Number(amount),
+    mobile_number: formattedPhone,
+    Ported_number: false,
+    airtime_type: "VTU"
+  };
+
+  const response = await axios.post('https://alrahuzdata.com.ng/api/topup/', payload, {
+    headers: {
+      'Authorization': `Token ${process.env.ARRAHUZ_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    timeout: 30000
+  });
+
+  return response.data;
+}
+
+// Optional: Query transaction status after 500/timeout
+async function queryArrahuzAirtime(transactionId) {
+  const response = await axios.get(`https://alrahuzdata.com.ng/api/data/${transactionId}`, {
+    headers: {
+      'Authorization': `Token ${process.env.ARRAHUZ_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    timeout: 15000
+  });
+  return response.data;
+}
 /* ================= GLOBAL MIDDLEWARE - AFTER WEBHOOK ================= */
 app.use(express.static('public'));
 app.use(express.json({ limit: '1mb' }));
@@ -1792,19 +1850,28 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     await client.query("BEGIN");
     const { phone, amount, network, pin } = req.body;
 
-    // Input validation
-    if (!phone ||!amount ||!network) {
+    // 1. Input validation
+    if (!phone || !amount || !network) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "phone, amount, and network are required" });
     }
-    if (!/^\d{10,15}$/.test(String(phone))) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Invalid phone number" });
-    }
+
     const amt = Number(amount);
     if (isNaN(amt) || amt < 50 || amt > 50000) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Amount must be between ₦50 and ₦50,000" });
+    }
+
+    const validNetworks = Object.keys(NETWORK_MAP);
+    if (!validNetworks.includes(String(network).toLowerCase())) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Invalid network. Use MTN, Glo, Airtel, or 9mobile" });
+    }
+
+    const formattedPhone = formatPhoneForArrahuz(phone);
+    if (formattedPhone.length !== 11) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Phone must be 11 digits" });
     }
 
     const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
@@ -1814,8 +1881,8 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // PIN / Biometric check
-    if (pin!== 'biometric_verified') {
+    // 2. PIN / Biometric check
+    if (pin !== 'biometric_verified') {
       if (!user.pin) {
         await client.query("ROLLBACK");
         return res.status(400).json({
@@ -1823,7 +1890,6 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
           needPin: true
         });
       }
-
       const validPin = await bcrypt.compare(String(pin), String(user.pin));
       if (!validPin) {
         await client.query("ROLLBACK");
@@ -1836,29 +1902,43 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       return res.status(400).json({ message: "Insufficient balance" });
     }
 
+    // 3. Debit user first
     const newBalance = Number(user.wallet_balance) - amt;
     await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
 
     const ref = "AIRTIME-" + uuidv4();
-    const cost = amt * 0.98; // Adjust discount if Arrahuz rate is different
+    const cost = amt * 0.98; // Change if Arrahuz gives you different discount
 
+    // 4. Call Arrahuz
     try {
-      await callArrahuzAirtime(phone, network, amt, user.company);
+      await callArrahuzAirtime(formattedPhone, network, amt);
     } catch (vtuErr) {
-      console.error("VTU API ERROR:", vtuErr.response?.data || vtuErr.message);
+      console.error("ARRAHUZ API ERROR:", vtuErr.response?.data || vtuErr.message);
+      
+      // Refund user since API failed
       await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [amt, user.id]);
       await client.query("ROLLBACK");
+
+      // Handle 500 specifically
+      if (vtuErr.response?.status === 500) {
+        return res.status(503).json({
+          message: "Provider is temporarily down. You were not debited. Try again in 5 minutes."
+        });
+      }
+      
       return res.status(400).json({
-        message: vtuErr.response?.data?.message || vtuErr.message || "Purchase failed. Try again later."
+        message: vtuErr.message || "Purchase failed. Try again later."
       });
     }
 
+    // 5. Log success transaction
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status)
        VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS') RETURNING *`,
-      [user.id, amt, cost, phone, network, ref]
+      [user.id, amt, cost, formattedPhone, network.toLowerCase(), ref]
     );
 
+    // 6. Credit admin profit
     const adminId = await getCompanyAdmin(user.company);
     const profit = amt - cost;
     if (adminId && profit > 0) {
@@ -1875,11 +1955,12 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
 
     await sendPushNotification(user.company, user.id, {
       title: `${user.company.toUpperCase()} - Airtime Purchase`,
-      body: `Your ₦${amt} airtime for ${phone} was successful`,
+      body: `Your ₦${amt} airtime for ${formattedPhone} was successful`,
       url: '/dashboard.html'
     });
 
     res.json({ success: true, reference: ref, balance: newBalance });
+
   } catch (e) {
     await client.query("ROLLBACK");
     console.error("BUY AIRTIME ERROR:", e);
