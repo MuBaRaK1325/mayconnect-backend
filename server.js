@@ -1862,7 +1862,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       return res.status(400).json({ message: "Amount must be between ₦50 and ₦50,000" });
     }
 
-    const validNetworks = Object.keys(NETWORK_MAP);
+    const validNetworks = Object.keys(ARRAHUZ_NETWORK_MAP); // Fixed this line
     if (!validNetworks.includes(String(network).toLowerCase())) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Invalid network. Use MTN, Glo, Airtel, or 9mobile" });
@@ -1933,8 +1933,8 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
 
     // 5. Log success transaction
     const txRes = await client.query(
-      `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status)
-       VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS') RETURNING *`,
+      `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status,provider)
+       VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS','arrahuz') RETURNING *`,
       [user.id, amt, cost, formattedPhone, network.toLowerCase(), ref]
     );
 
