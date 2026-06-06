@@ -157,7 +157,6 @@ app.post("/webhooks/alrahuz", async (req, res) => {
 });
 
 /* ================= ARRAHUZ API HELPERS ================= */
-// Your existing config
 const PROVIDERS = {
   arrahuz: {
     base_url: "https://alrahuzdata.com.ng",
@@ -179,11 +178,10 @@ const ARRAHUZ_NETWORK_MAP = {
   'etisalat': 4
 };
 
-// Normalize phone to 11 digits starting with 0
 function formatPhoneForArrahuz(phone) {
   let p = String(phone).replace(/\D/g, '');
   if (p.startsWith('234')) p = '0' + p.slice(3);
-  if (p.length === 10) p = '0' + p; // handle 803xxxxxxx
+  if (p.length === 10) p = '0' + p;
   return p;
 }
 
@@ -197,7 +195,7 @@ async function callArrahuzAirtime(phone, network, amount, company) {
   if (!networkId) throw new Error(`Unsupported network: ${network}`);
 
   const formattedPhone = formatPhoneForArrahuz(phone);
-  if (formattedPhone.length !== 11 || !formattedPhone.startsWith('0')) {
+  if (formattedPhone.length!== 11 ||!formattedPhone.startsWith('0')) {
     throw new Error('Phone must be 11 digits starting with 0');
   }
 
@@ -205,11 +203,13 @@ async function callArrahuzAirtime(phone, network, amount, company) {
     network: networkId,
     amount: Number(amount),
     mobile_number: formattedPhone,
-    Ported_number: false, // false prevents 500 timeouts from porting check
+    Ported_number: false,
     airtime_type: "VTU"
   };
 
-  const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, {
+  // Based on their docs pattern: /api/user/, /api/data/, /api/epin/
+  // Airtime should be /api/airtime/ - not /api/topup/
+  const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/airtime/`, payload, {
     headers: {
       'Authorization': `Token ${token}`,
       'Content-Type': 'application/json'
@@ -219,23 +219,7 @@ async function callArrahuzAirtime(phone, network, amount, company) {
 
   return response.data;
 }
-
-// Optional: Query transaction status after timeout/500
-async function queryArrahuzAirtime(transactionId, company) {
-  const token = PROVIDERS.arrahuz.tokens[company?.toLowerCase()];
-  if (!token) {
-    throw new Error(`No Arrahuz token configured for ${company}`);
-  }
-
-  const response = await axios.get(`${PROVIDERS.arrahuz.base_url}/api/data/${transactionId}`, {
-    headers: {
-      'Authorization': `Token ${token}`,
-      'Content-Type': 'application/json'
-    },
-    timeout: 15000
-  });
-  return response.data;
-}
+/* ================= END ARRAHUZ HELPERS ================= */
 
 
 /* ================= GLOBAL MIDDLEWARE - AFTER WEBHOOK ================= */
