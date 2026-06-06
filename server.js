@@ -169,14 +169,28 @@ const PROVIDERS = {
   }
 };
 
-// Arrahuz network IDs: 1=MTN, 2=Glo, 3=Airtel, 4=9mobile
+// Arrahuz correct network IDs
 const ARRAHUZ_NETWORK_MAP = {
   'mtn': 1,
   'glo': 2,
-  'airtel': 3,
-  '9mobile': 4,
-  'etisalat': 4
+  '9mobile': 3,
+  'etisalat': 3,
+  'airtel': 4,
+  'smile': 5
 };
+
+// For ported numbers: use ORIGINAL prefix network, not current network
+function getOriginalNetworkId(phone) {
+  const p = phone.replace(/\D/g, '');
+  const prefix = p.startsWith('234') ? p.slice(3, 6) : p.slice(0, 4);
+  
+  if (/^(0703|0706|0803|0806|0810|0813|0814|0816|0903|0906|0913|0916)/.test(prefix)) return 1; // MTN
+  if (/^(0705|0805|0807|0811|0815|0905|0915)/.test(prefix)) return 2; // GLO
+  if (/^(0809|0817|0818|0908|0909|0912)/.test(prefix)) return 3; // 9MOBILE
+  if (/^(0701|0708|0802|0808|0812|0901|0902|0904|0907|0911)/.test(prefix)) return 4; // AIRTEL
+  
+  return null; // Unknown
+}
 
 function formatPhoneForArrahuz(phone) {
   let p = String(phone).replace(/\D/g, '');
@@ -185,25 +199,21 @@ function formatPhoneForArrahuz(phone) {
   return p;
 }
 
-async function callArrahuzAirtime(phone, network, amount, company) {
+async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
   const token = PROVIDERS.arrahuz.tokens[company?.toLowerCase()];
-  if (!token) {
-    throw new Error(`No Arrahuz token configured for ${company}`);
-  }
-
-  const networkId = ARRAHUZ_NETWORK_MAP[String(network).toLowerCase()];
-  if (!networkId) throw new Error(`Unsupported network: ${network}`);
+  if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
 
   const formattedPhone = formatPhoneForArrahuz(phone);
-  if (formattedPhone.length!== 11 ||!formattedPhone.startsWith('0')) {
-    throw new Error('Phone must be 11 digits starting with 0');
-  }
+  
+  // For ported numbers, use original prefix network ID
+  const networkId = getOriginalNetworkId(formattedPhone);
+  if (!networkId) throw new Error(`Cannot determine original network for ${phone}`);
 
   const payload = {
-    network: networkId,
+    network: networkId, // Original prefix network, not current
     amount: Number(amount),
     mobile_number: formattedPhone,
-    Ported_number: true, // Set true - Arrahuz validates prefix internally
+    Ported_number: true, // Always true for Nigeria
     airtime_type: "VTU"
   };
 
@@ -215,8 +225,12 @@ async function callArrahuzAirtime(phone, network, amount, company) {
     timeout: 30000
   });
 
+  if (response.data?.Status === 'failed') {
+    throw new Error(response.data.api_response || 'Transaction failed');
+  }
+
   return response.data;
-}
+}   
 /* ================= END ARRAHUZ HELPERS ================= */
 
 
