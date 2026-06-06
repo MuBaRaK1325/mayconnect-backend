@@ -252,12 +252,13 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
 }
 /* ================= END ARRAHUZ HELPERS ================= */
 app.get("/test-arrahuz-ip", async (req, res) => {
+  let renderIP = 'unknown';
   try {
-    // First, get your Render outbound IP
-    const ipRes = await axios.get('https://api.ipify.org?format=json');
-    const renderIP = ipRes.data.ip;
+    // Get Render outbound IP first
+    const ipRes = await axios.get('https://api.ipify.org?format=json', { timeout: 5000 });
+    renderIP = ipRes.data.ip;
     
-    // Now test Arrahuz with that IP
+    // Now test Arrahuz
     const arrahuzTest = await callArrahuzAirtime("09121243474", "airtel", 100, "sadeeq");
     
     res.json({ 
@@ -268,7 +269,7 @@ app.get("/test-arrahuz-ip", async (req, res) => {
   } catch (e) {
     res.json({ 
       success: false,
-      renderIP: e.config ? 'Check Render logs' : 'Unknown',
+      renderIP, // This will now show the IP even if Arrahuz fails
       error: e.message,
       status: e.response?.status,
       data: e.response?.data || 'EMPTY - IP BLOCKED'
