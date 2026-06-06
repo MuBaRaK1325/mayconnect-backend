@@ -1869,7 +1869,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       return res.status(400).json({ message: "Amount must be between ₦50 and ₦50,000" });
     }
 
-    const validNetworks = Object.keys(ARRAHUZ_NETWORK_MAP); // Fixed this line
+    const validNetworks = Object.keys(ARRAHUZ_NETWORK_MAP);
     if (!validNetworks.includes(String(network).toLowerCase())) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Invalid network. Use MTN, Glo, Airtel, or 9mobile" });
@@ -1916,9 +1916,9 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const ref = "AIRTIME-" + uuidv4();
     const cost = amt * 0.98; // Change if Arrahuz gives you different discount
 
-    // 4. Call Arrahuz
+    // 4. Call Arrahuz - FIXED: added user.company
     try {
-      await callArrahuzAirtime(formattedPhone, network, amt);
+      await callArrahuzAirtime(formattedPhone, network, amt, user.company);
     } catch (vtuErr) {
       console.error("ARRAHUZ API ERROR:", vtuErr.response?.data || vtuErr.message);
       
