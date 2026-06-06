@@ -158,7 +158,7 @@ app.post("/webhooks/alrahuz", async (req, res) => {
 /* ================= ARRAHUZ API HELPERS ================= */
 const PROVIDERS = {
   arrahuz: {
-    base_url: "https://alrahuzdata.com.ng/api/topup",
+    base_url: "https://alrahuzdata.com.ng", // FIXED: removed /api/topup
     tokens: {
       mayconnect: process.env.ARRAHUZ_TOKEN_MAYCONNECT,
       teeversh: process.env.ARRAHUZ_TOKEN_TEEVERSH,
@@ -184,57 +184,46 @@ function getArrahuzNetworkId(networkName) {
 
 function formatPhoneForArrahuz(phone) {
   let p = String(phone).replace(/\D/g, '');
-  if (p.startsWith('234')) p = '0' + p.slice(3);
-  if (p.length === 10) p = '0' + p;
-  return p;
+  if (p.startsWith('234')) p = '0' + p.slice(3); // 234912... -> 0912...
+  if (p.length === 10) p = '0' + p; // 912... -> 0912...
+  return p; // Must be 11 digits: 09121243474
 }
 
 async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
   const token = PROVIDERS.arrahuz.tokens[company?.toLowerCase()];
   if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
 
-  const formattedPhone = formatPhoneForArrahuz(phone);
   const networkId = getArrahuzNetworkId(currentNetwork);
-  
   if (!networkId) {
     throw new Error(`Invalid network: ${currentNetwork}`);
   }
 
-  const phone234 = formattedPhone.startsWith('0') ? '234' + formattedPhone.slice(1) : formattedPhone;
+  const formattedPhone = formatPhoneForArrahuz(phone); // FIXED: Use 0-prefix format
 
-  // Build payload exactly like curl - numbers as numbers, strings as strings
   const payload = {
-    network: Number(networkId), // Force number
-    amount: Number(amount), // Force number  
-    mobile_number: String(phone234), // Force string
-    Ported_number: true, // Boolean true
+    network: Number(networkId),
+    amount: Number(amount),
+    mobile_number: formattedPhone, // FIXED: Send 09121243474 not 2349121243474
+    Ported_number: true,
     airtime_type: "VTU"
   };
 
-  const requestBody = JSON.stringify(payload); // Explicit stringify
-
-  console.log('ARRAHUZ REQUEST:', requestBody);
+  console.log('ARRAHUZ REQUEST:', payload);
 
   try {
-    const response = await axios({
-      method: 'POST',
-      url: `${PROVIDERS.arrahuz.base_url}/api/topup/`,
-      data: requestBody, // Send raw JSON string
-      headers: {
-        'Authorization': `Token ${token}`,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(requestBody),
-        'Accept': '*/*'
-      },
-      timeout: 30000,
-      validateStatus: () => true // Don't throw on 500, let us see body
-    });
+    const response = await axios.post(
+      `${PROVIDERS.arrahuz.base_url}/api/topup/`, // FIXED: Correct full URL
+      payload,
+      {
+        headers: {
+          'Authorization': `Token ${token}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      }
+    );
 
     console.log('ARRAHUZ RESPONSE:', response.status, response.data);
-
-    if (response.status === 500) {
-      throw new Error(`Arrahuz 500: ${response.data || 'Empty response - likely IP blocked or token issue'}`);
-    }
 
     if (response.data?.Status === 'failed') {
       throw new Error(response.data.api_response || 'Arrahuz: Transaction failed');
@@ -247,12 +236,12 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
     return response.data;
   } catch (error) {
     if (error.response) {
-      console.error("ARRAHUZ RAW ERROR:", {
+      console.error("ARRAHUZ API ERROR:", {
         status: error.response.status,
-        statusText: error.response.statusText,
         data: error.response.data,
-        headers: error.response.headers
+        payload
       });
+      throw new Error(error.response.data?.api_response || `Arrahuz ${error.response.status}: ${error.response.data}`);
     }
     throw error;
   }
@@ -1918,9 +1907,9 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     }
 
     const formattedPhone = formatPhoneForArrahuz(phone);
-    if (formattedPhone.length !== 11) {
+    if (formattedPhone.length !== 11 || !formattedPhone.startsWith('0')) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Phone must be 11 digits" });
+      return res.status(400).json({ message: "Phone must be 11 digits starting with 0" });
     }
 
     const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
@@ -1958,15 +1947,12 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const ref = "AIRTIME-" + uuidv4();
     const cost = amt * 0.98; // Update to match your Arrahuz discount
 
-    // 4. Call Arrahuz - uses CURRENT network ID + Ported_number: true + 234 format
+    // 4. Call Arrahuz - uses 0-prefix format: 09121243474
     let arrahuzRes;
     try {
       arrahuzRes = await callArrahuzAirtime(formattedPhone, network, amt, user.company);
       console.log("ARRAHUZ SUCCESS:", { ref, response: arrahuzRes });
     } catch (vtuErr) {
-      // Log what was actually sent - 234 format
-      const phone234 = formattedPhone.startsWith('0') ? '234' + formattedPhone.slice(1) : formattedPhone;
-      
       console.error("ARRAHUZ API ERROR:", {
         status: vtuErr.response?.status,
         data: vtuErr.response?.data,
@@ -1974,7 +1960,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
         payload: {
           network: getArrahuzNetworkId(network),
           amount: Number(amt),
-          mobile_number: phone234, // Log actual 234 format sent
+          mobile_number: formattedPhone, // 0-prefix format: 09121243474
           Ported_number: true,
           airtime_type: "VTU"
         },
