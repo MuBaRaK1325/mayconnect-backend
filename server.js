@@ -1954,20 +1954,23 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const ref = "AIRTIME-" + uuidv4();
     const cost = amt * 0.98; // Update to match your Arrahuz discount
 
-    // 4. Call Arrahuz - uses CURRENT network ID + Ported_number: true
+    // 4. Call Arrahuz - uses CURRENT network ID + Ported_number: true + 234 format
     let arrahuzRes;
     try {
       arrahuzRes = await callArrahuzAirtime(formattedPhone, network, amt, user.company);
       console.log("ARRAHUZ SUCCESS:", { ref, response: arrahuzRes });
     } catch (vtuErr) {
+      // Log what was actually sent - 234 format
+      const phone234 = formattedPhone.startsWith('0') ? '234' + formattedPhone.slice(1) : formattedPhone;
+      
       console.error("ARRAHUZ API ERROR:", {
         status: vtuErr.response?.status,
         data: vtuErr.response?.data,
         message: vtuErr.message,
         payload: {
-          network: getArrahuzNetworkId(network), // Fixed: use current network, not prefix
+          network: getArrahuzNetworkId(network),
           amount: Number(amt),
-          mobile_number: formattedPhone,
+          mobile_number: phone234, // Log actual 234 format sent
           Ported_number: true,
           airtime_type: "VTU"
         },
