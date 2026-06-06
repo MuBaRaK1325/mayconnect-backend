@@ -155,11 +155,10 @@ app.post("/webhooks/alrahuz", async (req, res) => {
         return res.status(200).json({ error: true }); // Still return 200
     }
 });
-
 /* ================= ARRAHUZ API HELPERS ================= */
 const PROVIDERS = {
   arrahuz: {
-    base_url: "https://alrahuzdata.com.ng", // Correct: https://alrahuzdata.com.ng/api/topup/
+    base_url: "https://alrahuzdata.com.ng", // Confirmed: https://alrahuzdata.com.ng/api/topup/
     tokens: {
       mayconnect: process.env.ARRAHUZ_TOKEN_MAYCONNECT,
       teeversh: process.env.ARRAHUZ_TOKEN_TEEVERSH,
@@ -201,25 +200,30 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
     throw new Error(`Invalid network: ${currentNetwork}`);
   }
 
-  // Try 234 format - Arrahuz converted to this in your working curl
+  // Convert to 234 format - matches your working curl response
   const phone234 = formattedPhone.startsWith('0') ? '234' + formattedPhone.slice(1) : formattedPhone;
 
   const payload = {
-    network: networkId,
+    network: networkId, // Current network ID
     amount: Number(amount),
-    mobile_number: phone234, // Send 2349121243474 instead of 09121243474
+    mobile_number: phone234, // 2349121243474 format
     Ported_number: true,
     airtime_type: "VTU"
   };
 
-  console.log('ARRAHUZ REQUEST:', { url: `${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, token: token.slice(0,8) + '...' });
+  console.log('ARRAHUZ REQUEST:', { 
+    url: `${PROVIDERS.arrahuz.base_url}/api/topup/`, 
+    payload, 
+    token: token ? token.slice(0,8) + '...' : 'MISSING'
+  });
 
   try {
     const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, {
       headers: {
         'Authorization': `Token ${token}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0' // Some APIs block non-browser UAs
+        'User-Agent': 'Mozilla/5.0',
+        'Accept': 'application/json'
       },
       timeout: 30000
     });
@@ -238,16 +242,19 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
       status: error.response?.status,
       statusText: error.response?.statusText,
       data: error.response?.data,
-      requestData: payload
+      requestData: payload,
+      company: company,
+      tokenUsed: token ? token.slice(0,8) + '...' : 'MISSING'
     });
     
     if (error.response?.status === 500) {
-      throw new Error(`Arrahuz 500: ${error.response?.data || 'Check token/balance/phone format'}`);
+      throw new Error(`Arrahuz 500: Check token for ${company} or account balance`);
     }
     throw error;
   }
 }
 /* ================= END ARRAHUZ HELPERS ================= */
+
 
 
 /* ================= GLOBAL MIDDLEWARE - AFTER WEBHOOK ================= */
