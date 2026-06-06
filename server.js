@@ -195,25 +195,31 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
   if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
 
   const formattedPhone = formatPhoneForArrahuz(phone);
-  const networkId = getArrahuzNetworkId(currentNetwork); // Use CURRENT network
+  const networkId = getArrahuzNetworkId(currentNetwork);
   
   if (!networkId) {
-    throw new Error(`Invalid network: ${currentNetwork}. Use MTN, Glo, Airtel, or 9mobile`);
+    throw new Error(`Invalid network: ${currentNetwork}`);
   }
 
+  // Try 234 format - Arrahuz converted to this in your working curl
+  const phone234 = formattedPhone.startsWith('0') ? '234' + formattedPhone.slice(1) : formattedPhone;
+
   const payload = {
-    network: networkId, // Current network ID
+    network: networkId,
     amount: Number(amount),
-    mobile_number: formattedPhone,
-    Ported_number: true, // Always true for Nigeria
+    mobile_number: phone234, // Send 2349121243474 instead of 09121243474
+    Ported_number: true,
     airtime_type: "VTU"
   };
+
+  console.log('ARRAHUZ REQUEST:', { url: `${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, token: token.slice(0,8) + '...' });
 
   try {
     const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, {
       headers: {
         'Authorization': `Token ${token}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0' // Some APIs block non-browser UAs
       },
       timeout: 30000
     });
@@ -228,8 +234,15 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
 
     return response.data;
   } catch (error) {
+    console.error("ARRAHUZ RAW ERROR:", {
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      data: error.response?.data,
+      requestData: payload
+    });
+    
     if (error.response?.status === 500) {
-      throw new Error(`Arrahuz: 500 error - check network ID and Ported_number`);
+      throw new Error(`Arrahuz 500: ${error.response?.data || 'Check token/balance/phone format'}`);
     }
     throw error;
   }
