@@ -158,7 +158,7 @@ app.post("/webhooks/alrahuz", async (req, res) => {
 /* ================= ARRAHUZ API HELPERS ================= */
 const PROVIDERS = {
   arrahuz: {
-    base_url: "https://alrahuzdata.com.ng", // FIXED: removed /api/topup
+    base_url: "https://alrahuzdata.com.ng",
     tokens: {
       mayconnect: process.env.ARRAHUZ_TOKEN_MAYCONNECT,
       teeversh: process.env.ARRAHUZ_TOKEN_TEEVERSH,
@@ -184,8 +184,8 @@ function getArrahuzNetworkId(networkName) {
 
 function formatPhoneForArrahuz(phone) {
   let p = String(phone).replace(/\D/g, '');
-  if (p.startsWith('234')) p = '0' + p.slice(3); // 234912... -> 0912...
-  if (p.length === 10) p = '0' + p; // 912... -> 0912...
+  if (p.startsWith('234')) p = '0' + p.slice(3);
+  if (p.length === 10) p = '0' + p;
   return p; // Must be 11 digits: 09121243474
 }
 
@@ -198,12 +198,12 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
     throw new Error(`Invalid network: ${currentNetwork}`);
   }
 
-  const formattedPhone = formatPhoneForArrahuz(phone); // FIXED: Use 0-prefix format
+  const formattedPhone = formatPhoneForArrahuz(phone);
 
   const payload = {
     network: Number(networkId),
     amount: Number(amount),
-    mobile_number: formattedPhone, // FIXED: Send 09121243474 not 2349121243474
+    mobile_number: formattedPhone,
     Ported_number: true,
     airtime_type: "VTU"
   };
@@ -212,14 +212,17 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
 
   try {
     const response = await axios.post(
-      `${PROVIDERS.arrahuz.base_url}/api/topup/`, // FIXED: Correct full URL
+      `${PROVIDERS.arrahuz.base_url}/api/topup/`,
       payload,
       {
         headers: {
           'Authorization': `Token ${token}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (compatible; Mayconnect/1.0)', // ADDED: Fixes empty 500s
+          'Accept': 'application/json'
         },
-        timeout: 30000
+        timeout: 30000,
+        validateStatus: (status) => status < 500 // Don't throw on 4xx so we see the body
       }
     );
 
@@ -239,9 +242,10 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
       console.error("ARRAHUZ API ERROR:", {
         status: error.response.status,
         data: error.response.data,
-        payload
+        payload,
+        company
       });
-      throw new Error(error.response.data?.api_response || `Arrahuz ${error.response.status}: ${error.response.data}`);
+      throw new Error(error.response.data?.api_response || error.response.data?.error || `Arrahuz ${error.response.status}`);
     }
     throw error;
   }
