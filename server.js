@@ -203,13 +203,11 @@ async function callArrahuzAirtime(phone, network, amount, company) {
     network: networkId,
     amount: Number(amount),
     mobile_number: formattedPhone,
-    Ported_number: false,
+    Ported_number: true, // Set true - Arrahuz validates prefix internally
     airtime_type: "VTU"
   };
 
-  // Based on their docs pattern: /api/user/, /api/data/, /api/epin/
-  // Airtime should be /api/airtime/ - not /api/topup/
-  const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/airtime/`, payload, {
+  const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, {
     headers: {
       'Authorization': `Token ${token}`,
       'Content-Type': 'application/json'
