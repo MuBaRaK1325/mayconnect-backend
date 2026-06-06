@@ -157,6 +157,19 @@ app.post("/webhooks/alrahuz", async (req, res) => {
 });
 
 /* ================= ARRAHUZ API HELPERS ================= */
+// Your existing config
+const PROVIDERS = {
+  arrahuz: {
+    base_url: "https://alrahuzdata.com.ng",
+    tokens: {
+      mayconnect: process.env.ARRAHUZ_TOKEN_MAYCONNECT,
+      teeversh: process.env.ARRAHUZ_TOKEN_TEEVERSH,
+      sadeeq: process.env.ARRAHUZ_TOKEN_SADEEQ,
+      bnhabeeb: process.env.ARRAHUZ_TOKEN_BNHABEEB
+    }
+  }
+};
+
 // Arrahuz network IDs: 1=MTN, 2=Glo, 3=Airtel, 4=9mobile
 const ARRAHUZ_NETWORK_MAP = {
   'mtn': 1,
@@ -174,12 +187,17 @@ function formatPhoneForArrahuz(phone) {
   return p;
 }
 
-async function callArrahuzAirtime(phone, network, amount) {
+async function callArrahuzAirtime(phone, network, amount, company) {
+  const token = PROVIDERS.arrahuz.tokens[company?.toLowerCase()];
+  if (!token) {
+    throw new Error(`No Arrahuz token configured for ${company}`);
+  }
+
   const networkId = ARRAHUZ_NETWORK_MAP[String(network).toLowerCase()];
   if (!networkId) throw new Error(`Unsupported network: ${network}`);
 
   const formattedPhone = formatPhoneForArrahuz(phone);
-  if (formattedPhone.length!== 11 ||!formattedPhone.startsWith('0')) {
+  if (formattedPhone.length !== 11 || !formattedPhone.startsWith('0')) {
     throw new Error('Phone must be 11 digits starting with 0');
   }
 
@@ -191,9 +209,9 @@ async function callArrahuzAirtime(phone, network, amount) {
     airtime_type: "VTU"
   };
 
-  const response = await axios.post('https://alrahuzdata.com.ng/api/topup/', payload, {
+  const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, {
     headers: {
-      'Authorization': `Token ${process.env.ARRAHUZ_TOKEN}`,
+      'Authorization': `Token ${token}`, // Now uses company token
       'Content-Type': 'application/json'
     },
     timeout: 30000
@@ -202,17 +220,6 @@ async function callArrahuzAirtime(phone, network, amount) {
   return response.data;
 }
 
-// Optional: Query transaction status after 500/timeout
-async function queryArrahuzAirtime(transactionId) {
-  const response = await axios.get(`https://alrahuzdata.com.ng/api/data/${transactionId}`, {
-    headers: {
-      'Authorization': `Token ${process.env.ARRAHUZ_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    timeout: 15000
-  });
-  return response.data;
-}
 /* ================= GLOBAL MIDDLEWARE - AFTER WEBHOOK ================= */
 app.use(express.static('public'));
 app.use(express.json({ limit: '1mb' }));
