@@ -169,7 +169,7 @@ const PROVIDERS = {
   }
 };
 
-// Arrahuz correct network IDs
+// Arrahuz correct network IDs: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL, 5=SMILE
 const ARRAHUZ_NETWORK_MAP = {
   'mtn': 1,
   'glo': 2,
@@ -179,7 +179,7 @@ const ARRAHUZ_NETWORK_MAP = {
   'smile': 5
 };
 
-// For ported numbers: use ORIGINAL prefix network, not current network
+// Get original network ID from prefix - required for Arrahuz porting logic
 function getOriginalNetworkId(phone) {
   const p = phone.replace(/\D/g, '');
   const prefix = p.startsWith('234') ? p.slice(3, 6) : p.slice(0, 4);
@@ -189,7 +189,7 @@ function getOriginalNetworkId(phone) {
   if (/^(0809|0817|0818|0908|0909|0912)/.test(prefix)) return 3; // 9MOBILE
   if (/^(0701|0708|0802|0808|0812|0901|0902|0904|0907|0911)/.test(prefix)) return 4; // AIRTEL
   
-  return null; // Unknown
+  return null;
 }
 
 function formatPhoneForArrahuz(phone) {
@@ -204,33 +204,47 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
   if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
 
   const formattedPhone = formatPhoneForArrahuz(phone);
-  
-  // For ported numbers, use original prefix network ID
   const networkId = getOriginalNetworkId(formattedPhone);
-  if (!networkId) throw new Error(`Cannot determine original network for ${phone}`);
+  
+  if (!networkId) {
+    throw new Error(`Cannot determine original network for ${phone}. Unsupported prefix.`);
+  }
 
+  // Arrahuz quirk: Ported_number must be true, and network = original prefix network
+  // Arrahuz will detect current network internally and deliver correctly
   const payload = {
-    network: networkId, // Original prefix network, not current
+    network: networkId,
     amount: Number(amount),
     mobile_number: formattedPhone,
-    Ported_number: true, // Always true for Nigeria
+    Ported_number: true, // Always true - Arrahuz 500s if false on ported numbers
     airtime_type: "VTU"
   };
 
-  const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, {
-    headers: {
-      'Authorization': `Token ${token}`,
-      'Content-Type': 'application/json'
-    },
-    timeout: 30000
-  });
+  try {
+    const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, {
+      headers: {
+        'Authorization': `Token ${token}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    });
 
-  if (response.data?.Status === 'failed') {
-    throw new Error(response.data.api_response || 'Transaction failed');
+    if (response.data?.Status === 'failed') {
+      throw new Error(response.data.api_response || 'Arrahuz: Transaction failed');
+    }
+
+    if (response.data?.Status !== 'successful') {
+      throw new Error(`Arrahuz: Unexpected status ${response.data?.Status}`);
+    }
+
+    return response.data;
+  } catch (error) {
+    if (error.response?.status === 500 && !error.response?.data) {
+      throw new Error('Arrahuz: 500 error - likely wrong network ID or Ported_number: false');
+    }
+    throw error;
   }
-
-  return response.data;
-}   
+}
 /* ================= END ARRAHUZ HELPERS ================= */
 
 
@@ -1872,7 +1886,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const { phone, amount, network, pin } = req.body;
 
     // 1. Input validation
-    if (!phone ||!amount ||!network) {
+    if (!phone || !amount || !network) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "phone, amount, and network are required" });
     }
@@ -1883,14 +1897,15 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       return res.status(400).json({ message: "Amount must be between ₦50 and ₦50,000" });
     }
 
+    const networkKey = String(network).toLowerCase();
     const validNetworks = Object.keys(ARRAHUZ_NETWORK_MAP);
-    if (!validNetworks.includes(String(network).toLowerCase())) {
+    if (!validNetworks.includes(networkKey)) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Invalid network. Use MTN, Glo, Airtel, or 9mobile" });
     }
 
     const formattedPhone = formatPhoneForArrahuz(phone);
-    if (formattedPhone.length!== 11) {
+    if (formattedPhone.length !== 11) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Phone must be 11 digits" });
     }
@@ -1903,7 +1918,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     }
 
     // 2. PIN / Biometric check
-    if (pin!== 'biometric_verified') {
+    if (pin !== 'biometric_verified') {
       if (!user.pin) {
         await client.query("ROLLBACK");
         return res.status(400).json({
@@ -1928,11 +1943,14 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
 
     const ref = "AIRTIME-" + uuidv4();
-    const cost = amt * 0.98; // Change if Arrahuz gives you different discount
+    const cost = amt * 0.98; // Update to match your Arrahuz discount
 
-    // 4. Call Arrahuz
+    // 4. Call Arrahuz - network param ignored, Arrahuz uses prefix + Ported_number: true
+    let arrahuzRes;
+    let actualNetworkId;
     try {
-      const arrahuzRes = await callArrahuzAirtime(formattedPhone, network, amt, user.company);
+      arrahuzRes = await callArrahuzAirtime(formattedPhone, network, amt, user.company);
+      actualNetworkId = getOriginalNetworkId(formattedPhone);
       console.log("ARRAHUZ SUCCESS:", { ref, response: arrahuzRes });
     } catch (vtuErr) {
       console.error("ARRAHUZ API ERROR:", {
@@ -1940,10 +1958,10 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
         data: vtuErr.response?.data,
         message: vtuErr.message,
         payload: {
-          network: ARRAHUZ_NETWORK_MAP[String(network).toLowerCase()],
+          network: getOriginalNetworkId(formattedPhone), // Use actual ID sent
           amount: Number(amt),
           mobile_number: formattedPhone,
-          Ported_number: false,
+          Ported_number: true, // Always true - this was your bug
           airtime_type: "VTU"
         },
         company: user.company
@@ -1953,12 +1971,11 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [amt, user.id]);
       await client.query("ROLLBACK");
 
-      // Return Arrahuz's actual error message if available
-      const arrahuzError = vtuErr.response?.data?.message || vtuErr.response?.data?.error || vtuErr.message;
+      const arrahuzError = vtuErr.response?.data?.api_response || vtuErr.response?.data?.message || vtuErr.response?.data?.error || vtuErr.message;
 
       if (vtuErr.response?.status === 500) {
         return res.status(503).json({
-          message: `Provider error: ${arrahuzError}. You were not debited. Try again in 5 minutes.`
+          message: `Provider error. You were not debited. Try again in 5 minutes.`
         });
       }
 
@@ -1971,7 +1988,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status,provider)
        VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS','arrahuz') RETURNING *`,
-      [user.id, amt, cost, formattedPhone, network.toLowerCase(), ref]
+      [user.id, amt, cost, formattedPhone, networkKey, ref]
     );
 
     // 6. Credit admin profit
