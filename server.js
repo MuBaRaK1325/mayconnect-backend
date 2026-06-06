@@ -158,7 +158,7 @@ app.post("/webhooks/alrahuz", async (req, res) => {
 /* ================= ARRAHUZ API HELPERS ================= */
 const PROVIDERS = {
   arrahuz: {
-    base_url: "https://alrahuzdata.com.ng", // Confirmed: https://alrahuzdata.com.ng/api/topup/
+    base_url: "https://alrahuzdata.com.ng/api/topup",
     tokens: {
       mayconnect: process.env.ARRAHUZ_TOKEN_MAYCONNECT,
       teeversh: process.env.ARRAHUZ_TOKEN_TEEVERSH,
@@ -200,33 +200,41 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
     throw new Error(`Invalid network: ${currentNetwork}`);
   }
 
-  // Convert to 234 format - matches your working curl response
   const phone234 = formattedPhone.startsWith('0') ? '234' + formattedPhone.slice(1) : formattedPhone;
 
+  // Build payload exactly like curl - numbers as numbers, strings as strings
   const payload = {
-    network: networkId, // Current network ID
-    amount: Number(amount),
-    mobile_number: phone234, // 2349121243474 format
-    Ported_number: true,
+    network: Number(networkId), // Force number
+    amount: Number(amount), // Force number  
+    mobile_number: String(phone234), // Force string
+    Ported_number: true, // Boolean true
     airtime_type: "VTU"
   };
 
-  console.log('ARRAHUZ REQUEST:', { 
-    url: `${PROVIDERS.arrahuz.base_url}/api/topup/`, 
-    payload, 
-    token: token ? token.slice(0,8) + '...' : 'MISSING'
-  });
+  const requestBody = JSON.stringify(payload); // Explicit stringify
+
+  console.log('ARRAHUZ REQUEST:', requestBody);
 
   try {
-    const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, {
+    const response = await axios({
+      method: 'POST',
+      url: `${PROVIDERS.arrahuz.base_url}/api/topup/`,
+      data: requestBody, // Send raw JSON string
       headers: {
         'Authorization': `Token ${token}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/json'
+        'Content-Length': Buffer.byteLength(requestBody),
+        'Accept': '*/*'
       },
-      timeout: 30000
+      timeout: 30000,
+      validateStatus: () => true // Don't throw on 500, let us see body
     });
+
+    console.log('ARRAHUZ RESPONSE:', response.status, response.data);
+
+    if (response.status === 500) {
+      throw new Error(`Arrahuz 500: ${response.data || 'Empty response - likely IP blocked or token issue'}`);
+    }
 
     if (response.data?.Status === 'failed') {
       throw new Error(response.data.api_response || 'Arrahuz: Transaction failed');
@@ -238,17 +246,13 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
 
     return response.data;
   } catch (error) {
-    console.error("ARRAHUZ RAW ERROR:", {
-      status: error.response?.status,
-      statusText: error.response?.statusText,
-      data: error.response?.data,
-      requestData: payload,
-      company: company,
-      tokenUsed: token ? token.slice(0,8) + '...' : 'MISSING'
-    });
-    
-    if (error.response?.status === 500) {
-      throw new Error(`Arrahuz 500: Check token for ${company} or account balance`);
+    if (error.response) {
+      console.error("ARRAHUZ RAW ERROR:", {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: error.response.data,
+        headers: error.response.headers
+      });
     }
     throw error;
   }
