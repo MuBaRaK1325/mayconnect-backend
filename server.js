@@ -205,13 +205,13 @@ async function callArrahuzAirtime(phone, network, amount, company) {
     network: networkId,
     amount: Number(amount),
     mobile_number: formattedPhone,
-    Ported_number: false,
+    Ported_number: false, // false prevents 500 timeouts from porting check
     airtime_type: "VTU"
   };
 
   const response = await axios.post(`${PROVIDERS.arrahuz.base_url}/api/topup/`, payload, {
     headers: {
-      'Authorization': `Token ${token}`, // Now uses company token
+      'Authorization': `Token ${token}`,
       'Content-Type': 'application/json'
     },
     timeout: 30000
@@ -219,6 +219,24 @@ async function callArrahuzAirtime(phone, network, amount, company) {
 
   return response.data;
 }
+
+// Optional: Query transaction status after timeout/500
+async function queryArrahuzAirtime(transactionId, company) {
+  const token = PROVIDERS.arrahuz.tokens[company?.toLowerCase()];
+  if (!token) {
+    throw new Error(`No Arrahuz token configured for ${company}`);
+  }
+
+  const response = await axios.get(`${PROVIDERS.arrahuz.base_url}/api/data/${transactionId}`, {
+    headers: {
+      'Authorization': `Token ${token}`,
+      'Content-Type': 'application/json'
+    },
+    timeout: 15000
+  });
+  return response.data;
+}
+
 
 /* ================= GLOBAL MIDDLEWARE - AFTER WEBHOOK ================= */
 app.use(express.static('public'));
@@ -1858,7 +1876,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const { phone, amount, network, pin } = req.body;
 
     // 1. Input validation
-    if (!phone || !amount || !network) {
+    if (!phone ||!amount ||!network) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "phone, amount, and network are required" });
     }
@@ -1876,7 +1894,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     }
 
     const formattedPhone = formatPhoneForArrahuz(phone);
-    if (formattedPhone.length !== 11) {
+    if (formattedPhone.length!== 11) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Phone must be 11 digits" });
     }
@@ -1889,7 +1907,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     }
 
     // 2. PIN / Biometric check
-    if (pin !== 'biometric_verified') {
+    if (pin!== 'biometric_verified') {
       if (!user.pin) {
         await client.query("ROLLBACK");
         return res.status(400).json({
@@ -1916,25 +1934,40 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const ref = "AIRTIME-" + uuidv4();
     const cost = amt * 0.98; // Change if Arrahuz gives you different discount
 
-    // 4. Call Arrahuz - FIXED: added user.company
+    // 4. Call Arrahuz
     try {
-      await callArrahuzAirtime(formattedPhone, network, amt, user.company);
+      const arrahuzRes = await callArrahuzAirtime(formattedPhone, network, amt, user.company);
+      console.log("ARRAHUZ SUCCESS:", { ref, response: arrahuzRes });
     } catch (vtuErr) {
-      console.error("ARRAHUZ API ERROR:", vtuErr.response?.data || vtuErr.message);
-      
+      console.error("ARRAHUZ API ERROR:", {
+        status: vtuErr.response?.status,
+        data: vtuErr.response?.data,
+        message: vtuErr.message,
+        payload: {
+          network: ARRAHUZ_NETWORK_MAP[String(network).toLowerCase()],
+          amount: Number(amt),
+          mobile_number: formattedPhone,
+          Ported_number: false,
+          airtime_type: "VTU"
+        },
+        company: user.company
+      });
+
       // Refund user since API failed
       await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [amt, user.id]);
       await client.query("ROLLBACK");
 
-      // Handle 500 specifically
+      // Return Arrahuz's actual error message if available
+      const arrahuzError = vtuErr.response?.data?.message || vtuErr.response?.data?.error || vtuErr.message;
+
       if (vtuErr.response?.status === 500) {
         return res.status(503).json({
-          message: "Provider is temporarily down. You were not debited. Try again in 5 minutes."
+          message: `Provider error: ${arrahuzError}. You were not debited. Try again in 5 minutes.`
         });
       }
-      
+
       return res.status(400).json({
-        message: vtuErr.message || "Purchase failed. Try again later."
+        message: arrahuzError || "Purchase failed. Try again later."
       });
     }
 
