@@ -251,7 +251,30 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
   }
 }
 /* ================= END ARRAHUZ HELPERS ================= */
-
+app.get("/test-arrahuz-ip", async (req, res) => {
+  try {
+    // First, get your Render outbound IP
+    const ipRes = await axios.get('https://api.ipify.org?format=json');
+    const renderIP = ipRes.data.ip;
+    
+    // Now test Arrahuz with that IP
+    const arrahuzTest = await callArrahuzAirtime("09121243474", "airtel", 100, "sadeeq");
+    
+    res.json({ 
+      success: true, 
+      renderIP,
+      arrahuzResponse: arrahuzTest 
+    });
+  } catch (e) {
+    res.json({ 
+      success: false,
+      renderIP: e.config ? 'Check Render logs' : 'Unknown',
+      error: e.message,
+      status: e.response?.status,
+      data: e.response?.data || 'EMPTY - IP BLOCKED'
+    });
+  }
+});
 
 
 /* ================= GLOBAL MIDDLEWARE - AFTER WEBHOOK ================= */
