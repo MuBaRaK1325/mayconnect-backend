@@ -1934,12 +1934,10 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const ref = "AIRTIME-" + uuidv4();
     const cost = amt * 0.98; // Update to match your Arrahuz discount
 
-    // 4. Call Arrahuz - network param ignored, Arrahuz uses prefix + Ported_number: true
+    // 4. Call Arrahuz - uses CURRENT network ID + Ported_number: true
     let arrahuzRes;
-    let actualNetworkId;
     try {
       arrahuzRes = await callArrahuzAirtime(formattedPhone, network, amt, user.company);
-      actualNetworkId = getOriginalNetworkId(formattedPhone);
       console.log("ARRAHUZ SUCCESS:", { ref, response: arrahuzRes });
     } catch (vtuErr) {
       console.error("ARRAHUZ API ERROR:", {
@@ -1947,10 +1945,10 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
         data: vtuErr.response?.data,
         message: vtuErr.message,
         payload: {
-          network: getOriginalNetworkId(formattedPhone), // Use actual ID sent
+          network: getArrahuzNetworkId(network), // Fixed: use current network, not prefix
           amount: Number(amt),
           mobile_number: formattedPhone,
-          Ported_number: true, // Always true - this was your bug
+          Ported_number: true,
           airtime_type: "VTU"
         },
         company: user.company
