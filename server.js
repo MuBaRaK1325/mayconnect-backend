@@ -159,7 +159,7 @@ app.post("/webhooks/alrahuz", async (req, res) => {
 /* ================= ARRAHUZ API HELPERS ================= */
 const PROVIDERS = {
   arrahuz: {
-    base_url: "https://alrahuzdata.com.ng",
+    base_url: "https://alrahuzdata.com.ng", // Correct: https://alrahuzdata.com.ng/api/topup/
     tokens: {
       mayconnect: process.env.ARRAHUZ_TOKEN_MAYCONNECT,
       teeversh: process.env.ARRAHUZ_TOKEN_TEEVERSH,
@@ -169,7 +169,7 @@ const PROVIDERS = {
   }
 };
 
-// Arrahuz correct network IDs: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL, 5=SMILE
+// Arrahuz network IDs: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL, 5=SMILE
 const ARRAHUZ_NETWORK_MAP = {
   'mtn': 1,
   'glo': 2,
@@ -179,17 +179,8 @@ const ARRAHUZ_NETWORK_MAP = {
   'smile': 5
 };
 
-// Get original network ID from prefix - required for Arrahuz porting logic
-function getOriginalNetworkId(phone) {
-  const p = phone.replace(/\D/g, '');
-  const prefix = p.startsWith('234') ? p.slice(3, 6) : p.slice(0, 4);
-  
-  if (/^(0703|0706|0803|0806|0810|0813|0814|0816|0903|0906|0913|0916)/.test(prefix)) return 1; // MTN
-  if (/^(0705|0805|0807|0811|0815|0905|0915)/.test(prefix)) return 2; // GLO
-  if (/^(0809|0817|0818|0908|0909|0912)/.test(prefix)) return 3; // 9MOBILE
-  if (/^(0701|0708|0802|0808|0812|0901|0902|0904|0907|0911)/.test(prefix)) return 4; // AIRTEL
-  
-  return null;
+function getArrahuzNetworkId(networkName) {
+  return ARRAHUZ_NETWORK_MAP[String(networkName).toLowerCase()] || null;
 }
 
 function formatPhoneForArrahuz(phone) {
@@ -204,19 +195,17 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
   if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
 
   const formattedPhone = formatPhoneForArrahuz(phone);
-  const networkId = getOriginalNetworkId(formattedPhone);
+  const networkId = getArrahuzNetworkId(currentNetwork); // Use CURRENT network
   
   if (!networkId) {
-    throw new Error(`Cannot determine original network for ${phone}. Unsupported prefix.`);
+    throw new Error(`Invalid network: ${currentNetwork}. Use MTN, Glo, Airtel, or 9mobile`);
   }
 
-  // Arrahuz quirk: Ported_number must be true, and network = original prefix network
-  // Arrahuz will detect current network internally and deliver correctly
   const payload = {
-    network: networkId,
+    network: networkId, // Current network ID
     amount: Number(amount),
     mobile_number: formattedPhone,
-    Ported_number: true, // Always true - Arrahuz 500s if false on ported numbers
+    Ported_number: true, // Always true for Nigeria
     airtime_type: "VTU"
   };
 
@@ -239,8 +228,8 @@ async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
 
     return response.data;
   } catch (error) {
-    if (error.response?.status === 500 && !error.response?.data) {
-      throw new Error('Arrahuz: 500 error - likely wrong network ID or Ported_number: false');
+    if (error.response?.status === 500) {
+      throw new Error(`Arrahuz: 500 error - check network ID and Ported_number`);
     }
     throw error;
   }
