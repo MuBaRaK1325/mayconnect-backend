@@ -155,124 +155,152 @@ app.post("/webhooks/alrahuz", async (req, res) => {
         return res.status(200).json({ error: true }); // Still return 200
     }
 });
-/* ================= ARRAHUZ API HELPERS ================= */
-const PROVIDERS = {
-  arrahuz: {
-    base_url: "https://alrahuzdata.com.ng",
-    tokens: {
-      mayconnect: process.env.ARRAHUZ_TOKEN_MAYCONNECT,
-      teeversh: process.env.ARRAHUZ_TOKEN_TEEVERSH,
-      sadeeq: process.env.ARRAHUZ_TOKEN_SADEEQ,
-      bnhabeeb: process.env.ARRAHUZ_TOKEN_BNHABEEB
-    }
+// MAITAMA API HELPERS - START
+const MAITAMA_PROVIDERS = {
+  base_url: "https://app.maitamadatahub.com/api",
+  tokens: {
+    mayconnect: process.env.MAITAMA_TOKEN_MAYCONNECT,
+    teeversh: process.env.MAITAMA_TOKEN_TEEVERSH,
+    sadeeq: process.env.MAITAMA_TOKEN_SADEEQ,
+    bnhabeeb: process.env.MAITAMA_TOKEN_BNHABEEB
   }
 };
 
-// Arrahuz network IDs: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL, 5=SMILE
-const ARRAHUZ_NETWORK_MAP = {
+// MAITAMA NETWORK MAP: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+const MAITAMA_NETWORK_MAP = {
   'mtn': 1,
-  'glo': 2,
-  '9mobile': 3,
-  'etisalat': 3,
-  'airtel': 4,
-  'smile': 5
+  'airtel': 2,
+  'glo': 3,
+  '9mobile': 4,
+  'etisalat': 4
 };
 
-function getArrahuzNetworkId(networkName) {
-  return ARRAHUZ_NETWORK_MAP[String(networkName).toLowerCase()] || null;
+function getMaitamaNetworkId(networkName) {
+  return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
 }
 
-function formatPhoneForArrahuz(phone) {
+function formatPhoneForMaitama(phone) {
   let p = String(phone).replace(/\D/g, '');
   if (p.startsWith('234')) p = '0' + p.slice(3);
   if (p.length === 10) p = '0' + p;
-  return p; // Must be 11 digits: 09121243474
+  return p;
 }
 
-async function callArrahuzAirtime(phone, currentNetwork, amount, company) {
-  const token = PROVIDERS.arrahuz.tokens[company?.toLowerCase()];
-  if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
-
-  const networkId = getArrahuzNetworkId(currentNetwork);
-  if (!networkId) {
-    throw new Error(`Invalid network: ${currentNetwork}`);
+async function callMaitamaAirtime(phone, currentNetwork, amount, company, uniqueRef = null) {
+  const token = MAITAMA_PROVIDERS.tokens[company?.toLowerCase()];
+  if (!token) {
+    throw new Error(`No Maitama token configured for ${company}`);
   }
 
-  const formattedPhone = formatPhoneForArrahuz(phone);
+  const networkId = getMaitamaNetworkId(currentNetwork);
+  if (!networkId) {
+    throw new Error(`Invalid network: ${currentNetwork}. Use: mtn, airtel, glo, 9mobile`);
+  }
 
+  const formattedPhone = formatPhoneForMaitama(phone);
+  const amountNum = Number(amount);
+
+  if (amountNum < 50 || amountNum > 5000) {
+    throw new Error(`Amount must be between ₦50 and ₦5,000. Got: ₦${amountNum}`);
+  }
+
+  // Network IDs: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
   const payload = {
     network: Number(networkId),
-    amount: Number(amount),
-    mobile_number: formattedPhone,
-    Ported_number: true,
-    airtime_type: "VTU"
+    amount: amountNum,
+    mobile_number: formattedPhone
   };
 
-  console.log('ARRAHUZ REQUEST:', payload);
+  let endpoint = `${MAITAMA_PROVIDERS.base_url}/topup`;
+  if (uniqueRef) {
+    endpoint = `${MAITAMA_PROVIDERS.base_url}/topup/${uniqueRef}`;
+  }
+
+  console.log('MAITAMA REQUEST:', { endpoint, payload, company });
 
   try {
     const response = await axios.post(
-      `${PROVIDERS.arrahuz.base_url}/api/topup/`,
+      endpoint,
       payload,
       {
         headers: {
-          'Authorization': `Token ${token}`,
+          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (compatible; Mayconnect/1.0)', // ADDED: Fixes empty 500s
-          'Accept': 'application/json'
+          'Accept': 'application/json',
+          'User-Agent': 'MUSTYKNK/1.0'
         },
         timeout: 30000,
-        validateStatus: (status) => status < 500 // Don't throw on 4xx so we see the body
+        validateStatus: (status) => status < 500
       }
     );
 
-    console.log('ARRAHUZ RESPONSE:', response.status, response.data);
+    console.log('MAITAMA RESPONSE:', response.status, response.data);
 
-    if (response.data?.Status === 'failed') {
-      throw new Error(response.data.api_response || 'Arrahuz: Transaction failed');
+    if (response.data?.data?.Status === 'failed') {
+      throw new Error(response.data.data.api_response || 'Maitama: Transaction failed');
     }
 
-    if (response.data?.Status !== 'successful') {
-      throw new Error(`Arrahuz: Unexpected status ${response.data?.Status}`);
+    if (response.data?.data?.Status !== 'successful') {
+      throw new Error(`Maitama: Unexpected status ${response.data?.data?.Status}`);
     }
 
-    return response.data;
+    return response.data.data;
   } catch (error) {
     if (error.response) {
-      console.error("ARRAHUZ API ERROR:", {
+      console.error("MAITAMA API ERROR:", {
         status: error.response.status,
         data: error.response.data,
         payload,
         company
       });
-      throw new Error(error.response.data?.api_response || error.response.data?.error || `Arrahuz ${error.response.status}`);
+      
+      if (error.response.status === 422) {
+        const errors = error.response.data?.errors;
+        if (errors?.amount) throw new Error(`Maitama: ${errors.amount[0]}`);
+        if (errors?.mobile_number) throw new Error(`Maitama: ${errors.mobile_number[0]}`);
+        if (errors?.network) throw new Error(`Maitama: ${errors.network[0]}`);
+        if (errors?.status) throw new Error(`Maitama: ${errors.status[0]}`);
+      }
+
+      if (error.response.status === 401) {
+        throw new Error('Maitama: Invalid API Token. Check your .env');
+      }
+
+      if (error.response.status === 403) {
+        throw new Error(`Maitama: IP Blocked. ${error.response.data?.message}`);
+      }
+
+      throw new Error(error.response.data?.message || error.response.data?.api_response || `Maitama ${error.response.status}`);
     }
     throw error;
   }
 }
-/* ================= END ARRAHUZ HELPERS ================= */
-app.get("/test-arrahuz-ip", async (req, res) => {
+// MAITAMA API HELPERS - END
+
+/* ================== MAITAMA TEST ROUTE ================== */
+app.get("/test-maitama-ip", async (req, res) => {
   let renderIP = 'unknown';
   try {
-    // Get Render outbound IP first
     const ipRes = await axios.get('https://api.ipify.org?format=json', { timeout: 5000 });
     renderIP = ipRes.data.ip;
     
-    // Now test Arrahuz
-    const arrahuzTest = await callArrahuzAirtime("09121243474", "airtel", 100, "sadeeq");
+    const uniqueRef = `test-${Date.now()}`;
+    // Test Airtel = 2
+    const maitamaTest = await callMaitamaAirtime("09121243474", "airtel", 50, "sadeeq", uniqueRef);
     
     res.json({ 
       success: true, 
       renderIP,
-      arrahuzResponse: arrahuzTest 
+      maitamaResponse: maitamaTest,
+      networkUsed: 'airtel -> 2'
     });
   } catch (e) {
     res.json({ 
       success: false,
-      renderIP, // This will now show the IP even if Arrahuz fails
+      renderIP,
       error: e.message,
       status: e.response?.status,
-      data: e.response?.data || 'EMPTY - IP BLOCKED'
+      data: e.response?.data || 'EMPTY - CHECK IP WHITELIST'
     });
   }
 });
@@ -618,6 +646,77 @@ app.post('/api/test-push', async (req, res) => {
 });
 
 /* ================= VTU API CALLS ================= */
+// MAITAMA NETWORK MAP: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+const MAITAMA_NETWORK_MAP = {
+  'mtn': 1,
+  'airtel': 2,
+  'glo': 3,
+  '9mobile': 4,
+  'etisalat': 4
+};
+
+function getMaitamaNetworkId(networkName) {
+  return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
+}
+
+function formatPhoneForMaitama(phone) {
+  let p = String(phone).replace(/\D/g, '');
+  if (p.startsWith('234')) p = '0' + p.slice(3);
+  if (p.length === 10) p = '0' + p;
+  return p;
+}
+
+// MAITAMA AIRTIME - ONLY AIRTIME FUNCTION NOW
+async function callMaitamaAirtime(phone, network_id, amount, company, uniqueRef = null) {
+  const { base_url, tokens } = VTU_PROVIDERS.maitama;
+  const api_token = tokens[company];
+  if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
+
+  const amountNum = Number(amount);
+  if (amountNum < 50 || amountNum > 5000) {
+    throw new Error(`Amount must be between ₦50 and ₦5,000. Got: ₦${amountNum}`);
+  }
+
+  const formattedPhone = formatPhoneForMaitama(phone);
+
+  // Maitama Network IDs: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+  const payload = {
+    network: Number(network_id),
+    amount: amountNum,
+    mobile_number: formattedPhone
+  };
+
+  let endpoint = `${base_url}/api/topup`;
+  if (uniqueRef) {
+    endpoint = `${base_url}/api/topup/${uniqueRef}`;
+  }
+
+  console.log('MAITAMA AIRTIME REQUEST:', { endpoint, payload, company });
+
+  const res = await axios.post(
+    endpoint,
+    payload,
+    {
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${api_token}`,
+        "User-Agent": "MUSTYKNK/1.0"
+      },
+      timeout: 30000,
+      validateStatus: (status) => status < 500
+    }
+  );
+
+  const status = res.data?.data?.Status || res.data?.Status;
+  if (status?.toLowerCase()!== "successful") {
+    throw new Error(res.data?.data?.api_response || res.data?.api_response || res.data?.message || "Maitama airtime failed");
+  }
+
+  return res.data?.data || res.data;
+}
+
+// MAITAMA DATA
 async function callMaitamaData(phone, network_id, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.maitama;
   const api_token = tokens[company];
@@ -626,7 +725,7 @@ async function callMaitamaData(phone, network_id, api_plan_id, company) {
   const payload = {
     plan: Number(api_plan_id),
     mobile_number: String(phone),
-    network: Number(network_id)
+    network: Number(network_id) // 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
   };
 
   const res = await axios.post(
@@ -649,6 +748,7 @@ async function callMaitamaData(phone, network_id, api_plan_id, company) {
   return res.data;
 }
 
+// CHEAPDATAHUB DATA - KEPT
 async function callCheapDataHubData(phone, network_id, api_plan_id) {
   const { base_url, api_key } = VTU_PROVIDERS.cheapdatahub;
   if (!api_key) throw new Error("No CheapDataHub API key configured");
@@ -673,30 +773,7 @@ async function callCheapDataHubData(phone, network_id, api_plan_id) {
   return res.data;
 }
 
-async function callCheapDataHubAirtime(phone, network_id, amount) {
-  const { base_url, api_key } = VTU_PROVIDERS.cheapdatahub;
-  if (!api_key) throw new Error("No CheapDataHub API key configured");
-
-  const res = await axios.post(
-    `${base_url}/airtime/purchase/`,
-    {
-      provider_id: Number(network_id),
-      phone_number: String(phone),
-      amount: Number(amount)
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${api_key}`,
-        "Content-Type": "application/json"
-      },
-      timeout: 30000
-    }
-  );
-
-  if (res.data.status!== "true") throw new Error(res.data.message || "CheapDataHub failed");
-  return res.data;
-}
-
+// SUBPADI DATA - KEPT
 async function callSubPadiData(phone, product_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.subpadi;
   const token = tokens[company];
@@ -725,7 +802,7 @@ async function callSubPadiData(phone, product_id, company) {
   return res.data;
 }
 
-// NEW: Arrahuz Data
+// ARRAHUZ DATA - KEPT
 async function callArrahuzData(phone, network_id, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.arrahuz;
   const token = tokens[company];
@@ -733,9 +810,9 @@ async function callArrahuzData(phone, network_id, api_plan_id, company) {
   if (!api_plan_id) throw new Error("No Arrahuz plan_id configured for this plan");
 
   const payload = {
-    network: Number(network_id), // 1=MTN, 2=Glo, 3=Airtel, 4=9mobile
+    network: Number(network_id),
     mobile_number: String(phone),
-    plan: Number(api_plan_id), // Arrahuz specific plan ID
+    plan: Number(api_plan_id),
     Ported_number: true
   };
 
@@ -751,44 +828,9 @@ async function callArrahuzData(phone, network_id, api_plan_id, company) {
     }
   );
 
-  // Arrahuz doesn't return response body in docs, but check for common success patterns
   const status = res.data?.Status || res.data?.status;
   if (res.data && status &&!["success", "successful", "pending"].includes(status?.toLowerCase())) {
     throw new Error(res.data.message || res.data.error || "Arrahuz purchase failed");
-  }
-
-  return res.data || { status: "success", message: "Request sent to Arrahuz" };
-}
-
-// NEW: Arrahuz Airtime
-async function callArrahuzAirtime(phone, network_id, amount, company) {
-  const { base_url, tokens } = VTU_PROVIDERS.arrahuz;
-  const token = tokens[company];
-  if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
-
-  const payload = {
-    network: Number(network_id), // 1=MTN, 2=Glo, 3=Airtel, 4=9mobile
-    amount: Number(amount),
-    mobile_number: String(phone),
-    Ported_number: true,
-    airtime_type: "VTU"
-  };
-
-  const res = await axios.post(
-    `${base_url}/api/topup/`,
-    payload,
-    {
-      headers: {
-        "Authorization": `Token ${token}`,
-        "Content-Type": "application/json"
-      },
-      timeout: 60000
-    }
-  );
-
-  const status = res.data?.Status || res.data?.status;
-  if (res.data && status &&!["success", "successful", "pending"].includes(status?.toLowerCase())) {
-    throw new Error(res.data.message || res.data.error || "Arrahuz airtime failed");
   }
 
   return res.data || { status: "success", message: "Request sent to Arrahuz" };
@@ -1908,7 +1950,76 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   }
 });
 
-/* ================= BUY AIRTIME - Arrahuz for all companies + BIOMETRIC ================= */
+/* ================= BUY AIRTIME - Maitama: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE ================= */
+// MAITAMA NETWORK MAP
+const MAITAMA_NETWORK_MAP = {
+  'mtn': 1,
+  'airtel': 2,
+  'glo': 3,
+  '9mobile': 4,
+  'etisalat': 4
+};
+
+function getMaitamaNetworkId(networkName) {
+  return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
+}
+
+function formatPhoneForMaitama(phone) {
+  let p = String(phone).replace(/\D/g, '');
+  if (p.startsWith('234')) p = '0' + p.slice(3);
+  if (p.length === 10) p = '0' + p;
+  return p;
+}
+
+async function callMaitamaAirtime(phone, network_id, amount, company, uniqueRef = null) {
+  const { base_url, tokens } = VTU_PROVIDERS.maitama;
+  const api_token = tokens[company];
+  if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
+
+  const amountNum = Number(amount);
+  if (amountNum < 50 || amountNum > 5000) {
+    throw new Error(`Amount must be between ₦50 and ₦5,000. Got: ₦${amountNum}`);
+  }
+
+  const formattedPhone = formatPhoneForMaitama(phone);
+
+  // Maitama Network IDs: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+  const payload = {
+    network: Number(network_id),
+    amount: amountNum,
+    mobile_number: formattedPhone
+  };
+
+  let endpoint = `${base_url}/api/topup`;
+  if (uniqueRef) {
+    endpoint = `${base_url}/api/topup/${uniqueRef}`;
+  }
+
+  console.log('MAITAMA AIRTIME REQUEST:', { endpoint, payload, company });
+
+  const res = await axios.post(
+    endpoint,
+    payload,
+    {
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${api_token}`,
+        "User-Agent": "MUSTYKNK/1.0"
+      },
+      timeout: 30000,
+      validateStatus: (status) => status < 500
+    }
+  );
+
+  const status = res.data?.data?.Status || res.data?.Status;
+  if (status?.toLowerCase()!== "successful") {
+    throw new Error(res.data?.data?.api_response || res.data?.api_response || res.data?.message || "Maitama airtime failed");
+  }
+
+  return res.data?.data || res.data;
+}
+
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1916,26 +2027,28 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const { phone, amount, network, pin } = req.body;
 
     // 1. Input validation
-    if (!phone || !amount || !network) {
+    if (!phone ||!amount ||!network) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "phone, amount, and network are required" });
     }
 
     const amt = Number(amount);
-    if (isNaN(amt) || amt < 50 || amt > 50000) {
+    if (isNaN(amt) || amt < 50 || amt > 5000) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Amount must be between ₦50 and ₦50,000" });
+      return res.status(400).json({ message: "Amount must be between ₦50 and ₦5,000" });
     }
 
     const networkKey = String(network).toLowerCase();
-    const validNetworks = Object.keys(ARRAHUZ_NETWORK_MAP);
-    if (!validNetworks.includes(networkKey)) {
+    const networkId = getMaitamaNetworkId(networkKey);
+
+    // Maitama mapping: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+    if (!networkId) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Invalid network. Use MTN, Glo, Airtel, or 9mobile" });
+      return res.status(400).json({ message: "Invalid network. Use MTN, Airtel, Glo, or 9mobile" });
     }
 
-    const formattedPhone = formatPhoneForArrahuz(phone);
-    if (formattedPhone.length !== 11 || !formattedPhone.startsWith('0')) {
+    const formattedPhone = formatPhoneForMaitama(phone);
+    if (formattedPhone.length!== 11 ||!formattedPhone.startsWith('0')) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Phone must be 11 digits starting with 0" });
     }
@@ -1948,7 +2061,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     }
 
     // 2. PIN / Biometric check
-    if (pin !== 'biometric_verified') {
+    if (pin!== 'biometric_verified') {
       if (!user.pin) {
         await client.query("ROLLBACK");
         return res.status(400).json({
@@ -1973,24 +2086,22 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
 
     const ref = "AIRTIME-" + uuidv4();
-    const cost = amt * 0.98; // Update to match your Arrahuz discount
+    const cost = amt * 0.98; // Maitama discount: 2%. Update to match your actual rate
 
-    // 4. Call Arrahuz - uses 0-prefix format: 09121243474
-    let arrahuzRes;
+    // 4. Call Maitama
+    let maitamaRes;
     try {
-      arrahuzRes = await callArrahuzAirtime(formattedPhone, network, amt, user.company);
-      console.log("ARRAHUZ SUCCESS:", { ref, response: arrahuzRes });
+      maitamaRes = await callMaitamaAirtime(formattedPhone, networkId, amt, user.company, ref);
+      console.log("MAITAMA SUCCESS:", { ref, network: networkKey, networkId, response: maitamaRes });
     } catch (vtuErr) {
-      console.error("ARRAHUZ API ERROR:", {
+      console.error("MAITAMA API ERROR:", {
         status: vtuErr.response?.status,
         data: vtuErr.response?.data,
         message: vtuErr.message,
         payload: {
-          network: getArrahuzNetworkId(network),
+          network: networkId,
           amount: Number(amt),
-          mobile_number: formattedPhone, // 0-prefix format: 09121243474
-          Ported_number: true,
-          airtime_type: "VTU"
+          mobile_number: formattedPhone
         },
         company: user.company
       });
@@ -1999,7 +2110,16 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [amt, user.id]);
       await client.query("ROLLBACK");
 
-      const arrahuzError = vtuErr.response?.data?.api_response || vtuErr.response?.data?.message || vtuErr.response?.data?.error || vtuErr.message;
+      const maitamaError = vtuErr.response?.data?.data?.api_response ||
+                           vtuErr.response?.data?.message ||
+                           vtuErr.response?.data?.error ||
+                           vtuErr.message;
+
+      if (vtuErr.response?.status === 403) {
+        return res.status(503).json({
+          message: `Provider IP blocked. Contact admin. You were not debited.`
+        });
+      }
 
       if (vtuErr.response?.status === 500) {
         return res.status(503).json({
@@ -2008,14 +2128,14 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       }
 
       return res.status(400).json({
-        message: arrahuzError || "Purchase failed. Try again later."
+        message: maitamaError || "Purchase failed. Try again later."
       });
     }
 
     // 5. Log success transaction
     const txRes = await client.query(
-      `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status,provider)
-       VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS','arrahuz') RETURNING *`,
+      `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status,provider,gateway)
+       VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS','maitama','maitama') RETURNING *`,
       [user.id, amt, cost, formattedPhone, networkKey, ref]
     );
 
@@ -2040,7 +2160,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       url: '/dashboard.html'
     });
 
-    res.json({ success: true, reference: ref, balance: newBalance });
+    res.json({ success: true, reference: ref, balance: newBalance, provider: 'maitama', network_id: networkId });
 
   } catch (e) {
     await client.query("ROLLBACK");
