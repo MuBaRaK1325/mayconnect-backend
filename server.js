@@ -527,11 +527,18 @@ app.post('/api/test-push', async (req, res) => {
 
 /* ================= VTU API CALLS - MAITAMA CLEAN ================= */
 // MAITAMA NETWORK MAP: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
-const MAITAMA_NETWORK_MAP = {
+const MAITAMA_NETWORK_MAP_NAME_TO_ID = {
   'mtn': 1,
   'airtel': 2,
   'glo': 3,
   '9mobile': 4,
+};
+
+const MAITAMA_NETWORK_MAP_ID_TO_NAME = {
+  1: 'mtn',
+  2: 'airtel',
+  3: 'glo',
+  4: '9mobile'
 };
 
 // ARRAHUZ NETWORK MAP: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL
@@ -550,7 +557,12 @@ const ARRAHUZ_NETWORK_MAP_NAME_TO_ID = {
 };
 
 function getMaitamaNetworkId(networkName) {
-  return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
+  return MAITAMA_NETWORK_MAP_NAME_TO_ID[String(networkName).toLowerCase()] || null;
+}
+
+function getMaitamaNetworkName(networkId) {
+  const id = Number(networkId);
+  return MAITAMA_NETWORK_MAP_ID_TO_NAME[id] || null;
 }
 
 function getArrahuzNetworkId(networkName) {
@@ -569,7 +581,7 @@ function formatPhoneForMaitama(phone) {
   return p;
 }
 
-// MAITAMA AIRTIME - Accepts network name OR ID
+// MAITAMA AIRTIME - Uses network ID
 async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = null) {
   const { base_url, tokens } = VTU_PROVIDERS.maitama;
   const api_token = tokens[company];
@@ -591,7 +603,7 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   const formattedPhone = formatPhoneForMaitama(phone);
 
   const payload = {
-    network: networkId,
+    network: networkId, // Airtime endpoint yana son ID
     amount: amountNum,
     mobile_number: formattedPhone
   };
@@ -642,28 +654,29 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   }
 }
 
-// MAITAMA DATA - Accepts network name OR ID
+// MAITAMA DATA - Uses network NAME
 async function callMaitamaData(phone, network, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.maitama;
   const api_token = tokens[company];
   if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
 
-  let networkId;
+  let networkName;
   if (typeof network === 'string') {
-    networkId = getMaitamaNetworkId(network);
-    if (!networkId) throw new Error(`Invalid network: ${network}. Use: mtn, airtel, glo, 9mobile`);
+    networkName = String(network).toLowerCase();
+    if (!getMaitamaNetworkId(networkName)) {
+      throw new Error(`Invalid network: ${network}. Use: mtn, airtel, glo, 9mobile`);
+    }
   } else {
-    networkId = Number(network);
-  }
-
-  if (![1, 2, 3, 4].includes(networkId)) {
-    throw new Error(`Invalid Maitama network_id: ${networkId}. Must be 1=MTN, 2=Airtel, 3=Glo, 4=9mobile`);
+    networkName = getMaitamaNetworkName(network);
+    if (!networkName) {
+      throw new Error(`Invalid Maitama network_id: ${network}. Must be 1=MTN, 2=Airtel, 3=Glo, 4=9mobile`);
+    }
   }
 
   const payload = {
     plan: Number(api_plan_id),
     mobile_number: formatPhoneForMaitama(phone),
-    network: networkId
+    network: networkName // Data endpoint yana son NAME
   };
 
   console.log('MAITAMA DATA REQUEST:', { payload, company });
@@ -742,14 +755,13 @@ async function callSubPadiData(phone, product_id, company) {
   return res.data;
 }
 
-// ARRAHUZ DATA - Fixed: Converts ID to name for API
+// ARRAHUZ DATA - Uses network NAME
 async function callArrahuzData(phone, network_id, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.arrahuz;
   const token = tokens[company];
   if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
   if (!api_plan_id) throw new Error("No Arrahuz plan_id configured for this plan");
 
-  // Convert numeric ID to network name for Arrahuz API
   const networkName = getArrahuzNetworkName(network_id);
   if (!networkName) {
     throw new Error(`Invalid Arrahuz network_id: ${network_id}. Must be 1=MTN, 2=Glo, 3=9mobile, 4=Airtel`);
