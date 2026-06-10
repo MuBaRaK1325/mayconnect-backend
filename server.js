@@ -2022,9 +2022,11 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     }
 
     const txRes = await client.query(
-      `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status,provider,gateway)
-       VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS','maitama','maitama') RETURNING *`,
-      [user.id, amt, cost, formattedPhone, networkKey, ref]
+      `INSERT INTO transactions(
+        user_id, type, amount, cost, phone, network,
+        reference, status, provider, gateway
+      ) VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS',$7,$8) RETURNING *`,
+      [user.id, amt, cost, formattedPhone, networkKey, ref, 'maitama', 'maitama']
     );
 
     const adminId = await getCompanyAdmin(user.company);
