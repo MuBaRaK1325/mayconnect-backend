@@ -746,73 +746,115 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= WEBAUTHN - BIOMETRIC ================= */
-const rpName = 'MAYCONNECT';
+/* ================= WEBAUTHN - BIOMETRIC PASSKEYS ================= */
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse
+} = require('@simplewebauthn/server');
+const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 
-// Base domain for RP ID. Use the main domain you want all brands to share.
-// If you want isolation per brand, set this dynamically per request.
-const rpID = 'mayconnectdataplug.com.ng'; 
-
-// Whitelist of allowed hostnames only - no protocol
-const ALLOWED_FRONTENDS = [
-  // New custom domains
-  'mayconnectdataplug.com.ng',
-  'www.mayconnectdataplug.com.ng',
-  'teevershdataplug.com.ng', 
-  'www.teevershdataplug.com.ng',
-  'sadeeqdatahub.com.ng',
-  'www.sadeeqdatahub.com.ng',
-  'bnhabeebdatahub.com.ng',
-  'www.bnhabeebdatahub.com.ng',
-  
-  // Old Render domains for backward compatibility
-  'mayconnect-frontend.onrender.com',
-  'teeversh-frontend.onrender.com',
-  'bnhabeeb-frontend.onrender.com', 
-  'sadeeq-frontend.onrender.com',
-  
-  // Local dev
-  'localhost'
-];
-
-// Helper to get rpID from request origin with validation
-function getRpID(req) {
-  if (process.env.NODE_ENV !== 'production') return 'localhost';
-
-  const origin = req.headers.origin || req.headers.referer;
-  if (origin) {
-    const hostname = new URL(origin).hostname;
-    if (ALLOWED_FRONTENDS.includes(hostname)) return hostname;
-    throw new Error(`Unauthorized origin: ${hostname}`);
+// Company config - Logo da Sunan kowacce brand
+const COMPANY_CONFIG = {
+  'mayconnectdataplug.com.ng': {
+    name: 'MAYCONNECT DATA PLUG',
+    icon: 'https://mayconnectdataplug.com.ng/logo.png',
+    short: 'mayconnect'
+  },
+  'www.mayconnectdataplug.com.ng': {
+    name: 'MAYCONNECT DATA PLUG',
+    icon: 'https://mayconnectdataplug.com.ng/logo.png',
+    short: 'mayconnect'
+  },
+  'teevershdataplug.com.ng': {
+    name: 'TEEVERSH DATA PLUG',
+    icon: 'https://teevershdataplug.com.ng/TEEVERSH.png',
+    short: 'teeversh'
+  },
+  'www.teevershdataplug.com.ng': {
+    name: 'TEEVERSH DATA PLUG',
+    icon: 'https://teevershdataplug.com.ng/TEEVERSH.png',
+    short: 'teeversh'
+  },
+  'sadeeqdatahub.com.ng': {
+    name: 'SADEEQ DATA HUB',
+    icon: 'https://sadeeqdatahub.com.ng/SADEEQ.PNG',
+    short: 'sadeeq'
+  },
+  'www.sadeeqdatahub.com.ng': {
+    name: 'SADEEQ DATA HUB',
+    icon: 'https://sadeeqdatahub.com.ng/SADEEQ.PNG',
+    short: 'sadeeq'
+  },
+  'bnhabeebdatahub.com.ng': {
+    name: 'BNHABEEB DATA HUB',
+    icon: 'https://bnhabeebdatahub.com.ng/BNHABEEB.png',
+    short: 'bnhabeeb'
+  },
+  'www.bnhabeebdatahub.com.ng': {
+    name: 'BNHABEEB DATA HUB',
+    icon: 'https://bnhabeebdatahub.com.ng/BNHABEEB.png',
+    short: 'bnhabeeb'
+  },
+  // Old Render domains
+  'mayconnect-frontend.onrender.com': {
+    name: 'MAYCONNECT DATA PLUG',
+    icon: 'https://mayconnect-frontend.onrender.com/logo.png',
+    short: 'mayconnect'
+  },
+  'teeversh-frontend.onrender.com': {
+    name: 'TEEVERSH DATA PLUG',
+    icon: 'https://teeversh-frontend.onrender.com/TEEVERSH.png',
+    short: 'teeversh'
+  },
+  'bnhabeeb-frontend.onrender.com': {
+    name: 'BNHABEEB DATA HUB',
+    icon: 'https://bnhabeeb-frontend.onrender.com/BNHABEEB.png',
+    short: 'bnhabeeb'
+  },
+  'sadeeq-frontend.onrender.com': {
+    name: 'SADEEQ DATA HUB',
+    icon: 'https://sadeeq-frontend.onrender.com/SADEEQ.PNG',
+    short: 'sadeeq'
+  },
+  'localhost': {
+    name: 'MAYCONNECT DEV',
+    icon: 'http://localhost:3000/logo.png',
+    short: 'mayconnect'
   }
+};
 
-  const host = req.headers.host;
-  if (host && ALLOWED_FRONTENDS.includes(host)) return host;
-  throw new Error('No origin or valid host header');
+// Shared RP ID - dole ya zama daya don passkeys su yi aiki across subdomains
+const SHARED_RP_ID = process.env.NODE_ENV === 'production'
+ ? 'mayconnectdataplug.com.ng'
+  : 'localhost';
+
+function getCompanyConfig(req) {
+  if (process.env.NODE_ENV!== 'production') return COMPANY_CONFIG['localhost'];
+
+  const hostname = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
+  return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['mayconnectdataplug.com.ng'];
 }
 
-// Helper to get origin for verification - must match browser's origin exactly
 function getExpectedOrigin(req) {
   const origin = req.headers.origin;
   if (!origin) throw new Error('No origin header');
   return origin;
 }
 
-const { isoBase64URL } = require('@simplewebauthn/server/helpers');
-
 /* ================= WEBAUTHN ROUTES ================= */
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
-    const rpId = getRpID(req);
     const creds = await pool.query(
-      'SELECT id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
-      [req.user.id, rpId]
+      'SELECT id FROM webauthn_credentials WHERE user_id=$1',
+      [req.user.id]
     );
     res.json({ enabled: creds.rows.length > 0 });
   } catch (e) {
     console.error('Check enabled error:', e.message);
     if (e.code === '42703') {
-      return res.json({ enabled: false }); // column doesn't exist yet
+      return res.json({ enabled: false });
     }
     res.status(500).json({ error: e.message });
   }
@@ -822,36 +864,36 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
     const userID = new TextEncoder().encode(user.id.toString());
-    const rpId = getRpID(req);
+    const company = getCompanyConfig(req);
 
     const existingCreds = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
-      [user.id, rpId]
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1',
+      [user.id]
     );
 
     if (existingCreds.rows.length > 0) {
-      return res.status(400).json({ error: 'Biometric already enabled for this device' });
+      return res.status(400).json({ error: 'Biometric already enabled. Disable first to re-register.' });
     }
 
     const options = await generateRegistrationOptions({
-      rpName,
-      rpID: rpId, // v10+ uses rpID not rpId
+      rpName: company.name,
+      rpID: SHARED_RP_ID,
+      rpIcon: company.icon, // Logo a prompt
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
       attestationType: 'none',
       authenticatorSelection: {
-        authenticatorAttachment: 'platform', // FORCE PHONE SENSOR - no QR code
+        authenticatorAttachment: 'platform',
         userVerification: 'required',
-        residentKey: 'discouraged' // KEY FIX: prevents cross-device passkey
+        residentKey: 'required', // KEY: Passkeys - babu email a login
+        requireResidentKey: true
       },
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 },
         { type: 'public-key', alg: -257 }
       ]
     });
-
-    options.rpID = rpId; // v10+ expects rpID in response too
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
     res.json(options);
@@ -864,34 +906,33 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
-  const rpId = getRpID(req);
   const expectedOrigin = getExpectedOrigin(req);
+  const company = getCompanyConfig(req);
 
   try {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
-      expectedRPID: rpId,
-      requireUserVerification: true // Set to true for fingerprint
+      expectedRPID: SHARED_RP_ID,
+      requireUserVerification: true
     });
 
     if (verification.verified) {
       const { credential } = verification.registrationInfo;
-      
+
       if (!credential ||!credential.id ||!credential.publicKey) {
         return res.status(400).json({ verified: false, error: 'Incomplete credential data' });
       }
 
-      // v10+ returns Buffer, convert to base64url
       const credentialID = Buffer.from(credential.id).toString('base64url');
       const publicKey = Buffer.from(credential.publicKey).toString('base64url');
 
       await pool.query(
-        `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4, rp_id=$5`,
-        [user.id, credentialID, publicKey, credential.counter, rpId]
+        `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4, company=$6`,
+        [user.id, credentialID, publicKey, credential.counter, SHARED_RP_ID, company.short]
       );
 
       await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
@@ -905,33 +946,25 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   }
 });
 
+// LOGIN START - BABU EMAIL! Button daya kawai
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
-    const { email } = req.body;
-    const user = await pool.query('SELECT id FROM users WHERE email=$1', [email]);
-    if (!user.rows.length) return res.status(400).json({ error: 'User not found' });
-
-    const rpId = getRpID(req);
-
-    const creds = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
-      [user.rows[0].id, rpId]
-    );
-    if (!creds.rows.length) return res.status(400).json({ error: 'Biometric not enabled for this user' });
+    const company = getCompanyConfig(req);
 
     const options = await generateAuthenticationOptions({
-      rpID: rpId, // v10+ uses rpID
-      userVerification: 'required', // Force fingerprint on login
-      allowCredentials: creds.rows.map(c => ({
-        id: c.credential_id, // v10+ accepts base64url string directly
-        type: 'public-key',
-        transports: ['internal'] // Force local device
-      }))
+      rpID: SHARED_RP_ID,
+      rpName: company.name, // Suna a prompt
+      rpIcon: company.icon, // Logo a prompt
+      userVerification: 'required',
+      allowCredentials: [] // EMPTY = Phone zai nuna duk passkeys na domain
     });
 
-    options.rpID = rpId;
+    // Ajiye challenge ba tare da user_id ba tukuna
+    await pool.query(
+      'INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')',
+      [options.challenge]
+    );
 
-    await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.rows[0].id]);
     res.json(options);
 
   } catch (e) {
@@ -940,32 +973,41 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
   }
 });
 
+// LOGIN FINISH - Gane user daga credentialID
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
-  const { email,...authResponse } = req.body;
-  const userRes = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
-  const user = userRes.rows[0];
-  if (!user) return res.status(400).json({ error: 'User not found' });
-
-  const rpId = getRpID(req);
+  const { id: credentialId,...authResponse } = req.body;
   const expectedOrigin = getExpectedOrigin(req);
 
-  const cred = await pool.query(
-    'SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND user_id=$2 AND rp_id=$3',
-    [authResponse.id, user.id, rpId]
-  );
-
-  if (!cred.rows.length) return res.status(400).json({ error: 'Credential not found' });
-
   try {
+    // 1. Nemo challenge
+    const challengeRes = await pool.query(
+      'SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1'
+    );
+    if (!challengeRes.rows[0]) return res.status(400).json({ error: 'Challenge expired. Try again.' });
+    const challenge = challengeRes.rows[0].challenge;
+
+    // 2. Nemo user daga credential
+    const credRes = await pool.query(
+      'SELECT * FROM webauthn_credentials WHERE credential_id=$1',
+      [credentialId]
+    );
+    if (!credRes.rows.length) return res.status(400).json({ error: 'Biometric not registered' });
+
+    const cred = credRes.rows[0];
+    const userRes = await pool.query('SELECT * FROM users WHERE id=$1', [cred.user_id]);
+    const user = userRes.rows[0];
+    if (!user) return res.status(400).json({ error: 'User not found' });
+
+    // 3. Verify
     const verification = await verifyAuthenticationResponse({
-      response: authResponse,
-      expectedChallenge: user.webauthn_challenge,
+      response: req.body,
+      expectedChallenge: challenge,
       expectedOrigin: expectedOrigin,
-      expectedRPID: rpId,
+      expectedRPID: SHARED_RP_ID,
       credential: {
-        id: cred.rows[0].credential_id,
-        publicKey: Buffer.from(cred.rows[0].public_key, 'base64url'),
-        counter: cred.rows[0].counter
+        id: cred.credential_id,
+        publicKey: Buffer.from(cred.public_key, 'base64url'),
+        counter: cred.counter
       },
       requireUserVerification: true
     });
@@ -974,15 +1016,16 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       const { authenticationInfo } = verification;
 
       await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE id=$2',
-        [authenticationInfo.newCounter, cred.rows[0].id]);
+        [authenticationInfo.newCounter, cred.id]);
 
-      await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
+      await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
 
       const token = jwt.sign(
         { id: user.id, username: user.username, is_admin: user.is_admin, company: user.company },
-        process.env.JWT_SECRET
+        process.env.JWT_SECRET,
+        { expiresIn: '7d' }
       );
-      res.json({ token });
+      res.json({ token, user: { id: user.id, username: user.username, company: user.company } });
     } else {
       res.status(400).json({ verified: false, error: 'Authentication failed' });
     }
@@ -1457,19 +1500,29 @@ app.post("/api/signup", async (req, res) => {
   }
 });
 
-/* ================= LOGIN ================= */
+/* ================= LOGIN - USERNAME OR EMAIL ================= */
 app.post("/api/login", loginLimiter, async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, email, password, login } = req.body;
 
-    if (!username ||!password) {
-      return res.status(400).json({ message: "Username and password are required" });
+    // Accept 'login' field ko 'username' ko 'email' don compatibility
+    const loginIdentifier = login || username || email;
+
+    if (!loginIdentifier ||!password) {
+      return res.status(400).json({ message: "Username/Email and password are required" });
     }
-    if (typeof username!== 'string' || typeof password!== 'string') {
+    if (typeof loginIdentifier!== 'string' || typeof password!== 'string') {
       return res.status(400).json({ message: "Invalid input type" });
     }
 
-    const userRes = await pool.query("SELECT * FROM users WHERE username=$1", [username.trim()]);
+    const trimmedLogin = loginIdentifier.trim().toLowerCase();
+
+    // Nemo user da username KO email - case insensitive
+    const userRes = await pool.query(
+      "SELECT * FROM users WHERE LOWER(username) = $1 OR LOWER(email) = $1",
+      [trimmedLogin]
+    );
+
     if (!userRes.rows.length) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
@@ -1478,6 +1531,11 @@ app.post("/api/login", loginLimiter, async (req, res) => {
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) {
       return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    // Check idan account din blocked
+    if (user.status === 'blocked') {
+      return res.status(403).json({ message: "Account blocked. Contact support." });
     }
 
     const token = jwt.sign(
