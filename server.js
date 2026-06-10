@@ -172,7 +172,7 @@ const MAITAMA_NETWORK_MAP = {
   'airtel': 2,
   'glo': 3,
   '9mobile': 4,
-  'etisalat': 4
+  
 };
 
 function getMaitamaNetworkId(networkName) {
@@ -1952,14 +1952,6 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
 
 /* ================= BUY AIRTIME - Maitama: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE ================= */
 // MAITAMA NETWORK MAP
-const MAITAMA_NETWORK_MAP = {
-  'mtn': 1,
-  'airtel': 2,
-  'glo': 3,
-  '9mobile': 4,
-  'etisalat': 4
-};
-
 function getMaitamaNetworkId(networkName) {
   return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
 }
