@@ -603,7 +603,7 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   const formattedPhone = formatPhoneForMaitama(phone);
 
   const payload = {
-    network: networkId, // Airtime endpoint yana son ID
+    network: networkId,
     amount: amountNum,
     mobile_number: formattedPhone
   };
@@ -654,29 +654,16 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   }
 }
 
-// MAITAMA DATA - Uses network NAME
-async function callMaitamaData(phone, network, api_plan_id, company) {
+// MAITAMA DATA - Uses network ID - WORKING VERSION
+async function callMaitamaData(phone, network_id, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.maitama;
   const api_token = tokens[company];
   if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
 
-  let networkName;
-  if (typeof network === 'string') {
-    networkName = String(network).toLowerCase();
-    if (!getMaitamaNetworkId(networkName)) {
-      throw new Error(`Invalid network: ${network}. Use: mtn, airtel, glo, 9mobile`);
-    }
-  } else {
-    networkName = getMaitamaNetworkName(network);
-    if (!networkName) {
-      throw new Error(`Invalid Maitama network_id: ${network}. Must be 1=MTN, 2=Airtel, 3=Glo, 4=9mobile`);
-    }
-  }
-
   const payload = {
     plan: Number(api_plan_id),
     mobile_number: formatPhoneForMaitama(phone),
-    network: networkName // Data endpoint yana son NAME
+    network: Number(network_id) // Uses ID as per working version
   };
 
   console.log('MAITAMA DATA REQUEST:', { payload, company });
@@ -726,6 +713,30 @@ async function callCheapDataHubData(phone, network_id, api_plan_id) {
   return res.data;
 }
 
+async function callCheapDataHubAirtime(phone, network_id, amount) {
+  const { base_url, api_key } = VTU_PROVIDERS.cheapdatahub;
+  if (!api_key) throw new Error("No CheapDataHub API key configured");
+
+  const res = await axios.post(
+    `${base_url}/airtime/purchase/`,
+    {
+      provider_id: Number(network_id),
+      phone_number: String(phone),
+      amount: Number(amount)
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${api_key}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 30000
+    }
+  );
+
+  if (res.data.status!== "true") throw new Error(res.data.message || "CheapDataHub failed");
+  return res.data;
+}
+
 // SUBPADI DATA - KEPT
 async function callSubPadiData(phone, product_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.subpadi;
@@ -755,20 +766,15 @@ async function callSubPadiData(phone, product_id, company) {
   return res.data;
 }
 
-// ARRAHUZ DATA - Uses network NAME
+// ARRAHUZ DATA - Uses network ID as per working version
 async function callArrahuzData(phone, network_id, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.arrahuz;
   const token = tokens[company];
   if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
   if (!api_plan_id) throw new Error("No Arrahuz plan_id configured for this plan");
 
-  const networkName = getArrahuzNetworkName(network_id);
-  if (!networkName) {
-    throw new Error(`Invalid Arrahuz network_id: ${network_id}. Must be 1=MTN, 2=Glo, 3=9mobile, 4=Airtel`);
-  }
-
   const payload = {
-    network: networkName, // Arrahuz API yana son 'airtel' ba 4 ba
+    network: Number(network_id), // 1=MTN, 2=Glo, 3=9mobile, 4=Airtel
     mobile_number: String(phone),
     plan: Number(api_plan_id),
     Ported_number: true
@@ -791,6 +797,42 @@ async function callArrahuzData(phone, network_id, api_plan_id, company) {
   const status = res.data?.Status || res.data?.status;
   if (res.data && status &&!["success", "successful", "pending"].includes(status?.toLowerCase())) {
     throw new Error(res.data.message || res.data.error || "Arrahuz purchase failed");
+  }
+
+  return res.data || { status: "success", message: "Request sent to Arrahuz" };
+}
+
+// ARRAHUZ AIRTIME
+async function callArrahuzAirtime(phone, network_id, amount, company) {
+  const { base_url, tokens } = VTU_PROVIDERS.arrahuz;
+  const token = tokens[company];
+  if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
+
+  const payload = {
+    network: Number(network_id), // 1=MTN, 2=Glo, 3=9mobile, 4=Airtel
+    amount: Number(amount),
+    mobile_number: String(phone),
+    Ported_number: true,
+    airtime_type: "VTU"
+  };
+
+  console.log('ARRAHUZ AIRTIME REQUEST:', { payload, company });
+
+  const res = await axios.post(
+    `${base_url}/api/topup/`,
+    payload,
+    {
+      headers: {
+        "Authorization": `Token ${token}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 60000
+    }
+  );
+
+  const status = res.data?.Status || res.data?.status;
+  if (res.data && status &&!["success", "successful", "pending"].includes(status?.toLowerCase())) {
+    throw new Error(res.data.message || res.data.error || "Arrahuz airtime failed");
   }
 
   return res.data || { status: "success", message: "Request sent to Arrahuz" };
