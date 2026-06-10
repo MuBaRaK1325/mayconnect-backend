@@ -534,8 +534,20 @@ const MAITAMA_NETWORK_MAP = {
   '9mobile': 4,
 };
 
+// ARRAHUZ NETWORK MAP: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL
+const ARRAHUZ_NETWORK_MAP = {
+  'mtn': 1,
+  'glo': 2,
+  '9mobile': 3,
+  'airtel': 4,
+};
+
 function getMaitamaNetworkId(networkName) {
   return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
+}
+
+function getArrahuzNetworkId(networkName) {
+  return ARRAHUZ_NETWORK_MAP[String(networkName).toLowerCase()] || null;
 }
 
 function formatPhoneForMaitama(phone) {
@@ -603,7 +615,7 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   return res.data?.data || res.data;
 }
 
-// MAITAMA DATA
+// MAITAMA DATA - Accepts network name OR ID
 async function callMaitamaData(phone, network, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.maitama;
   const api_token = tokens[company];
@@ -612,16 +624,22 @@ async function callMaitamaData(phone, network, api_plan_id, company) {
   let networkId;
   if (typeof network === 'string') {
     networkId = getMaitamaNetworkId(network);
-    if (!networkId) throw new Error(`Invalid network: ${network}`);
+    if (!networkId) throw new Error(`Invalid network: ${network}. Use: mtn, airtel, glo, 9mobile`);
   } else {
     networkId = Number(network);
   }
 
+  if (![1, 2, 3, 4].includes(networkId)) {
+    throw new Error(`Invalid Maitama network_id: ${networkId}. Must be 1=MTN, 2=Airtel, 3=Glo, 4=9mobile`);
+  }
+
   const payload = {
     plan: Number(api_plan_id),
-    mobile_number: String(phone),
+    mobile_number: formatPhoneForMaitama(phone),
     network: networkId
   };
+
+  console.log('MAITAMA DATA REQUEST:', { payload, company });
 
   const res = await axios.post(
     `${base_url}/api/data`,
@@ -697,19 +715,33 @@ async function callSubPadiData(phone, product_id, company) {
   return res.data;
 }
 
-// ARRAHUZ DATA - KEPT
-async function callArrahuzData(phone, network_id, api_plan_id, company) {
+// ARRAHUZ DATA - Accepts network name OR ID
+async function callArrahuzData(phone, network, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.arrahuz;
   const token = tokens[company];
   if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
   if (!api_plan_id) throw new Error("No Arrahuz plan_id configured for this plan");
 
+  let networkId;
+  if (typeof network === 'string') {
+    networkId = getArrahuzNetworkId(network);
+    if (!networkId) throw new Error(`Invalid network: ${network}. Use: mtn, glo, 9mobile, airtel`);
+  } else {
+    networkId = Number(network);
+  }
+
+  if (![1, 2, 3, 4].includes(networkId)) {
+    throw new Error(`Invalid Arrahuz network_id: ${networkId}. Must be 1=MTN, 2=Glo, 3=9mobile, 4=Airtel`);
+  }
+
   const payload = {
-    network: Number(network_id),
+    network: networkId,
     mobile_number: String(phone),
     plan: Number(api_plan_id),
     Ported_number: true
   };
+
+  console.log('ARRAHUZ DATA REQUEST:', { payload, company });
 
   const res = await axios.post(
     `${base_url}/api/data/`,
