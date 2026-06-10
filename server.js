@@ -155,127 +155,7 @@ app.post("/webhooks/alrahuz", async (req, res) => {
         return res.status(200).json({ error: true }); // Still return 200
     }
 });
-// MAITAMA API HELPERS - START
-const MAITAMA_PROVIDERS = {
-  base_url: "https://app.maitamadatahub.com/api",
-  tokens: {
-    mayconnect: process.env.MAITAMA_TOKEN_MAYCONNECT,
-    teeversh: process.env.MAITAMA_TOKEN_TEEVERSH,
-    sadeeq: process.env.MAITAMA_TOKEN_SADEEQ,
-    bnhabeeb: process.env.MAITAMA_TOKEN_BNHABEEB
-  }
-};
 
-// MAITAMA NETWORK MAP: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
-const MAITAMA_NETWORK_MAP = {
-  'mtn': 1,
-  'airtel': 2,
-  'glo': 3,
-  '9mobile': 4,
-  
-};
-
-function getMaitamaNetworkId(networkName) {
-  return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
-}
-
-function formatPhoneForMaitama(phone) {
-  let p = String(phone).replace(/\D/g, '');
-  if (p.startsWith('234')) p = '0' + p.slice(3);
-  if (p.length === 10) p = '0' + p;
-  return p;
-}
-
-async function callMaitamaAirtime(phone, currentNetwork, amount, company, uniqueRef = null) {
-  const token = MAITAMA_PROVIDERS.tokens[company?.toLowerCase()];
-  if (!token) {
-    throw new Error(`No Maitama token configured for ${company}`);
-  }
-
-  const networkId = getMaitamaNetworkId(currentNetwork);
-  if (!networkId) {
-    throw new Error(`Invalid network: ${currentNetwork}. Use: mtn, airtel, glo, 9mobile`);
-  }
-
-  const formattedPhone = formatPhoneForMaitama(phone);
-  const amountNum = Number(amount);
-
-  if (amountNum < 50 || amountNum > 5000) {
-    throw new Error(`Amount must be between ₦50 and ₦5,000. Got: ₦${amountNum}`);
-  }
-
-  // Network IDs: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
-  const payload = {
-    network: Number(networkId),
-    amount: amountNum,
-    mobile_number: formattedPhone
-  };
-
-  let endpoint = `${MAITAMA_PROVIDERS.base_url}/topup`;
-  if (uniqueRef) {
-    endpoint = `${MAITAMA_PROVIDERS.base_url}/topup/${uniqueRef}`;
-  }
-
-  console.log('MAITAMA REQUEST:', { endpoint, payload, company });
-
-  try {
-    const response = await axios.post(
-      endpoint,
-      payload,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'User-Agent': 'MUSTYKNK/1.0'
-        },
-        timeout: 30000,
-        validateStatus: (status) => status < 500
-      }
-    );
-
-    console.log('MAITAMA RESPONSE:', response.status, response.data);
-
-    if (response.data?.data?.Status === 'failed') {
-      throw new Error(response.data.data.api_response || 'Maitama: Transaction failed');
-    }
-
-    if (response.data?.data?.Status !== 'successful') {
-      throw new Error(`Maitama: Unexpected status ${response.data?.data?.Status}`);
-    }
-
-    return response.data.data;
-  } catch (error) {
-    if (error.response) {
-      console.error("MAITAMA API ERROR:", {
-        status: error.response.status,
-        data: error.response.data,
-        payload,
-        company
-      });
-      
-      if (error.response.status === 422) {
-        const errors = error.response.data?.errors;
-        if (errors?.amount) throw new Error(`Maitama: ${errors.amount[0]}`);
-        if (errors?.mobile_number) throw new Error(`Maitama: ${errors.mobile_number[0]}`);
-        if (errors?.network) throw new Error(`Maitama: ${errors.network[0]}`);
-        if (errors?.status) throw new Error(`Maitama: ${errors.status[0]}`);
-      }
-
-      if (error.response.status === 401) {
-        throw new Error('Maitama: Invalid API Token. Check your .env');
-      }
-
-      if (error.response.status === 403) {
-        throw new Error(`Maitama: IP Blocked. ${error.response.data?.message}`);
-      }
-
-      throw new Error(error.response.data?.message || error.response.data?.api_response || `Maitama ${error.response.status}`);
-    }
-    throw error;
-  }
-}
-// MAITAMA API HELPERS - END
 
 /* ================== MAITAMA TEST ROUTE ================== */
 app.get("/test-maitama-ip", async (req, res) => {
@@ -645,8 +525,15 @@ app.post('/api/test-push', async (req, res) => {
   res.json({sent: true});
 });
 
-/* ================= VTU API CALLS ================= */
+/* ================= VTU API CALLS - MAITAMA CLEAN ================= */
 // MAITAMA NETWORK MAP: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+const MAITAMA_NETWORK_MAP = {
+  'mtn': 1,
+  'airtel': 2,
+  'glo': 3,
+  '9mobile': 4,
+};
+
 function getMaitamaNetworkId(networkName) {
   return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
 }
@@ -658,11 +545,20 @@ function formatPhoneForMaitama(phone) {
   return p;
 }
 
-// MAITAMA AIRTIME - ONLY AIRTIME FUNCTION NOW
-async function callMaitamaAirtime(phone, network_id, amount, company, uniqueRef = null) {
+// MAITAMA AIRTIME - Accepts network name OR ID
+async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = null) {
   const { base_url, tokens } = VTU_PROVIDERS.maitama;
   const api_token = tokens[company];
   if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
+
+  // Convert network name to ID if string is passed
+  let networkId;
+  if (typeof network === 'string') {
+    networkId = getMaitamaNetworkId(network);
+    if (!networkId) throw new Error(`Invalid network: ${network}. Use: mtn, airtel, glo, 9mobile`);
+  } else {
+    networkId = Number(network);
+  }
 
   const amountNum = Number(amount);
   if (amountNum < 50 || amountNum > 5000) {
@@ -671,9 +567,8 @@ async function callMaitamaAirtime(phone, network_id, amount, company, uniqueRef 
 
   const formattedPhone = formatPhoneForMaitama(phone);
 
-  // Maitama Network IDs: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
   const payload = {
-    network: Number(network_id),
+    network: networkId,
     amount: amountNum,
     mobile_number: formattedPhone
   };
@@ -683,7 +578,7 @@ async function callMaitamaAirtime(phone, network_id, amount, company, uniqueRef 
     endpoint = `${base_url}/api/topup/${uniqueRef}`;
   }
 
-  console.log('MAITAMA AIRTIME REQUEST:', { endpoint, payload, company });
+  console.log('MAITAMA AIRTIME REQUEST:', { endpoint, payload, company, networkId });
 
   const res = await axios.post(
     endpoint,
@@ -709,15 +604,23 @@ async function callMaitamaAirtime(phone, network_id, amount, company, uniqueRef 
 }
 
 // MAITAMA DATA
-async function callMaitamaData(phone, network_id, api_plan_id, company) {
+async function callMaitamaData(phone, network, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.maitama;
   const api_token = tokens[company];
   if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
 
+  let networkId;
+  if (typeof network === 'string') {
+    networkId = getMaitamaNetworkId(network);
+    if (!networkId) throw new Error(`Invalid network: ${network}`);
+  } else {
+    networkId = Number(network);
+  }
+
   const payload = {
     plan: Number(api_plan_id),
     mobile_number: String(phone),
-    network: Number(network_id) // 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+    network: networkId
   };
 
   const res = await axios.post(
@@ -1943,7 +1846,8 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
 });
 
 /* ================= BUY AIRTIME - Maitama: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE ================= */
-// MAITAMA NETWORK MAP
+// MAITAMA_NETWORK_MAP yana cikin VTU API CALLS section. Kada ka sake ta anan.
+
 function getMaitamaNetworkId(networkName) {
   return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
 }
@@ -1955,10 +1859,18 @@ function formatPhoneForMaitama(phone) {
   return p;
 }
 
-async function callMaitamaAirtime(phone, network_id, amount, company, uniqueRef = null) {
+async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = null) {
   const { base_url, tokens } = VTU_PROVIDERS.maitama;
   const api_token = tokens[company];
   if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
+
+  let networkId;
+  if (typeof network === 'string') {
+    networkId = getMaitamaNetworkId(network);
+    if (!networkId) throw new Error(`Invalid network: ${network}. Use: mtn, airtel, glo, 9mobile`);
+  } else {
+    networkId = Number(network);
+  }
 
   const amountNum = Number(amount);
   if (amountNum < 50 || amountNum > 5000) {
@@ -1967,9 +1879,8 @@ async function callMaitamaAirtime(phone, network_id, amount, company, uniqueRef 
 
   const formattedPhone = formatPhoneForMaitama(phone);
 
-  // Maitama Network IDs: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
   const payload = {
-    network: Number(network_id),
+    network: networkId,
     amount: amountNum,
     mobile_number: formattedPhone
   };
@@ -1979,7 +1890,7 @@ async function callMaitamaAirtime(phone, network_id, amount, company, uniqueRef 
     endpoint = `${base_url}/api/topup/${uniqueRef}`;
   }
 
-  console.log('MAITAMA AIRTIME REQUEST:', { endpoint, payload, company });
+  console.log('MAITAMA AIRTIME REQUEST:', { endpoint, payload, company, networkId });
 
   const res = await axios.post(
     endpoint,
@@ -2010,7 +1921,6 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     await client.query("BEGIN");
     const { phone, amount, network, pin } = req.body;
 
-    // 1. Input validation
     if (!phone ||!amount ||!network) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "phone, amount, and network are required" });
@@ -2025,7 +1935,6 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const networkKey = String(network).toLowerCase();
     const networkId = getMaitamaNetworkId(networkKey);
 
-    // Maitama mapping: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
     if (!networkId) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Invalid network. Use MTN, Airtel, Glo, or 9mobile" });
@@ -2044,7 +1953,6 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // 2. PIN / Biometric check
     if (pin!== 'biometric_verified') {
       if (!user.pin) {
         await client.query("ROLLBACK");
@@ -2065,14 +1973,12 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       return res.status(400).json({ message: "Insufficient balance" });
     }
 
-    // 3. Debit user first
     const newBalance = Number(user.wallet_balance) - amt;
     await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
 
     const ref = "AIRTIME-" + uuidv4();
-    const cost = amt * 0.98; // Maitama discount: 2%. Update to match your actual rate
+    const cost = amt * 0.98;
 
-    // 4. Call Maitama
     let maitamaRes;
     try {
       maitamaRes = await callMaitamaAirtime(formattedPhone, networkId, amt, user.company, ref);
@@ -2090,7 +1996,6 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
         company: user.company
       });
 
-      // Refund user since API failed
       await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [amt, user.id]);
       await client.query("ROLLBACK");
 
@@ -2116,14 +2021,12 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       });
     }
 
-    // 5. Log success transaction
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status,provider,gateway)
        VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS','maitama','maitama') RETURNING *`,
       [user.id, amt, cost, formattedPhone, networkKey, ref]
     );
 
-    // 6. Credit admin profit
     const adminId = await getCompanyAdmin(user.company);
     const profit = amt - cost;
     if (adminId && profit > 0) {
