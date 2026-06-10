@@ -1728,14 +1728,13 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     await client.query("BEGIN");
     const { plan_id, phone, pin } = req.body;
 
-    // Input validation
     if (!plan_id ||!phone) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "plan_id and phone are required" });
     }
     if (!/^\d{10,15}$/.test(String(phone))) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Invalid phone number" });
+      return res.status(400).json({ message: "Invalid phone number. Use 11 digits like 08101234567" });
     }
 
     const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
@@ -1745,7 +1744,6 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // PIN / Biometric check
     if (pin!== 'biometric_verified') {
       if (!user.pin) {
         await client.query("ROLLBACK");
@@ -1754,7 +1752,6 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
           needPin: true
         });
       }
-
       const validPin = await bcrypt.compare(String(pin), String(user.pin));
       if (!validPin) {
         await client.query("ROLLBACK");
@@ -1769,41 +1766,56 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     }
     const plan = planRes.rows[0];
 
-    // Company isolation
     if (plan.restricted && plan.company!== user.company) {
       await client.query("ROLLBACK");
       return res.status(403).json({ message: "Plan restricted to company users" });
     }
 
-    // Validation: subpadi uses api_plan_id as product_id, others use network_id + api_plan_id
     if (!plan.provider) {
       await client.query("ROLLBACK");
       return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
     }
 
+    // Provider-specific validation
     if (plan.provider === "subpadi") {
       if (!plan.api_plan_id) {
         await client.query("ROLLBACK");
         return res.status(400).json({ message: "Plan not configured with product_id. Contact admin." });
       }
-    } else if (plan.provider === "arrahuz") {
-      if (!plan.api_plan_id ||!plan.network_id) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ message: "Plan not configured with Arrahuz plan ID or network_id. Contact admin." });
-      }
     } else {
-      if (!plan.api_plan_id ||!plan.network_id) {
+      if (!plan.api_plan_id || plan.network_id === null || plan.network_id === undefined) {
         await client.query("ROLLBACK");
         return res.status(400).json({ message: "Plan not configured with provider plan ID or network_id. Contact admin." });
       }
+
+      const netId = Number(plan.network_id);
+      if (isNaN(netId) || netId < 1 || netId > 4) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: `Invalid network_id: ${plan.network_id}. Must be numeric 1-4`
+        });
+      }
+
+      // Maitama specific mapping: MTN=1, Airtel=2, Glo=3, 9mobile=4
+      if (plan.provider === "maitama" &&![1, 2, 3, 4].includes(netId)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: `Invalid network_id for Maitama: ${netId}. Must be 1=MTN, 2=Airtel, 3=Glo, 4=9mobile`
+        });
+      }
+
+      // Arrahuz specific mapping: MTN=1, Glo=2, 9mobile=3, Airtel=4
+      if (plan.provider === "arrahuz" &&![1, 2, 3, 4].includes(netId)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: `Invalid network_id for Arrahuz: ${netId}. Must be 1=MTN, 2=Glo, 3=9mobile, 4=Airtel`
+        });
+      }
     }
 
-    // Check tier using top_users table
     const tierRes = await client.query("SELECT 1 FROM top_users WHERE id=$1", [user.id]);
     const isTopUser = tierRes.rows.length > 0;
     const price = isTopUser? (plan.top_price || plan.price) : plan.price;
-
-    // Debug log + clearer balance check
     const balanceNum = Number(user.wallet_balance);
     const priceNum = Number(price);
 
@@ -1815,7 +1827,9 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       price: priceNum,
       planId: plan.id,
       planName: plan.name,
-      provider: plan.provider
+      provider: plan.provider,
+      networkId: Number(plan.network_id),
+      apiPlanId: plan.api_plan_id
     });
 
     if (balanceNum < priceNum) {
@@ -1847,9 +1861,16 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       console.error("VTU API ERROR:", vtuErr.response?.data || vtuErr.message);
       await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [priceNum, user.id]);
       await client.query("ROLLBACK");
-      return res.status(400).json({
-        message: vtuErr.response?.data?.message || vtuErr.message || "Purchase failed. Try again later."
-      });
+
+      let errorMsg = vtuErr.response?.data?.message || vtuErr.message || "Purchase failed. Try again later.";
+      if (vtuErr.response?.data?.errors) {
+        const errs = vtuErr.response.data.errors;
+        if (errs.network) errorMsg = `Network error: ${errs.network[0]}`;
+        else if (errs.plan) errorMsg = `Plan error: ${errs.plan[0]}`;
+        else if (errs.mobile_number) errorMsg = `Phone error: ${errs.mobile_number[0]}`;
+      }
+
+      return res.status(400).json({ message: errorMsg });
     }
 
     const txRes = await client.query(
