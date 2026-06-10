@@ -535,7 +535,14 @@ const MAITAMA_NETWORK_MAP = {
 };
 
 // ARRAHUZ NETWORK MAP: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL
-const ARRAHUZ_NETWORK_MAP = {
+const ARRAHUZ_NETWORK_MAP_ID_TO_NAME = {
+  1: 'mtn',
+  2: 'glo',
+  3: '9mobile',
+  4: 'airtel'
+};
+
+const ARRAHUZ_NETWORK_MAP_NAME_TO_ID = {
   'mtn': 1,
   'glo': 2,
   '9mobile': 3,
@@ -547,7 +554,12 @@ function getMaitamaNetworkId(networkName) {
 }
 
 function getArrahuzNetworkId(networkName) {
-  return ARRAHUZ_NETWORK_MAP[String(networkName).toLowerCase()] || null;
+  return ARRAHUZ_NETWORK_MAP_NAME_TO_ID[String(networkName).toLowerCase()] || null;
+}
+
+function getArrahuzNetworkName(networkId) {
+  const id = Number(networkId);
+  return ARRAHUZ_NETWORK_MAP_ID_TO_NAME[id] || null;
 }
 
 function formatPhoneForMaitama(phone) {
@@ -563,7 +575,6 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   const api_token = tokens[company];
   if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
 
-  // Convert network name to ID if string is passed
   let networkId;
   if (typeof network === 'string') {
     networkId = getMaitamaNetworkId(network);
@@ -592,27 +603,43 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
 
   console.log('MAITAMA AIRTIME REQUEST:', { endpoint, payload, company, networkId });
 
-  const res = await axios.post(
-    endpoint,
-    payload,
-    {
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${api_token}`,
-        "User-Agent": "MUSTYKNK/1.0"
-      },
-      timeout: 30000,
-      validateStatus: (status) => status < 500
+  try {
+    const res = await axios.post(
+      endpoint,
+      payload,
+      {
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${api_token}`,
+          "User-Agent": "MUSTYKNK/1.0"
+        },
+        timeout: 60000,
+      }
+    );
+
+    console.log('MAITAMA AIRTIME RESPONSE:', res.data);
+
+    const status = res.data?.data?.Status || res.data?.Status;
+    const api_response = res.data?.data?.api_response || res.data?.api_response || res.data?.message;
+
+    if (status?.toLowerCase() === "successful" || status?.toLowerCase() === "success") {
+      return res.data?.data || res.data;
     }
-  );
 
-  const status = res.data?.data?.Status || res.data?.Status;
-  if (status?.toLowerCase()!== "successful") {
-    throw new Error(res.data?.data?.api_response || res.data?.api_response || res.data?.message || "Maitama airtime failed");
+    if (status?.toLowerCase() === "pending") {
+      return {...res.data?.data || res.data, _pending: true };
+    }
+
+    throw new Error(api_response || "Maitama airtime failed");
+
+  } catch (err) {
+    if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
+      console.error('MAITAMA TIMEOUT - POSSIBLE SUCCESS:', { uniqueRef, payload });
+      throw new Error('TIMEOUT_POSSIBLE_SUCCESS');
+    }
+    throw err;
   }
-
-  return res.data?.data || res.data;
 }
 
 // MAITAMA DATA - Accepts network name OR ID
@@ -650,12 +677,12 @@ async function callMaitamaData(phone, network, api_plan_id, company) {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${api_token}`
       },
-      timeout: 30000
+      timeout: 60000
     }
   );
 
   const status = res.data.Status || res.data.status;
-  if (status?.toLowerCase()!== "successful" && status?.toLowerCase()!== "success") {
+  if (status?.toLowerCase()!== "successful" && status?.toLowerCase()!== "success" && status?.toLowerCase()!== "pending") {
     throw new Error(res.data.api_response || res.data.message || "Maitama purchase failed");
   }
   return res.data;
@@ -715,27 +742,21 @@ async function callSubPadiData(phone, product_id, company) {
   return res.data;
 }
 
-// ARRAHUZ DATA - Accepts network name OR ID
-async function callArrahuzData(phone, network, api_plan_id, company) {
+// ARRAHUZ DATA - Fixed: Converts ID to name for API
+async function callArrahuzData(phone, network_id, api_plan_id, company) {
   const { base_url, tokens } = VTU_PROVIDERS.arrahuz;
   const token = tokens[company];
   if (!token) throw new Error(`No Arrahuz token configured for ${company}`);
   if (!api_plan_id) throw new Error("No Arrahuz plan_id configured for this plan");
 
-  let networkId;
-  if (typeof network === 'string') {
-    networkId = getArrahuzNetworkId(network);
-    if (!networkId) throw new Error(`Invalid network: ${network}. Use: mtn, glo, 9mobile, airtel`);
-  } else {
-    networkId = Number(network);
-  }
-
-  if (![1, 2, 3, 4].includes(networkId)) {
-    throw new Error(`Invalid Arrahuz network_id: ${networkId}. Must be 1=MTN, 2=Glo, 3=9mobile, 4=Airtel`);
+  // Convert numeric ID to network name for Arrahuz API
+  const networkName = getArrahuzNetworkName(network_id);
+  if (!networkName) {
+    throw new Error(`Invalid Arrahuz network_id: ${network_id}. Must be 1=MTN, 2=Glo, 3=9mobile, 4=Airtel`);
   }
 
   const payload = {
-    network: networkId,
+    network: networkName, // Arrahuz API yana son 'airtel' ba 4 ba
     mobile_number: String(phone),
     plan: Number(api_plan_id),
     Ported_number: true
@@ -1968,6 +1989,10 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
     networkId = Number(network);
   }
 
+  if (![1, 2, 3, 4].includes(networkId)) {
+    throw new Error(`Invalid Maitama network_id: ${networkId}. Must be 1=MTN, 2=Airtel, 3=Glo, 4=9mobile`);
+  }
+
   const amountNum = Number(amount);
   if (amountNum < 50 || amountNum > 5000) {
     throw new Error(`Amount must be between ₦50 and ₦5,000. Got: ₦${amountNum}`);
@@ -1986,29 +2011,48 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
     endpoint = `${base_url}/api/topup/${uniqueRef}`;
   }
 
-  console.log('MAITAMA AIRTIME REQUEST:', { endpoint, payload, company, networkId });
+  console.log('MAITAMA AIRTIME REQUEST:', { endpoint, payload, company, networkId, uniqueRef });
 
-  const res = await axios.post(
-    endpoint,
-    payload,
-    {
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${api_token}`,
-        "User-Agent": "MUSTYKNK/1.0"
-      },
-      timeout: 30000,
-      validateStatus: (status) => status < 500
+  try {
+    const res = await axios.post(
+      endpoint,
+      payload,
+      {
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${api_token}`,
+          "User-Agent": "MUSTYKNK/1.0"
+        },
+        timeout: 60000, // 60s - Maitama yana slow
+      }
+    );
+
+    console.log('MAITAMA AIRTIME RESPONSE:', res.data);
+
+    const status = res.data?.data?.Status || res.data?.Status;
+    const api_response = res.data?.data?.api_response || res.data?.api_response || res.data?.message;
+
+    // Success
+    if (status?.toLowerCase() === "successful" || status?.toLowerCase() === "success") {
+      return res.data?.data || res.data;
     }
-  );
 
-  const status = res.data?.data?.Status || res.data?.Status;
-  if (status?.toLowerCase()!== "successful") {
-    throw new Error(res.data?.data?.api_response || res.data?.api_response || res.data?.message || "Maitama airtime failed");
+    // Pending - Maitama zai cika daga baya
+    if (status?.toLowerCase() === "pending") {
+      return {...res.data?.data || res.data, _pending: true };
+    }
+
+    throw new Error(api_response || "Maitama airtime failed");
+
+  } catch (err) {
+    // Timeout amma request din ya tafi - kar mu refund
+    if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
+      console.error('MAITAMA TIMEOUT - POSSIBLE SUCCESS:', { uniqueRef, payload });
+      throw new Error('TIMEOUT_POSSIBLE_SUCCESS');
+    }
+    throw err;
   }
-
-  return res.data?.data || res.data;
 }
 
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
@@ -2073,7 +2117,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
 
     const ref = "AIRTIME-" + uuidv4();
-    const cost = amt * 0.98;
+    const cost = amt * 0.98; // 2% discount
 
     let maitamaRes;
     try {
@@ -2092,6 +2136,34 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
         company: user.company
       });
 
+      // CRITICAL: Timeout amma airtime ya tafi - KADA A REFUND
+      if (vtuErr.message === 'TIMEOUT_POSSIBLE_SUCCESS') {
+        await client.query(
+          `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status,provider,gateway)
+           VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'PENDING','maitama','maitama')`,
+          [user.id, amt, cost, formattedPhone, networkKey, ref]
+        );
+        await client.query("COMMIT");
+        sendWalletUpdate(user.id, newBalance);
+
+        await sendPushNotification(user.company, user.id, {
+          title: `${user.company.toUpperCase()} - Airtime Pending`,
+          body: `Your ₦${amt} airtime for ${formattedPhone} is processing. You were debited. Contact support if not received in 5 mins.`,
+          url: '/dashboard.html'
+        });
+
+        return res.status(202).json({
+          success: true,
+          pending: true,
+          reference: ref,
+          balance: newBalance,
+          provider: 'maitama',
+          network_id: networkId,
+          message: "Transaction submitted. Airtime will be delivered shortly."
+        });
+      }
+
+      // Real failure - refund user
       await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [amt, user.id]);
       await client.query("ROLLBACK");
 
@@ -2117,12 +2189,16 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       });
     }
 
+    // Check if pending response
+    const isPending = maitamaRes?._pending === true;
+    const txStatus = isPending? 'PENDING' : 'SUCCESS';
+
     const txRes = await client.query(
       `INSERT INTO transactions(
         user_id, type, amount, cost, phone, network,
         reference, status, provider, gateway
-      ) VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'SUCCESS',$7,$8) RETURNING *`,
-      [user.id, amt, cost, formattedPhone, networkKey, ref, 'maitama', 'maitama']
+      ) VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,$7,'maitama','maitama') RETURNING *`,
+      [user.id, amt, cost, formattedPhone, networkKey, ref, txStatus]
     );
 
     const adminId = await getCompanyAdmin(user.company);
@@ -2141,11 +2217,18 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
 
     await sendPushNotification(user.company, user.id, {
       title: `${user.company.toUpperCase()} - Airtime Purchase`,
-      body: `Your ₦${amt} airtime for ${formattedPhone} was successful`,
+      body: `Your ₦${amt} airtime for ${formattedPhone} was ${txStatus.toLowerCase()}`,
       url: '/dashboard.html'
     });
 
-    res.json({ success: true, reference: ref, balance: newBalance, provider: 'maitama', network_id: networkId });
+    res.json({
+      success: true,
+      reference: ref,
+      balance: newBalance,
+      provider: 'maitama',
+      network_id: networkId,
+      status: txStatus
+    });
 
   } catch (e) {
     await client.query("ROLLBACK");
