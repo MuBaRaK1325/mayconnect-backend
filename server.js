@@ -1832,18 +1832,16 @@ app.get("/api/plans", auth, async (req, res) => {
 app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
     const { plan_id, phone, pin } = req.body;
 
     if (!plan_id ||!phone) {
-      await client.query("ROLLBACK");
       return res.status(400).json({ message: "plan_id and phone are required" });
     }
     if (!/^\d{10,15}$/.test(String(phone))) {
-      await client.query("ROLLBACK");
       return res.status(400).json({ message: "Invalid phone number. Use 11 digits like 08101234567" });
     }
 
+    await client.query("BEGIN");
     const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
     const user = userRes.rows[0];
     if (!user) {
@@ -1902,22 +1900,6 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
           message: `Invalid network_id: ${plan.network_id}. Must be numeric 1-4`
         });
       }
-
-      // Maitama specific mapping: MTN=1, Airtel=2, Glo=3, 9mobile=4
-      if (plan.provider === "maitama" &&![1, 2, 3, 4].includes(netId)) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({
-          message: `Invalid network_id for Maitama: ${netId}. Must be 1=MTN, 2=Airtel, 3=Glo, 4=9mobile`
-        });
-      }
-
-      // Arrahuz specific mapping: MTN=1, Glo=2, 9mobile=3, Airtel=4
-      if (plan.provider === "arrahuz" &&![1, 2, 3, 4].includes(netId)) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({
-          message: `Invalid network_id for Arrahuz: ${netId}. Must be 1=MTN, 2=Glo, 3=9mobile, 4=Airtel`
-        });
-      }
     }
 
     const tierRes = await client.query("SELECT 1 FROM top_users WHERE id=$1", [user.id]);
@@ -1926,19 +1908,6 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     const balanceNum = Number(user.wallet_balance);
     const priceNum = Number(price);
 
-    console.log('[BUY DATA]', {
-      userId: user.id,
-      username: user.username,
-      isTopUser,
-      balance: balanceNum,
-      price: priceNum,
-      planId: plan.id,
-      planName: plan.name,
-      provider: plan.provider,
-      networkId: Number(plan.network_id),
-      apiPlanId: plan.api_plan_id
-    });
-
     if (balanceNum < priceNum) {
       await client.query("ROLLBACK");
       return res.status(400).json({
@@ -1946,46 +1915,90 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       });
     }
 
+    // 1. DEDUCT BALANCE + INSERT PENDING TRANSACTION
     const newBalance = balanceNum - priceNum;
     await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
 
     const ref = "DATA-" + uuidv4();
     const cost = Number(plan.cost);
 
+    const txRes = await client.query(
+      `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name,provider)
+       VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'PENDING',$8,$9) RETURNING *`,
+      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name, plan.provider]
+    );
+    const txId = txRes.rows[0].id;
+    await client.query("COMMIT");
+
+    // 2. CALL PROVIDER API - WAJEN TRANSACTION
+    let apiResponse = null;
+    let finalStatus = 'FAILED';
+    let responseMsg = 'Unknown error';
+
     try {
       if (plan.provider === "maitama") {
-        await callMaitamaData(phone, plan.network_id, plan.api_plan_id, user.company);
+        apiResponse = await callMaitamaData(phone, plan.network_id, plan.api_plan_id, user.company);
       } else if (plan.provider === "cheapdatahub") {
-        await callCheapDataHubData(phone, plan.network_id, plan.api_plan_id);
+        apiResponse = await callCheapDataHubData(phone, plan.network_id, plan.api_plan_id);
       } else if (plan.provider === "subpadi") {
-        await callSubPadiData(phone, plan.api_plan_id, user.company);
+        apiResponse = await callSubPadiData(phone, plan.api_plan_id, user.company);
       } else if (plan.provider === "arrahuz") {
-        await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
+        apiResponse = await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
       } else {
         throw new Error("Unknown provider");
       }
-    } catch (vtuErr) {
-      console.error("VTU API ERROR:", vtuErr.response?.data || vtuErr.message);
-      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [priceNum, user.id]);
-      await client.query("ROLLBACK");
 
-      let errorMsg = vtuErr.response?.data?.message || vtuErr.message || "Purchase failed. Try again later.";
+      // Check success
+      if (apiResponse.status === 'success' || apiResponse.code === 200 || apiResponse.Status?.toLowerCase() === 'successful') {
+        finalStatus = 'SUCCESS';
+        responseMsg = 'Transaction successful';
+      } else {
+        finalStatus = 'FAILED';
+        responseMsg = apiResponse.message || apiResponse.api_response || 'Provider rejected transaction';
+      }
+    } catch (vtuErr) {
+      finalStatus = 'FAILED';
+      responseMsg = vtuErr.response?.data?.message || vtuErr.response?.data?.api_response || vtuErr.message || 'API timeout';
+      apiResponse = vtuErr.response?.data || { error: vtuErr.message };
+
       if (vtuErr.response?.data?.errors) {
         const errs = vtuErr.response.data.errors;
-        if (errs.network) errorMsg = `Network error: ${errs.network[0]}`;
-        else if (errs.plan) errorMsg = `Plan error: ${errs.plan[0]}`;
-        else if (errs.mobile_number) errorMsg = `Phone error: ${errs.mobile_number[0]}`;
+        if (errs.network) responseMsg = `Network error: ${errs.network[0]}`;
+        else if (errs.plan) responseMsg = `Plan error: ${errs.plan[0]}`;
+        else if (errs.mobile_number) responseMsg = `Phone error: ${errs.mobile_number[0]}`;
       }
-
-      return res.status(400).json({ message: errorMsg });
     }
 
-    const txRes = await client.query(
-      `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name)
-       VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'SUCCESS',$8) RETURNING *`,
-      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name]
-    );
+    // 3. UPDATE TRANSACTION
+    await client.query(`
+      UPDATE transactions
+      SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW()
+      WHERE id = $4
+    `, [finalStatus, responseMsg, JSON.stringify(apiResponse), txId]);
 
+    // 4. HANDLE FAILED - REFUND
+    if (finalStatus === 'FAILED') {
+      await client.query("BEGIN");
+      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [priceNum, user.id]);
+
+      await client.query(
+        `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, reference, metadata)
+         VALUES($1, 'credit', $2, $3, $4, $5, $6)`,
+        [
+          user.company,
+          priceNum,
+          balanceNum,
+          `Auto refund: ${responseMsg}`,
+          `REFUND-${ref}`,
+          JSON.stringify({ original_tx_id: txId })
+        ]
+      );
+      await client.query("COMMIT");
+      sendWalletUpdate(user.id, balanceNum);
+      return res.status(400).json({ message: responseMsg, reference: ref });
+    }
+
+    // 5. HANDLE SUCCESS - PROFIT
     const adminId = await getCompanyAdmin(user.company);
     const profit = priceNum - cost;
     if (adminId && profit > 0) {
@@ -1993,11 +2006,10 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       await client.query(
         `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
          VALUES($1,'sale',$2,$3,$4)`,
-        [txRes.rows[0].id, profit, ref, adminId]
+        [txId, profit, ref, adminId]
       );
     }
 
-    await client.query("COMMIT");
     sendWalletUpdate(user.id, newBalance);
 
     await sendPushNotification(user.company, user.id, {
@@ -2017,8 +2029,6 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
 });
 
 /* ================= BUY AIRTIME - Maitama: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE ================= */
-// MAITAMA_NETWORK_MAP yana cikin VTU API CALLS section. Kada ka sake ta anan.
-
 function getMaitamaNetworkId(networkName) {
   return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
 }
@@ -2053,56 +2063,32 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   }
 
   const formattedPhone = formatPhoneForMaitama(phone);
-
-  const payload = {
-    network: networkId,
-    amount: amountNum,
-    mobile_number: formattedPhone
-  };
-
-  let endpoint = `${base_url}/api/topup`;
-  if (uniqueRef) {
-    endpoint = `${base_url}/api/topup/${uniqueRef}`;
-  }
-
-  console.log('MAITAMA AIRTIME REQUEST:', { endpoint, payload, company, networkId, uniqueRef });
+  const payload = { network: networkId, amount: amountNum, mobile_number: formattedPhone };
+  let endpoint = uniqueRef? `${base_url}/api/topup/${uniqueRef}` : `${base_url}/api/topup`;
 
   try {
-    const res = await axios.post(
-      endpoint,
-      payload,
-      {
-        headers: {
-          "Accept": "application/json",
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${api_token}`,
-          "User-Agent": "MUSTYKNK/1.0"
-        },
-        timeout: 60000, // 60s - Maitama yana slow
-      }
-    );
-
-    console.log('MAITAMA AIRTIME RESPONSE:', res.data);
+    const res = await axios.post(endpoint, payload, {
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${api_token}`,
+        "User-Agent": "MUSTYKNK/1.0"
+      },
+      timeout: 60000,
+    });
 
     const status = res.data?.data?.Status || res.data?.Status;
     const api_response = res.data?.data?.api_response || res.data?.api_response || res.data?.message;
 
-    // Success
     if (status?.toLowerCase() === "successful" || status?.toLowerCase() === "success") {
       return res.data?.data || res.data;
     }
-
-    // Pending - Maitama zai cika daga baya
     if (status?.toLowerCase() === "pending") {
       return {...res.data?.data || res.data, _pending: true };
     }
-
     throw new Error(api_response || "Maitama airtime failed");
-
   } catch (err) {
-    // Timeout amma request din ya tafi - kar mu refund
     if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
-      console.error('MAITAMA TIMEOUT - POSSIBLE SUCCESS:', { uniqueRef, payload });
       throw new Error('TIMEOUT_POSSIBLE_SUCCESS');
     }
     throw err;
@@ -2112,17 +2098,14 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
     const { phone, amount, network, pin } = req.body;
 
     if (!phone ||!amount ||!network) {
-      await client.query("ROLLBACK");
       return res.status(400).json({ message: "phone, amount, and network are required" });
     }
 
     const amt = Number(amount);
     if (isNaN(amt) || amt < 50 || amt > 5000) {
-      await client.query("ROLLBACK");
       return res.status(400).json({ message: "Amount must be between ₦50 and ₦5,000" });
     }
 
@@ -2130,16 +2113,15 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const networkId = getMaitamaNetworkId(networkKey);
 
     if (!networkId) {
-      await client.query("ROLLBACK");
       return res.status(400).json({ message: "Invalid network. Use MTN, Airtel, Glo, or 9mobile" });
     }
 
     const formattedPhone = formatPhoneForMaitama(phone);
     if (formattedPhone.length!== 11 ||!formattedPhone.startsWith('0')) {
-      await client.query("ROLLBACK");
       return res.status(400).json({ message: "Phone must be 11 digits starting with 0" });
     }
 
+    await client.query("BEGIN");
     const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
     const user = userRes.rows[0];
     if (!user) {
@@ -2167,111 +2149,91 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       return res.status(400).json({ message: "Insufficient balance" });
     }
 
+    // 1. DEDUCT + INSERT PENDING
     const newBalance = Number(user.wallet_balance) - amt;
     await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
 
     const ref = "AIRTIME-" + uuidv4();
-    const cost = amt * 0.98; // 2% discount
-
-    let maitamaRes;
-    try {
-      maitamaRes = await callMaitamaAirtime(formattedPhone, networkId, amt, user.company, ref);
-      console.log("MAITAMA SUCCESS:", { ref, network: networkKey, networkId, response: maitamaRes });
-    } catch (vtuErr) {
-      console.error("MAITAMA API ERROR:", {
-        status: vtuErr.response?.status,
-        data: vtuErr.response?.data,
-        message: vtuErr.message,
-        payload: {
-          network: networkId,
-          amount: Number(amt),
-          mobile_number: formattedPhone
-        },
-        company: user.company
-      });
-
-      // CRITICAL: Timeout amma airtime ya tafi - KADA A REFUND
-      if (vtuErr.message === 'TIMEOUT_POSSIBLE_SUCCESS') {
-        await client.query(
-          `INSERT INTO transactions(user_id,type,amount,cost,phone,network,reference,status,provider,gateway)
-           VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'PENDING','maitama','maitama')`,
-          [user.id, amt, cost, formattedPhone, networkKey, ref]
-        );
-        await client.query("COMMIT");
-        sendWalletUpdate(user.id, newBalance);
-
-        await sendPushNotification(user.company, user.id, {
-          title: `${user.company.toUpperCase()} - Airtime Pending`,
-          body: `Your ₦${amt} airtime for ${formattedPhone} is processing. You were debited. Contact support if not received in 5 mins.`,
-          url: '/dashboard.html'
-        });
-
-        return res.status(202).json({
-          success: true,
-          pending: true,
-          reference: ref,
-          balance: newBalance,
-          provider: 'maitama',
-          network_id: networkId,
-          message: "Transaction submitted. Airtime will be delivered shortly."
-        });
-      }
-
-      // Real failure - refund user
-      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [amt, user.id]);
-      await client.query("ROLLBACK");
-
-      const maitamaError = vtuErr.response?.data?.data?.api_response ||
-                           vtuErr.response?.data?.message ||
-                           vtuErr.response?.data?.error ||
-                           vtuErr.message;
-
-      if (vtuErr.response?.status === 403) {
-        return res.status(503).json({
-          message: `Provider IP blocked. Contact admin. You were not debited.`
-        });
-      }
-
-      if (vtuErr.response?.status === 500) {
-        return res.status(503).json({
-          message: `Provider error. You were not debited. Try again in 5 minutes.`
-        });
-      }
-
-      return res.status(400).json({
-        message: maitamaError || "Purchase failed. Try again later."
-      });
-    }
-
-    // Check if pending response
-    const isPending = maitamaRes?._pending === true;
-    const txStatus = isPending? 'PENDING' : 'SUCCESS';
+    const cost = amt * 0.98;
 
     const txRes = await client.query(
       `INSERT INTO transactions(
         user_id, type, amount, cost, phone, network,
         reference, status, provider, gateway
-      ) VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,$7,'maitama','maitama') RETURNING *`,
-      [user.id, amt, cost, formattedPhone, networkKey, ref, txStatus]
+      ) VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'PENDING','maitama','maitama') RETURNING *`,
+      [user.id, amt, cost, formattedPhone, networkKey, ref]
     );
+    const txId = txRes.rows[0].id;
+    await client.query("COMMIT");
 
-    const adminId = await getCompanyAdmin(user.company);
-    const profit = amt - cost;
-    if (adminId && profit > 0) {
-      await client.query("UPDATE users SET admin_wallet = admin_wallet + $1, updated_at=NOW() WHERE id=$2", [profit, adminId]);
-      await client.query(
-        `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
-         VALUES($1,'sale',$2,$3,$4)`,
-        [txRes.rows[0].id, profit, ref, adminId]
-      );
+    // 2. CALL API
+    let maitamaRes;
+    let finalStatus = 'FAILED';
+    let responseMsg = 'Unknown error';
+
+    try {
+      maitamaRes = await callMaitamaAirtime(formattedPhone, networkId, amt, user.company, ref);
+      finalStatus = maitamaRes?._pending? 'PENDING' : 'SUCCESS';
+      responseMsg = finalStatus === 'SUCCESS'? 'Airtime delivered' : 'Processing';
+    } catch (vtuErr) {
+      finalStatus = 'FAILED';
+      responseMsg = vtuErr.response?.data?.data?.api_response || vtuErr.response?.data?.message || vtuErr.message || 'API error';
+      maitamaRes = vtuErr.response?.data || { error: vtuErr.message };
+
+      if (vtuErr.message === 'TIMEOUT_POSSIBLE_SUCCESS') {
+        finalStatus = 'PENDING';
+        responseMsg = 'Request submitted. Delivery pending.';
+      }
     }
 
-    await client.query("COMMIT");
+    // 3. UPDATE TRANSACTION
+    await client.query(`
+      UPDATE transactions
+      SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW()
+      WHERE id = $4
+    `, [finalStatus, responseMsg, JSON.stringify(maitamaRes), txId]);
+
+    // 4. HANDLE FAILED - REFUND
+    if (finalStatus === 'FAILED') {
+      await client.query("BEGIN");
+      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [amt, user.id]);
+
+      await client.query(
+        `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, reference, metadata)
+         VALUES($1, 'credit', $2, $3, $4, $5, $6)`,
+        [
+          user.company,
+          amt,
+          Number(user.wallet_balance),
+          `Auto refund: ${responseMsg}`,
+          `REFUND-${ref}`,
+          JSON.stringify({ original_tx_id: txId })
+        ]
+      );
+      await client.query("COMMIT");
+      sendWalletUpdate(user.id, Number(user.wallet_balance));
+      return res.status(400).json({ message: responseMsg, reference: ref });
+    }
+
+    // 5. HANDLE SUCCESS/PENDING - PROFIT
+    if (finalStatus === 'SUCCESS') {
+      const adminId = await getCompanyAdmin(user.company);
+      const profit = amt - cost;
+      if (adminId && profit > 0) {
+        await client.query("UPDATE users SET admin_wallet = admin_wallet + $1, updated_at=NOW() WHERE id=$2", [profit, adminId]);
+        await client.query(
+          `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
+           VALUES($1,'sale',$2,$3,$4)`,
+          [txId, profit, ref, adminId]
+        );
+      }
+    }
+
     sendWalletUpdate(user.id, newBalance);
 
     await sendPushNotification(user.company, user.id, {
       title: `${user.company.toUpperCase()} - Airtime Purchase`,
-      body: `Your ₦${amt} airtime for ${formattedPhone} was ${txStatus.toLowerCase()}`,
+      body: `Your ₦${amt} airtime for ${formattedPhone} was ${finalStatus.toLowerCase()}`,
       url: '/dashboard.html'
     });
 
@@ -2281,7 +2243,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       balance: newBalance,
       provider: 'maitama',
       network_id: networkId,
-      status: txStatus
+      status: finalStatus
     });
 
   } catch (e) {
@@ -2292,7 +2254,6 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     client.release();
   }
 });
-
 
 /* ================= CHANGE PASSWORD/PIN ================= */
 app.post("/api/change-password", auth, async (req, res) => {
@@ -2465,17 +2426,24 @@ app.get("/admin/wallet/transactions", auth, adminOnly, async (req, res) => {
     let query = `
       SELECT
         t.id, t.type, t.amount, t.status, t.phone, t.reference,
-        t.created_at, t.cost, t.network, t.provider_reference, t.description, t.metadata,
+        t.created_at, t.updated_at, t.cost, t.network, t.provider,
+        t.provider_reference, t.description, t.metadata,
+        t.response_msg, t.api_response,
         u.username, u.email, u.company,
         CASE
           WHEN t.type = 'WALLET_FUND' THEN 'CREDIT'
           WHEN t.type = 'REVERSAL' THEN 'CREDIT'
+          WHEN t.type = 'REFUND' THEN 'CREDIT'
           ELSE 'DEBIT'
         END AS display_type,
         CASE
           WHEN t.type = 'WALLET_FUND' THEN 'green'
           WHEN t.type = 'REVERSAL' THEN 'green'
-          ELSE 'red'
+          WHEN t.type = 'REFUND' THEN 'green'
+          WHEN t.status = 'SUCCESS' THEN 'red'
+          WHEN t.status = 'FAILED' THEN 'orange'
+          WHEN t.status = 'PENDING' THEN 'yellow'
+          ELSE 'gray'
         END AS display_color
       FROM transactions t
       JOIN users u ON u.id = t.user_id
@@ -2494,7 +2462,8 @@ app.get("/admin/wallet/transactions", auth, adminOnly, async (req, res) => {
       query += ` AND (t.reference ILIKE $${paramCount}
                 OR t.phone ILIKE $${paramCount}
                 OR u.username ILIKE $${paramCount}
-                OR u.email ILIKE $${paramCount})`;
+                OR u.email ILIKE $${paramCount}
+                OR t.response_msg ILIKE $${paramCount})`;
       params.push(`%${search}%`);
     }
 
@@ -2508,7 +2477,7 @@ app.get("/admin/wallet/transactions", auth, adminOnly, async (req, res) => {
   }
 });
 
-// FORCE DEDUCT - manually deduct from user wallet for failed transaction
+// FORCE DEDUCT - manually approve failed transaction that was actually delivered
 app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -2533,7 +2502,7 @@ app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
     const tx = txRes.rows[0];
     if (tx.status!== "FAILED") {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Only FAILED transactions can be manually deducted" });
+      return res.status(400).json({ message: "Only FAILED transactions can be manually approved" });
     }
 
     // Get user and check balance
@@ -2546,36 +2515,56 @@ app.post("/admin/wallet/force-deduct", auth, adminOnly, async (req, res) => {
     const user = userRes.rows[0];
     if (Number(user.wallet_balance) < Number(tx.amount)) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Insufficient wallet balance" });
+      return res.status(400).json({ message: "Insufficient wallet balance to re-deduct" });
     }
 
-    // Deduct wallet
+    // Deduct wallet again since we refunded before
     const newBalance = Number(user.wallet_balance) - Number(tx.amount);
     await client.query("UPDATE users SET wallet_balance = $1 WHERE id = $2", [newBalance, user.id]);
 
     // Update transaction status
     await client.query(
       `UPDATE transactions
-       SET status = 'SUCCESS', metadata = COALESCE(metadata, '{}') || $1
-       WHERE reference = $2`,
-      [JSON.stringify({ manual_deducted: true, manual_deducted_by: req.user.email, manual_deducted_reason: reason }), reference]
+       SET status = 'SUCCESS',
+           response_msg = $1,
+           metadata = COALESCE(metadata, '{}') || $2,
+           updated_at = NOW()
+       WHERE reference = $3`,
+      [
+        `Manually approved by admin: ${reason}`,
+        JSON.stringify({
+          manual_approved: true,
+          manual_approved_by: req.user.email,
+          manual_approved_reason: reason,
+          manual_approved_at: new Date().toISOString()
+        }),
+        reference
+      ]
     );
 
     // Insert wallet transaction record for audit trail
     await client.query(
       `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, admin_email, reference, metadata)
        VALUES($1, 'debit', $2, $3, $4, $5, $6, $7)`,
-      [user.company, tx.amount, newBalance, reason, req.user.email, `MANUAL-${reference}`, JSON.stringify({ original_ref: reference })]
+      [
+        user.company,
+        tx.amount,
+        newBalance,
+        `Manual approval: ${reason}`,
+        req.user.email,
+        `MANUAL-${reference}`,
+        JSON.stringify({ original_ref: reference, tx_id: tx.id })
+      ]
     );
 
     await client.query("COMMIT");
     sendWalletUpdate(user.id, newBalance);
 
-    res.json({ message: `Successfully deducted ₦${tx.amount} from ${user.username}` });
+    res.json({ message: `Successfully approved ₦${tx.amount} for ${user.username}` });
   } catch (e) {
     await client.query("ROLLBACK");
     console.error("Force deduct error:", e);
-    res.status(500).json({ message: "Server error during deduction: " + e.message });
+    res.status(500).json({ message: "Server error during approval: " + e.message });
   } finally {
     client.release();
   }
@@ -2623,16 +2612,36 @@ app.post("/admin/wallet/reverse", auth, adminOnly, async (req, res) => {
     // Update transaction status
     await client.query(
       `UPDATE transactions
-       SET status = 'REVERSED', metadata = COALESCE(metadata, '{}') || $1
-       WHERE reference = $2`,
-      [JSON.stringify({ reversed: true, reversed_by: req.user.email, reversed_reason: reason }), reference]
+       SET status = 'REVERSED',
+           response_msg = $1,
+           metadata = COALESCE(metadata, '{}') || $2,
+           updated_at = NOW()
+       WHERE reference = $3`,
+      [
+        `Manually reversed by admin: ${reason}`,
+        JSON.stringify({
+          reversed: true,
+          reversed_by: req.user.email,
+          reversed_reason: reason,
+          reversed_at: new Date().toISOString()
+        }),
+        reference
+      ]
     );
 
     // Insert wallet transaction record for audit trail
     await client.query(
       `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, admin_email, reference, metadata)
        VALUES($1, 'credit', $2, $3, $4, $5, $6, $7)`,
-      [user.company, tx.amount, newBalance, reason, req.user.email, `REVERSAL-${reference}`, JSON.stringify({ original_ref: reference })]
+      [
+        user.company,
+        tx.amount,
+        newBalance,
+        `Reversal: ${reason}`,
+        req.user.email,
+        `REVERSAL-${reference}`,
+        JSON.stringify({ original_ref: reference, tx_id: tx.id })
+      ]
     );
 
     await client.query("COMMIT");
