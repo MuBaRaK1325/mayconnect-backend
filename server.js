@@ -747,13 +747,7 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS ================= */
-const {
-  generateRegistrationOptions,
-  verifyRegistrationResponse,
-  generateAuthenticationOptions,
-  verifyAuthenticationResponse
-} = require('@simplewebauthn/server');
-const { isoBase64URL } = require('@simplewebauthn/server/helpers');
+// NOTE: Ka tabbata 'require' din @simplewebauthn/server yana saman file dinka sau daya kawai
 
 // Company config - Logo da Sunan kowacce brand
 const COMPANY_CONFIG = {
@@ -797,7 +791,6 @@ const COMPANY_CONFIG = {
     icon: 'https://bnhabeebdatahub.com.ng/BNHABEEB.png',
     short: 'bnhabeeb'
   },
-  // Old Render domains
   'mayconnect-frontend.onrender.com': {
     name: 'MAYCONNECT DATA PLUG',
     icon: 'https://mayconnect-frontend.onrender.com/logo.png',
@@ -825,14 +818,12 @@ const COMPANY_CONFIG = {
   }
 };
 
-// Shared RP ID - dole ya zama daya don passkeys su yi aiki across subdomains
 const SHARED_RP_ID = process.env.NODE_ENV === 'production'
- ? 'mayconnectdataplug.com.ng'
+? 'mayconnectdataplug.com.ng'
   : 'localhost';
 
 function getCompanyConfig(req) {
   if (process.env.NODE_ENV!== 'production') return COMPANY_CONFIG['localhost'];
-
   const hostname = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
   return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['mayconnectdataplug.com.ng'];
 }
@@ -878,7 +869,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const options = await generateRegistrationOptions({
       rpName: company.name,
       rpID: SHARED_RP_ID,
-      rpIcon: company.icon, // Logo a prompt
+      rpIcon: company.icon,
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -886,7 +877,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
         userVerification: 'required',
-        residentKey: 'required', // KEY: Passkeys - babu email a login
+        residentKey: 'required',
         requireResidentKey: true
       },
       pubKeyCredParams: [
@@ -946,20 +937,18 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   }
 });
 
-// LOGIN START - BABU EMAIL! Button daya kawai
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     const company = getCompanyConfig(req);
 
     const options = await generateAuthenticationOptions({
       rpID: SHARED_RP_ID,
-      rpName: company.name, // Suna a prompt
-      rpIcon: company.icon, // Logo a prompt
+      rpName: company.name,
+      rpIcon: company.icon,
       userVerification: 'required',
-      allowCredentials: [] // EMPTY = Phone zai nuna duk passkeys na domain
+      allowCredentials: []
     });
 
-    // Ajiye challenge ba tare da user_id ba tukuna
     await pool.query(
       'INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')',
       [options.challenge]
@@ -973,20 +962,17 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
   }
 });
 
-// LOGIN FINISH - Gane user daga credentialID
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   const { id: credentialId,...authResponse } = req.body;
   const expectedOrigin = getExpectedOrigin(req);
 
   try {
-    // 1. Nemo challenge
     const challengeRes = await pool.query(
       'SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1'
     );
     if (!challengeRes.rows[0]) return res.status(400).json({ error: 'Challenge expired. Try again.' });
     const challenge = challengeRes.rows[0].challenge;
 
-    // 2. Nemo user daga credential
     const credRes = await pool.query(
       'SELECT * FROM webauthn_credentials WHERE credential_id=$1',
       [credentialId]
@@ -998,7 +984,6 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const user = userRes.rows[0];
     if (!user) return res.status(400).json({ error: 'User not found' });
 
-    // 3. Verify
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: challenge,
