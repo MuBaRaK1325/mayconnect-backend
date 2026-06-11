@@ -945,10 +945,14 @@ function getExpectedOrigin(req) {
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
     const creds = await pool.query(
-      'SELECT id FROM webauthn_credentials WHERE user_id=$1',
+      'SELECT id, rp_id FROM webauthn_credentials WHERE user_id=$1',
       [req.user.id]
     );
-    res.json({ enabled: creds.rows.length > 0, user_id: req.user.id });
+    res.json({
+      enabled: creds.rows.length > 0,
+      user_id: req.user.id,
+      rp_id: creds.rows[0]?.rp_id || null
+    });
   } catch (e) {
     console.error('Check enabled error:', e.message);
     if (e.code === '42703') {
@@ -962,13 +966,38 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 app.get('/api/auth/webauthn/status', auth, async (req, res) => {
   try {
     const creds = await pool.query(
-      'SELECT id FROM webauthn_credentials WHERE user_id=$1',
+      'SELECT id, rp_id FROM webauthn_credentials WHERE user_id=$1',
       [req.user.id]
     );
-    res.json({ enabled: creds.rows.length > 0, user_id: req.user.id });
+    res.json({
+      enabled: creds.rows.length > 0,
+      user_id: req.user.id,
+      rp_id: creds.rows[0]?.rp_id || null
+    });
   } catch (e) {
     console.error('Status check error:', e.message);
     res.json({ enabled: false });
+  }
+});
+
+// Disable biometric endpoint
+app.post('/api/auth/webauthn/disable', auth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM webauthn_credentials WHERE user_id=$1 RETURNING id',
+      [req.user.id]
+    );
+
+    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [req.user.id]);
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Biometric not enabled' });
+    }
+
+    res.json({ success: true, message: 'Biometric disabled successfully' });
+  } catch (e) {
+    console.error('Disable error:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -979,12 +1008,12 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const company = getCompanyConfig(req);
 
     const existingCreds = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1',
-      [user.id]
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
+      [user.id, SHARED_RP_ID]
     );
 
     if (existingCreds.rows.length > 0) {
-      return res.status(400).json({ error: 'Biometric already enabled. Disable first to re-register.' });
+      return res.status(400).json({ error: 'Biometric already enabled for this domain. Disable first to re-register.' });
     }
 
     const options = await generateRegistrationOptions({
@@ -1071,18 +1100,21 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   }
 });
 
-// CRITICAL FIX: login-start must return allowCredentials
+// CRITICAL FIX: login-start must return allowCredentials for current RP_ID
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     const company = getCompanyConfig(req);
+    const expectedOrigin = getExpectedOrigin(req);
+    const currentRPID = SHARED_RP_ID; // Use SHARED_RP_ID from env
 
-    // Get ALL registered credentials for usernameless/discoverable login
+    // Get credentials ONLY for current RP_ID
     const credsRes = await pool.query(
-      'SELECT credential_id, transports FROM webauthn_credentials'
+      'SELECT credential_id, transports FROM webauthn_credentials WHERE rp_id = $1',
+      [currentRPID]
     );
 
     if (credsRes.rows.length === 0) {
-      return res.status(400).json({ error: 'No biometric registered on this server' });
+      return res.status(400).json({ error: 'No biometric registered for this domain' });
     }
 
     const allowCredentials = credsRes.rows.map(cred => ({
@@ -1092,7 +1124,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     }));
 
     const options = await generateAuthenticationOptions({
-      rpID: SHARED_RP_ID,
+      rpID: currentRPID,
       userVerification: 'required',
       allowCredentials: allowCredentials,
       timeout: 60000
@@ -1123,10 +1155,10 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const challenge = challengeRes.rows[0].challenge;
 
     const credRes = await pool.query(
-      'SELECT * FROM webauthn_credentials WHERE credential_id=$1',
-      [credentialId]
+      'SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2',
+      [credentialId, SHARED_RP_ID]
     );
-    if (!credRes.rows.length) return res.status(400).json({ error: 'Biometric not registered' });
+    if (!credRes.rows.length) return res.status(400).json({ error: 'Biometric not registered for this domain' });
 
     const cred = credRes.rows[0];
     const userRes = await pool.query('SELECT * FROM users WHERE id=$1', [cred.user_id]);
@@ -1149,7 +1181,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     if (verification.verified) {
       const { authenticationInfo } = verification;
 
-      await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE id=$2',
+      await pool.query('UPDATE webauthn_credentials SET counter=$1, last_used=NOW() WHERE id=$2',
         [authenticationInfo.newCounter, cred.id]);
 
       await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
