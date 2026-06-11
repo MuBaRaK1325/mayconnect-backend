@@ -948,7 +948,7 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
       'SELECT id FROM webauthn_credentials WHERE user_id=$1',
       [req.user.id]
     );
-    res.json({ enabled: creds.rows.length > 0 });
+    res.json({ enabled: creds.rows.length > 0, user_id: req.user.id });
   } catch (e) {
     console.error('Check enabled error:', e.message);
     if (e.code === '42703') {
@@ -958,11 +958,18 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   }
 });
 
-// KARA WANNAN ALIAS - zai magance 404
+// Alias for frontend compatibility - prevents 404
 app.get('/api/auth/webauthn/status', auth, async (req, res) => {
-  // Redirect to check-enabled
-  req.url = '/api/auth/webauthn/check-enabled';
-  app._router.handle(req, res);
+  try {
+    const creds = await pool.query(
+      'SELECT id FROM webauthn_credentials WHERE user_id=$1',
+      [req.user.id]
+    );
+    res.json({ enabled: creds.rows.length > 0, user_id: req.user.id });
+  } catch (e) {
+    console.error('Status check error:', e.message);
+    res.json({ enabled: false });
+  }
 });
 
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
@@ -997,7 +1004,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 },
         { type: 'public-key', alg: -257 }
-      ]
+      ],
+      timeout: 60000
     });
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
@@ -1015,6 +1023,10 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const company = getCompanyConfig(req);
 
   try {
+    if (!user.webauthn_challenge) {
+      return res.status(400).json({ error: 'Challenge not found. Start registration again.' });
+    }
+
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: user.webauthn_challenge,
@@ -1034,10 +1046,18 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       const publicKey = Buffer.from(credential.publicKey).toString('base64url');
 
       await pool.query(
-        `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4, company=$6`,
-        [user.id, credentialID, publicKey, credential.counter, SHARED_RP_ID, company.short]
+        `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company, transports)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4, company=$6, transports=$7`,
+        [
+          user.id,
+          credentialID,
+          publicKey,
+          credential.counter,
+          SHARED_RP_ID,
+          company.short,
+          req.body.transports || ['internal']
+        ]
       );
 
       await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
@@ -1051,16 +1071,31 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   }
 });
 
+// CRITICAL FIX: login-start must return allowCredentials
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     const company = getCompanyConfig(req);
 
+    // Get ALL registered credentials for usernameless/discoverable login
+    const credsRes = await pool.query(
+      'SELECT credential_id, transports FROM webauthn_credentials'
+    );
+
+    if (credsRes.rows.length === 0) {
+      return res.status(400).json({ error: 'No biometric registered on this server' });
+    }
+
+    const allowCredentials = credsRes.rows.map(cred => ({
+      id: cred.credential_id,
+      type: 'public-key',
+      transports: cred.transports || ['internal', 'hybrid']
+    }));
+
     const options = await generateAuthenticationOptions({
       rpID: SHARED_RP_ID,
-      rpName: company.name,
-      rpIcon: company.icon,
       userVerification: 'required',
-      allowCredentials: []
+      allowCredentials: allowCredentials,
+      timeout: 60000
     });
 
     await pool.query(
