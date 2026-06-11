@@ -1989,18 +1989,15 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       });
     }
 
-    // 1. DEDUCT BALANCE + INSERT PENDING TRANSACTION
     const balanceBefore = balanceNum;
-    const newBalance = balanceNum - priceNum;
-    await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
-
     const ref = "DATA-" + uuidv4();
     const cost = Number(plan.cost);
 
+    // 1. INSERT PENDING TRANSACTION - KADA KA DEBIT TUKUNA
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name,provider,balance_before,balance_after)
        VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'PENDING',$8,$9,$10,$11) RETURNING *`,
-      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name, plan.provider, balanceBefore, newBalance]
+      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name, plan.provider, balanceBefore, balanceBefore]
     );
     const txId = txRes.rows[0].id;
     await client.query("COMMIT");
@@ -2027,6 +2024,9 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       if (apiResponse.status === 'success' || apiResponse.code === 200 || apiResponse.Status?.toLowerCase() === 'successful') {
         finalStatus = 'SUCCESS';
         responseMsg = 'Transaction successful';
+      } else if (apiResponse.status === 'pending' || apiResponse.Status?.toLowerCase() === 'pending') {
+        finalStatus = 'PENDING';
+        responseMsg = 'Transaction pending';
       } else {
         finalStatus = 'FAILED';
         responseMsg = apiResponse.message || apiResponse.api_response || 'Provider rejected transaction';
@@ -2042,70 +2042,83 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         else if (errs.plan) responseMsg = `Plan error: ${errs.plan[0]}`;
         else if (errs.mobile_number) responseMsg = `Phone error: ${errs.mobile_number[0]}`;
       }
+      
+      if (vtuErr.message === 'TIMEOUT_POSSIBLE_SUCCESS' || vtuErr.code === 'ECONNABORTED') {
+        finalStatus = 'PENDING';
+        responseMsg = 'Request submitted. Delivery pending.';
+      }
     }
 
-    // 3. UPDATE TRANSACTION
+    // 3. UPDATE TRANSACTION + DEBIT WALLET IDAN SUCCESS KAWAI
+    let balanceAfter = balanceBefore;
+    
+    await client.query("BEGIN");
+    
+    if (finalStatus === 'SUCCESS') {
+      balanceAfter = balanceBefore - priceNum;
+      await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [balanceAfter, user.id]);
+      
+      // Profit
+      const adminId = await getCompanyAdmin(user.company);
+      const profit = priceNum - cost;
+      if (adminId && profit > 0) {
+        await client.query("UPDATE users SET admin_wallet = admin_wallet + $1, updated_at=NOW() WHERE id=$2", [profit, adminId]);
+        await client.query(
+          `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
+           VALUES($1,'sale',$2,$3,$4)`,
+          [txId, profit, ref, adminId]
+        );
+      }
+    }
+
     await client.query(`
       UPDATE transactions
       SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW(),
-          balance_after = CASE WHEN $1 = 'SUCCESS' THEN $5 ELSE $6 END
+          balance_after = $5
       WHERE id = $4
-    `, [finalStatus, responseMsg, JSON.stringify(apiResponse), txId, newBalance, balanceBefore]);
+    `, [finalStatus, responseMsg, JSON.stringify(apiResponse), txId, balanceAfter]);
+    
+    await client.query("COMMIT");
 
-    // 4. HANDLE FAILED - REFUND
+    // 4. HANDLE FAILED
     if (finalStatus === 'FAILED') {
-      await client.query("BEGIN");
-      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [priceNum, user.id]);
-
-      await client.query(
-        `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, reference, metadata)
-         VALUES($1, 'credit', $2, $3, $4, $5, $6)`,
-        [
-          user.company,
-          priceNum,
-          balanceBefore,
-          `Auto refund: ${responseMsg}`,
-          `REFUND-${ref}`,
-          JSON.stringify({ original_tx_id: txId })
-        ]
-      );
-      await client.query("COMMIT");
       sendWalletUpdate(user.id, balanceBefore);
       return res.status(400).json({
+        success: false,
         message: responseMsg,
         reference: ref,
+        status: 'FAILED',
         balance_before: balanceBefore,
-        balance_after: balanceBefore
+        balance_after: balanceBefore,
+        phone: phone,
+        network: plan.network,
+        plan_name: plan.name,
+        amount: priceNum,
+        created_at: new Date().toISOString()
       });
     }
 
-    // 5. HANDLE SUCCESS - PROFIT
-    const adminId = await getCompanyAdmin(user.company);
-    const profit = priceNum - cost;
-    if (adminId && profit > 0) {
-      await client.query("UPDATE users SET admin_wallet = admin_wallet + $1, updated_at=NOW() WHERE id=$2", [profit, adminId]);
-      await client.query(
-        `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
-         VALUES($1,'sale',$2,$3,$4)`,
-        [txId, profit, ref, adminId]
-      );
-    }
-
-    sendWalletUpdate(user.id, newBalance);
+    sendWalletUpdate(user.id, balanceAfter);
 
     await sendPushNotification(user.company, user.id, {
       title: `${user.company.toUpperCase()} - Data Purchase`,
-      body: `Your ${plan.name} purchase for ${phone} was successful`,
+      body: `Your ${plan.name} purchase for ${phone} was ${finalStatus.toLowerCase()}`,
       url: '/dashboard.html'
     });
 
     res.json({
       success: true,
       reference: ref,
-      balance: newBalance,
+      status: finalStatus,
+      balance: balanceAfter,
       balance_before: balanceBefore,
-      balance_after: newBalance,
-      tier: isTopUser? 'top' : 'default'
+      balance_after: balanceAfter,
+      tier: isTopUser? 'top' : 'default',
+      phone: phone,
+      network: plan.network,
+      plan_name: plan.name,
+      amount: priceNum,
+      created_at: new Date().toISOString()
     });
   } catch (e) {
     await client.query("ROLLBACK");
@@ -2115,7 +2128,6 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     client.release();
   }
 });
-
 /* ================= BUY AIRTIME - Maitama: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE ================= */
 function getMaitamaNetworkId(networkName) {
   return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
@@ -2237,20 +2249,17 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       return res.status(400).json({ message: "Insufficient balance" });
     }
 
-    // 1. DEDUCT + INSERT PENDING
     const balanceBefore = Number(user.wallet_balance);
-    const newBalance = balanceBefore - amt;
-    await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [newBalance, user.id]);
-
     const ref = "AIRTIME-" + uuidv4();
     const cost = amt * 0.98;
 
+    // 1. INSERT PENDING - KADA KA DEBIT TUKUNA
     const txRes = await client.query(
       `INSERT INTO transactions(
         user_id, type, amount, cost, phone, network,
         reference, status, provider, gateway, balance_before, balance_after
       ) VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'PENDING','maitama','maitama',$7,$8) RETURNING *`,
-      [user.id, amt, cost, formattedPhone, networkKey, ref, balanceBefore, newBalance]
+      [user.id, amt, cost, formattedPhone, networkKey, ref, balanceBefore, balanceBefore]
     );
     const txId = txRes.rows[0].id;
     await client.query("COMMIT");
@@ -2275,43 +2284,16 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       }
     }
 
-    // 3. UPDATE TRANSACTION
-    await client.query(`
-      UPDATE transactions
-      SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW(),
-          balance_after = CASE WHEN $1 IN ('SUCCESS', 'PENDING') THEN $5 ELSE $6 END
-      WHERE id = $4
-    `, [finalStatus, responseMsg, JSON.stringify(maitamaRes), txId, newBalance, balanceBefore]);
-
-    // 4. HANDLE FAILED - REFUND
-    if (finalStatus === 'FAILED') {
-      await client.query("BEGIN");
-      await client.query("UPDATE users SET wallet_balance = wallet_balance + $1, updated_at=NOW() WHERE id=$2", [amt, user.id]);
-
-      await client.query(
-        `INSERT INTO wallet_transactions(company, type, amount, balance_after, reason, reference, metadata)
-         VALUES($1, 'credit', $2, $3, $4, $5, $6)`,
-        [
-          user.company,
-          amt,
-          balanceBefore,
-          `Auto refund: ${responseMsg}`,
-          `REFUND-${ref}`,
-          JSON.stringify({ original_tx_id: txId })
-        ]
-      );
-      await client.query("COMMIT");
-      sendWalletUpdate(user.id, balanceBefore);
-      return res.status(400).json({
-        message: responseMsg,
-        reference: ref,
-        balance_before: balanceBefore,
-        balance_after: balanceBefore
-      });
-    }
-
-    // 5. HANDLE SUCCESS/PENDING - PROFIT
+    // 3. UPDATE + DEBIT IDAN SUCCESS KAWAI
+    let balanceAfter = balanceBefore;
+    
+    await client.query("BEGIN");
+    
     if (finalStatus === 'SUCCESS') {
+      balanceAfter = balanceBefore - amt;
+      await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [balanceAfter, user.id]);
+      
+      // Profit
       const adminId = await getCompanyAdmin(user.company);
       const profit = amt - cost;
       if (adminId && profit > 0) {
@@ -2324,7 +2306,33 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       }
     }
 
-    sendWalletUpdate(user.id, newBalance);
+    await client.query(`
+      UPDATE transactions
+      SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW(),
+          balance_after = $5
+      WHERE id = $4
+    `, [finalStatus, responseMsg, JSON.stringify(maitamaRes), txId, balanceAfter]);
+    
+    await client.query("COMMIT");
+
+    // 4. HANDLE FAILED
+    if (finalStatus === 'FAILED') {
+      sendWalletUpdate(user.id, balanceBefore);
+      return res.status(400).json({
+        success: false,
+        message: responseMsg,
+        reference: ref,
+        status: 'FAILED',
+        balance_before: balanceBefore,
+        balance_after: balanceBefore,
+        phone: formattedPhone,
+        network: networkKey,
+        amount: amt,
+        created_at: new Date().toISOString()
+      });
+    }
+
+    sendWalletUpdate(user.id, balanceAfter);
 
     await sendPushNotification(user.company, user.id, {
       title: `${user.company.toUpperCase()} - Airtime Purchase`,
@@ -2335,12 +2343,16 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     res.json({
       success: true,
       reference: ref,
-      balance: newBalance,
+      status: finalStatus,
+      balance: balanceAfter,
       balance_before: balanceBefore,
-      balance_after: finalStatus === 'FAILED'? balanceBefore : newBalance,
+      balance_after: balanceAfter,
       provider: 'maitama',
       network_id: networkId,
-      status: finalStatus
+      phone: formattedPhone,
+      network: networkKey,
+      amount: amt,
+      created_at: new Date().toISOString()
     });
 
   } catch (e) {
