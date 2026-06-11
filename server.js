@@ -958,6 +958,13 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   }
 });
 
+// KARA WANNAN ALIAS - zai magance 404
+app.get('/api/auth/webauthn/status', auth, async (req, res) => {
+  // Redirect to check-enabled
+  req.url = '/api/auth/webauthn/check-enabled';
+  app._router.handle(req, res);
+});
+
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
@@ -1070,7 +1077,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 });
 
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
-  const { id: credentialId,...authResponse } = req.body;
+  const { id: credentialId } = req.body;
   const expectedOrigin = getExpectedOrigin(req);
 
   try {
