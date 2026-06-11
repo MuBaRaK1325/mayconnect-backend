@@ -1902,232 +1902,6 @@ app.get("/api/plans", auth, async (req, res) => {
     res.status(500).json({ message: "Failed to fetch plans" });
   }
 });
-/* ================= BUY DATA - Multi-provider + BIOMETRIC ================= */
-app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { plan_id, phone, pin } = req.body;
-
-    if (!plan_id ||!phone) {
-      return res.status(400).json({ message: "plan_id and phone are required" });
-    }
-    if (!/^\d{10,15}$/.test(String(phone))) {
-      return res.status(400).json({ message: "Invalid phone number. Use 11 digits like 08101234567" });
-    }
-
-    await client.query("BEGIN");
-    const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
-    const user = userRes.rows[0];
-    if (!user) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    if (pin!== 'biometric_verified') {
-      if (!user.pin) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({
-          message: "Transaction PIN not set. Please set your PIN in Profile first.",
-          needPin: true
-        });
-      }
-      const validPin = await bcrypt.compare(String(pin), String(user.pin));
-      if (!validPin) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ message: "Invalid PIN" });
-      }
-    }
-
-    const planRes = await client.query("SELECT * FROM plans WHERE id=$1 AND is_active=TRUE", [plan_id]);
-    if (!planRes.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Plan not found or inactive" });
-    }
-    const plan = planRes.rows[0];
-
-    if (plan.restricted && plan.company!== user.company) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ message: "Plan restricted to company users" });
-    }
-
-    if (!plan.provider) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
-    }
-
-    // Provider-specific validation
-    if (plan.provider === "subpadi") {
-      if (!plan.api_plan_id) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ message: "Plan not configured with product_id. Contact admin." });
-      }
-    } else {
-      if (!plan.api_plan_id || plan.network_id === null || plan.network_id === undefined) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ message: "Plan not configured with provider plan ID or network_id. Contact admin." });
-      }
-
-      const netId = Number(plan.network_id);
-      if (isNaN(netId) || netId < 1 || netId > 4) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({
-          message: `Invalid network_id: ${plan.network_id}. Must be numeric 1-4`
-        });
-      }
-    }
-
-    const tierRes = await client.query("SELECT 1 FROM top_users WHERE id=$1", [user.id]);
-    const isTopUser = tierRes.rows.length > 0;
-    const price = isTopUser? (plan.top_price || plan.price) : plan.price;
-    const balanceNum = Number(user.wallet_balance);
-    const priceNum = Number(price);
-
-    if (balanceNum < priceNum) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        message: `Insufficient balance. You have ₦${balanceNum.toFixed(2)}, this plan costs ₦${priceNum.toFixed(2)}`
-      });
-    }
-
-    const balanceBefore = balanceNum;
-    const ref = "DATA-" + uuidv4();
-    const cost = Number(plan.cost);
-
-    // 1. INSERT PENDING TRANSACTION - KADA KA DEBIT TUKUNA
-    const txRes = await client.query(
-      `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name,provider,balance_before,balance_after)
-       VALUES($1,$2,'DATA',$3,$4,$5,$6,$7,'PENDING',$8,$9,$10,$11) RETURNING *`,
-      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name, plan.provider, balanceBefore, balanceBefore]
-    );
-    const txId = txRes.rows[0].id;
-    await client.query("COMMIT");
-
-    // 2. CALL PROVIDER API - WAJEN TRANSACTION
-    let apiResponse = null;
-    let finalStatus = 'FAILED';
-    let responseMsg = 'Unknown error';
-
-    try {
-      if (plan.provider === "maitama") {
-        apiResponse = await callMaitamaData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else if (plan.provider === "cheapdatahub") {
-        apiResponse = await callCheapDataHubData(phone, plan.network_id, plan.api_plan_id);
-      } else if (plan.provider === "subpadi") {
-        apiResponse = await callSubPadiData(phone, plan.api_plan_id, user.company);
-      } else if (plan.provider === "arrahuz") {
-        apiResponse = await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else {
-        throw new Error("Unknown provider");
-      }
-
-      // Check success
-      if (apiResponse.status === 'success' || apiResponse.code === 200 || apiResponse.Status?.toLowerCase() === 'successful') {
-        finalStatus = 'SUCCESS';
-        responseMsg = 'Transaction successful';
-      } else if (apiResponse.status === 'pending' || apiResponse.Status?.toLowerCase() === 'pending') {
-        finalStatus = 'PENDING';
-        responseMsg = 'Transaction pending';
-      } else {
-        finalStatus = 'FAILED';
-        responseMsg = apiResponse.message || apiResponse.api_response || 'Provider rejected transaction';
-      }
-    } catch (vtuErr) {
-      finalStatus = 'FAILED';
-      responseMsg = vtuErr.response?.data?.message || vtuErr.response?.data?.api_response || vtuErr.message || 'API timeout';
-      apiResponse = vtuErr.response?.data || { error: vtuErr.message };
-
-      if (vtuErr.response?.data?.errors) {
-        const errs = vtuErr.response.data.errors;
-        if (errs.network) responseMsg = `Network error: ${errs.network[0]}`;
-        else if (errs.plan) responseMsg = `Plan error: ${errs.plan[0]}`;
-        else if (errs.mobile_number) responseMsg = `Phone error: ${errs.mobile_number[0]}`;
-      }
-      
-      if (vtuErr.message === 'TIMEOUT_POSSIBLE_SUCCESS' || vtuErr.code === 'ECONNABORTED') {
-        finalStatus = 'PENDING';
-        responseMsg = 'Request submitted. Delivery pending.';
-      }
-    }
-
-    // 3. UPDATE TRANSACTION + DEBIT WALLET IDAN SUCCESS KAWAI
-    let balanceAfter = balanceBefore;
-    
-    await client.query("BEGIN");
-    
-    if (finalStatus === 'SUCCESS') {
-      balanceAfter = balanceBefore - priceNum;
-      await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [balanceAfter, user.id]);
-      
-      // Profit
-      const adminId = await getCompanyAdmin(user.company);
-      const profit = priceNum - cost;
-      if (adminId && profit > 0) {
-        await client.query("UPDATE users SET admin_wallet = admin_wallet + $1, updated_at=NOW() WHERE id=$2", [profit, adminId]);
-        await client.query(
-          `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
-           VALUES($1,'sale',$2,$3,$4)`,
-          [txId, profit, ref, adminId]
-        );
-      }
-    }
-
-    await client.query(`
-      UPDATE transactions
-      SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW(),
-          balance_after = $5
-      WHERE id = $4
-    `, [finalStatus, responseMsg, JSON.stringify(apiResponse), txId, balanceAfter]);
-    
-    await client.query("COMMIT");
-
-    // 4. HANDLE FAILED
-    if (finalStatus === 'FAILED') {
-      sendWalletUpdate(user.id, balanceBefore);
-      return res.status(400).json({
-        success: false,
-        message: responseMsg,
-        reference: ref,
-        status: 'FAILED',
-        balance_before: balanceBefore,
-        balance_after: balanceBefore,
-        phone: phone,
-        network: plan.network,
-        plan_name: plan.name,
-        amount: priceNum,
-        created_at: new Date().toISOString()
-      });
-    }
-
-    sendWalletUpdate(user.id, balanceAfter);
-
-    await sendPushNotification(user.company, user.id, {
-      title: `${user.company.toUpperCase()} - Data Purchase`,
-      body: `Your ${plan.name} purchase for ${phone} was ${finalStatus.toLowerCase()}`,
-      url: '/dashboard.html'
-    });
-
-    res.json({
-      success: true,
-      reference: ref,
-      status: finalStatus,
-      balance: balanceAfter,
-      balance_before: balanceBefore,
-      balance_after: balanceAfter,
-      tier: isTopUser? 'top' : 'default',
-      phone: phone,
-      network: plan.network,
-      plan_name: plan.name,
-      amount: priceNum,
-      created_at: new Date().toISOString()
-    });
-  } catch (e) {
-    await client.query("ROLLBACK");
-    console.error("BUY DATA ERROR:", e);
-    res.status(500).json({ message: "Purchase failed. Try again later." });
-  } finally {
-    client.release();
-  }
-});
 /* ================= BUY AIRTIME - Maitama: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE ================= */
 function getMaitamaNetworkId(networkName) {
   return MAITAMA_NETWORK_MAP[String(networkName).toLowerCase()] || null;
@@ -2251,14 +2025,14 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
 
     const balanceBefore = Number(user.wallet_balance);
     const ref = "AIRTIME-" + uuidv4();
-    const cost = amt * 0.98;
+    const cost = Number(amt) * 0.98;
 
     // 1. INSERT PENDING - KADA KA DEBIT TUKUNA
     const txRes = await client.query(
       `INSERT INTO transactions(
         user_id, type, amount, cost, phone, network,
         reference, status, provider, gateway, balance_before, balance_after
-      ) VALUES($1,'AIRTIME',$2,$3,$4,$5,$6,'PENDING','maitama','maitama',$7,$8) RETURNING *`,
+      ) VALUES($1,'AIRTIME',$2::numeric,$3::numeric,$4,$5,$6,'PENDING','maitama','maitama',$7::numeric,$8::numeric) RETURNING *`,
       [user.id, amt, cost, formattedPhone, networkKey, ref, balanceBefore, balanceBefore]
     );
     const txId = txRes.rows[0].id;
@@ -2285,22 +2059,22 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     }
 
     // 3. UPDATE + DEBIT IDAN SUCCESS KAWAI
-    let balanceAfter = balanceBefore;
-    
+    let balanceAfter = Number(balanceBefore);
+
     await client.query("BEGIN");
-    
+
     if (finalStatus === 'SUCCESS') {
-      balanceAfter = balanceBefore - amt;
-      await client.query("UPDATE users SET wallet_balance=$1, updated_at=NOW() WHERE id=$2", [balanceAfter, user.id]);
-      
+      balanceAfter = Number(balanceBefore) - Number(amt);
+      await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [balanceAfter, user.id]);
+
       // Profit
       const adminId = await getCompanyAdmin(user.company);
-      const profit = amt - cost;
+      const profit = Number(amt) - Number(cost);
       if (adminId && profit > 0) {
-        await client.query("UPDATE users SET admin_wallet = admin_wallet + $1, updated_at=NOW() WHERE id=$2", [profit, adminId]);
+        await client.query("UPDATE users SET admin_wallet = admin_wallet + $1::numeric, updated_at=NOW() WHERE id=$2", [profit, adminId]);
         await client.query(
           `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
-           VALUES($1,'sale',$2,$3,$4)`,
+           VALUES($1,'sale',$2::numeric,$3,$4)`,
           [txId, profit, ref, adminId]
         );
       }
@@ -2309,10 +2083,10 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     await client.query(`
       UPDATE transactions
       SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW(),
-          balance_after = $5
+          balance_after = $5::numeric
       WHERE id = $4
-    `, [finalStatus, responseMsg, JSON.stringify(maitamaRes), txId, balanceAfter]);
-    
+    `, [finalStatus, responseMsg, JSON.stringify(maitamaRes), txId, Number(balanceAfter)]);
+
     await client.query("COMMIT");
 
     // 4. HANDLE FAILED
@@ -2323,11 +2097,11 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
         message: responseMsg,
         reference: ref,
         status: 'FAILED',
-        balance_before: balanceBefore,
-        balance_after: balanceBefore,
+        balance_before: Number(balanceBefore),
+        balance_after: Number(balanceBefore),
         phone: formattedPhone,
         network: networkKey,
-        amount: amt,
+        amount: Number(amt),
         created_at: new Date().toISOString()
       });
     }
@@ -2344,20 +2118,246 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       success: true,
       reference: ref,
       status: finalStatus,
-      balance: balanceAfter,
-      balance_before: balanceBefore,
-      balance_after: balanceAfter,
+      balance: Number(balanceAfter),
+      balance_before: Number(balanceBefore),
+      balance_after: Number(balanceAfter),
       provider: 'maitama',
       network_id: networkId,
       phone: formattedPhone,
       network: networkKey,
-      amount: amt,
+      amount: Number(amt),
       created_at: new Date().toISOString()
     });
 
   } catch (e) {
     await client.query("ROLLBACK");
     console.error("BUY AIRTIME ERROR:", e);
+    res.status(500).json({ message: "Purchase failed. Try again later." });
+  } finally {
+    client.release();
+  }
+});
+/* ================= BUY DATA - Multi-provider + BIOMETRIC ================= */
+app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { plan_id, phone, pin } = req.body;
+
+    if (!plan_id ||!phone) {
+      return res.status(400).json({ message: "plan_id and phone are required" });
+    }
+    if (!/^\d{10,15}$/.test(String(phone))) {
+      return res.status(400).json({ message: "Invalid phone number. Use 11 digits like 08101234567" });
+    }
+
+    await client.query("BEGIN");
+    const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
+    const user = userRes.rows[0];
+    if (!user) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (pin!== 'biometric_verified') {
+      if (!user.pin) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: "Transaction PIN not set. Please set your PIN in Profile first.",
+          needPin: true
+        });
+      }
+      const validPin = await bcrypt.compare(String(pin), String(user.pin));
+      if (!validPin) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "Invalid PIN" });
+      }
+    }
+
+    const planRes = await client.query("SELECT * FROM plans WHERE id=$1 AND is_active=TRUE", [plan_id]);
+    if (!planRes.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Plan not found or inactive" });
+    }
+    const plan = planRes.rows[0];
+
+    if (plan.restricted && plan.company!== user.company) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ message: "Plan restricted to company users" });
+    }
+
+    if (!plan.provider) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
+    }
+
+    // Provider-specific validation
+    if (plan.provider === "subpadi") {
+      if (!plan.api_plan_id) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "Plan not configured with product_id. Contact admin." });
+      }
+    } else {
+      if (!plan.api_plan_id || plan.network_id === null || plan.network_id === undefined) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "Plan not configured with provider plan ID or network_id. Contact admin." });
+      }
+
+      const netId = Number(plan.network_id);
+      if (isNaN(netId) || netId < 1 || netId > 4) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: `Invalid network_id: ${plan.network_id}. Must be numeric 1-4`
+        });
+      }
+    }
+
+    const tierRes = await client.query("SELECT 1 FROM top_users WHERE id=$1", [user.id]);
+    const isTopUser = tierRes.rows.length > 0;
+    const price = isTopUser? (plan.top_price || plan.price) : plan.price;
+    const balanceNum = Number(user.wallet_balance);
+    const priceNum = Number(price);
+
+    if (balanceNum < priceNum) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        message: `Insufficient balance. You have ₦${balanceNum.toFixed(2)}, this plan costs ₦${priceNum.toFixed(2)}`
+      });
+    }
+
+    const balanceBefore = Number(balanceNum);
+    const ref = "DATA-" + uuidv4();
+    const cost = Number(plan.cost);
+
+    // 1. INSERT PENDING TRANSACTION - KADA KA DEBIT TUKUNA
+    const txRes = await client.query(
+      `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name,provider,balance_before,balance_after)
+       VALUES($1,$2,'DATA',$3::numeric,$4::numeric,$5,$6,$7,'PENDING',$8,$9,$10::numeric,$11::numeric) RETURNING *`,
+      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name, plan.provider, balanceBefore, balanceBefore]
+    );
+    const txId = txRes.rows[0].id;
+    await client.query("COMMIT");
+
+    // 2. CALL PROVIDER API - WAJEN TRANSACTION
+    let apiResponse = null;
+    let finalStatus = 'FAILED';
+    let responseMsg = 'Unknown error';
+
+    try {
+      if (plan.provider === "maitama") {
+        apiResponse = await callMaitamaData(phone, plan.network_id, plan.api_plan_id, user.company);
+      } else if (plan.provider === "cheapdatahub") {
+        apiResponse = await callCheapDataHubData(phone, plan.network_id, plan.api_plan_id);
+      } else if (plan.provider === "subpadi") {
+        apiResponse = await callSubPadiData(phone, plan.api_plan_id, user.company);
+      } else if (plan.provider === "arrahuz") {
+        apiResponse = await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
+      } else {
+        throw new Error("Unknown provider");
+      }
+
+      // Check success
+      if (apiResponse.status === 'success' || apiResponse.code === 200 || apiResponse.Status?.toLowerCase() === 'successful') {
+        finalStatus = 'SUCCESS';
+        responseMsg = 'Transaction successful';
+      } else if (apiResponse.status === 'pending' || apiResponse.Status?.toLowerCase() === 'pending') {
+        finalStatus = 'PENDING';
+        responseMsg = 'Transaction pending';
+      } else {
+        finalStatus = 'FAILED';
+        responseMsg = apiResponse.message || apiResponse.api_response || 'Provider rejected transaction';
+      }
+    } catch (vtuErr) {
+      finalStatus = 'FAILED';
+      responseMsg = vtuErr.response?.data?.message || vtuErr.response?.data?.api_response || vtuErr.message || 'API timeout';
+      apiResponse = vtuErr.response?.data || { error: vtuErr.message };
+
+      if (vtuErr.response?.data?.errors) {
+        const errs = vtuErr.response.data.errors;
+        if (errs.network) responseMsg = `Network error: ${errs.network[0]}`;
+        else if (errs.plan) responseMsg = `Plan error: ${errs.plan[0]}`;
+        else if (errs.mobile_number) responseMsg = `Phone error: ${errs.mobile_number[0]}`;
+      }
+
+      if (vtuErr.message === 'TIMEOUT_POSSIBLE_SUCCESS' || vtuErr.code === 'ECONNABORTED') {
+        finalStatus = 'PENDING';
+        responseMsg = 'Request submitted. Delivery pending.';
+      }
+    }
+
+    // 3. UPDATE TRANSACTION + DEBIT WALLET IDAN SUCCESS KAWAI
+    let balanceAfter = Number(balanceBefore);
+
+    await client.query("BEGIN");
+
+    if (finalStatus === 'SUCCESS') {
+      balanceAfter = Number(balanceBefore) - Number(priceNum);
+      await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [balanceAfter, user.id]);
+
+      // Profit
+      const adminId = await getCompanyAdmin(user.company);
+      const profit = Number(priceNum) - Number(cost);
+      if (adminId && profit > 0) {
+        await client.query("UPDATE users SET admin_wallet = admin_wallet + $1::numeric, updated_at=NOW() WHERE id=$2", [profit, adminId]);
+        await client.query(
+          `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
+           VALUES($1,'sale',$2::numeric,$3,$4)`,
+          [txId, profit, ref, adminId]
+        );
+      }
+    }
+
+    await client.query(`
+      UPDATE transactions
+      SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW(),
+          balance_after = $5::numeric
+      WHERE id = $4
+    `, [finalStatus, responseMsg, JSON.stringify(apiResponse), txId, Number(balanceAfter)]);
+
+    await client.query("COMMIT");
+
+    // 4. HANDLE FAILED
+    if (finalStatus === 'FAILED') {
+      sendWalletUpdate(user.id, balanceBefore);
+      return res.status(400).json({
+        success: false,
+        message: responseMsg,
+        reference: ref,
+        status: 'FAILED',
+        balance_before: Number(balanceBefore),
+        balance_after: Number(balanceBefore),
+        phone: phone,
+        network: plan.network,
+        plan_name: plan.name,
+        amount: Number(priceNum),
+        created_at: new Date().toISOString()
+      });
+    }
+
+    sendWalletUpdate(user.id, balanceAfter);
+
+    await sendPushNotification(user.company, user.id, {
+      title: `${user.company.toUpperCase()} - Data Purchase`,
+      body: `Your ${plan.name} purchase for ${phone} was ${finalStatus.toLowerCase()}`,
+      url: '/dashboard.html'
+    });
+
+    res.json({
+      success: true,
+      reference: ref,
+      status: finalStatus,
+      balance: Number(balanceAfter),
+      balance_before: Number(balanceBefore),
+      balance_after: Number(balanceAfter),
+      tier: isTopUser? 'top' : 'default',
+      phone: phone,
+      network: plan.network,
+      plan_name: plan.name,
+      amount: Number(priceNum),
+      created_at: new Date().toISOString()
+    });
+  } catch (e) {
+    await client.query("ROLLBACK");
+    console.error("BUY DATA ERROR:", e);
     res.status(500).json({ message: "Purchase failed. Try again later." });
   } finally {
     client.release();
