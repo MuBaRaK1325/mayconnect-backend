@@ -941,7 +941,7 @@ function getExpectedOrigin(req) {
   return origin;
 }
 
-/* ================= WEBAUTHN ROUTES ================= */
+/* ================= WEBAUTHN ROUTES - NO PASSKEYS ================= */
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
     const creds = await pool.query(
@@ -1013,7 +1013,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     );
 
     if (existingCreds.rows.length > 0) {
-      return res.status(400).json({ error: 'Biometric already enabled for this domain. Disable first to re-register.' });
+      return res.status(400).json({ error: 'Biometric already enabled. Disable first to re-register.' });
     }
 
     const options = await generateRegistrationOptions({
@@ -1027,14 +1027,15 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
         userVerification: 'required',
-        residentKey: 'required',
-        requireResidentKey: true
+        residentKey: 'discouraged',
+        requireResidentKey: false
       },
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 },
         { type: 'public-key', alg: -257 }
       ],
-      timeout: 60000
+      timeout: 60000,
+      excludeCredentials: []
     });
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
@@ -1103,9 +1104,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 // CRITICAL FIX: login-start must return allowCredentials for current RP_ID
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
-    const company = getCompanyConfig(req);
-    const expectedOrigin = getExpectedOrigin(req);
-    const currentRPID = SHARED_RP_ID; // Use SHARED_RP_ID from env
+    const currentRPID = SHARED_RP_ID;
 
     // Get credentials ONLY for current RP_ID
     const credsRes = await pool.query(
