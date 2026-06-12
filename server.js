@@ -941,7 +941,7 @@ function getExpectedOrigin(req) {
   return origin;
 }
 
-/* ================= WEBAUTHN ROUTES - NO PASSKEYS ================= */
+/* ================= WEBAUTHN ROUTES - PASSKEY INSTANT LOGIN ================= */
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
     const creds = await pool.query(
@@ -962,7 +962,6 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   }
 });
 
-// Alias for frontend compatibility - prevents 404
 app.get('/api/auth/webauthn/status', auth, async (req, res) => {
   try {
     const creds = await pool.query(
@@ -980,7 +979,6 @@ app.get('/api/auth/webauthn/status', auth, async (req, res) => {
   }
 });
 
-// Disable biometric endpoint
 app.post('/api/auth/webauthn/disable', auth, async (req, res) => {
   try {
     const result = await pool.query(
@@ -1001,6 +999,7 @@ app.post('/api/auth/webauthn/disable', auth, async (req, res) => {
   }
 });
 
+// REGISTER - Save Passkey once
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
@@ -1027,8 +1026,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
         userVerification: 'required',
-        residentKey: 'discouraged',
-        requireResidentKey: false
+        residentKey: 'required',
+        requireResidentKey: true
       },
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 },
@@ -1101,31 +1100,13 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   }
 });
 
-// CRITICAL FIX: login-start must return allowCredentials for current RP_ID
+// LOGIN - INSTANT, NO USERNAME, NO PASSWORD
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
-    const currentRPID = SHARED_RP_ID;
-
-    // Get credentials ONLY for current RP_ID
-    const credsRes = await pool.query(
-      'SELECT credential_id, transports FROM webauthn_credentials WHERE rp_id = $1',
-      [currentRPID]
-    );
-
-    if (credsRes.rows.length === 0) {
-      return res.status(400).json({ error: 'No biometric registered for this domain' });
-    }
-
-    const allowCredentials = credsRes.rows.map(cred => ({
-      id: cred.credential_id,
-      type: 'public-key',
-      transports: cred.transports || ['internal', 'hybrid']
-    }));
-
     const options = await generateAuthenticationOptions({
-      rpID: currentRPID,
+      rpID: SHARED_RP_ID,
       userVerification: 'required',
-      allowCredentials: allowCredentials,
+      allowCredentials: [], // EMPTY = Browser zai nemo passkey da kansa
       timeout: 60000
     });
 
@@ -1157,7 +1138,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       'SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2',
       [credentialId, SHARED_RP_ID]
     );
-    if (!credRes.rows.length) return res.status(400).json({ error: 'Biometric not registered for this domain' });
+    if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not registered for this domain' });
 
     const cred = credRes.rows[0];
     const userRes = await pool.query('SELECT * FROM users WHERE id=$1', [cred.user_id]);
@@ -1185,12 +1166,20 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
 
       await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
 
+      const company = getCompanyConfig({ headers: { origin: expectedOrigin } });
+
       const token = jwt.sign(
         { id: user.id, username: user.username, is_admin: user.is_admin, company: user.company },
         process.env.JWT_SECRET,
         { expiresIn: '7d' }
       );
-      res.json({ token, user: { id: user.id, username: user.username, company: user.company } });
+
+      res.json({
+        token,
+        user: { id: user.id, username: user.username, company: user.company },
+        company: company.short,
+        logo: company.icon
+      });
     } else {
       res.status(400).json({ verified: false, error: 'Authentication failed' });
     }
