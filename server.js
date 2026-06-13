@@ -854,9 +854,9 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
-constRP_ID  = 'www.mayconnectdataplug.com.ng';
+// === HARCODE DAIDAI DA FRONTEND URL DINKA ===
+const RP_ID = 'www.mayconnectdataplug.com.ng';
 const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng';
-
 
 function getCompanyConfig() {
   return {
@@ -866,7 +866,6 @@ function getCompanyConfig() {
   };
 }
 
-// REGISTER START
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
@@ -874,12 +873,11 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const company = getCompanyConfig();
 
     console.log('=== REGISTER START ===');
-    console.log('RP ID:', RP_ID);
-    console.log('Origin:', EXPECTED_ORIGIN);
+    console.log('RP ID HARDCODED:', RP_ID);
+    console.log('Origin HARDCODED:', EXPECTED_ORIGIN);
     console.log('User:', user.email);
     console.log('======================');
 
-    // Share tsohon credential don re-register
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [user.id, RP_ID]);
 
     const options = await generateRegistrationOptions({
@@ -901,26 +899,19 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
     res.json(options);
-
   } catch (e) {
     console.error('Register start error:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// REGISTER FINISH
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
-
-    console.log('=== REGISTER FINISH ===');
-    console.log('RP ID:', RP_ID);
-    console.log('Expected Origin:', EXPECTED_ORIGIN);
-    console.log('Challenge:', user.webauthn_challenge? 'Found' : 'Missing');
-    console.log('=======================');
+    console.log('=== REGISTER FINISH === RP ID HARDCODED:', RP_ID);
 
     if (!user.webauthn_challenge) {
-      return res.status(400).json({ error: 'Challenge not found. Start registration again.' });
+      return res.status(400).json({ error: 'Challenge not found' });
     }
 
     let verification;
@@ -932,25 +923,14 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
         expectedRPID: RP_ID,
         requireUserVerification: false
       });
-
-      console.log('Verification result:', JSON.stringify(verification));
-
+      console.log('Verification result:', verification.verified);
     } catch (verifyError) {
       console.error('VERIFICATION ERROR:', verifyError.message);
-      return res.status(400).json({
-        verified: false,
-        error: verifyError.message
-      });
+      return res.status(400).json({ verified: false, error: verifyError.message });
     }
 
-    if (!verification.verified) {
-      console.error('Verification not verified');
+    if (!verification.verified ||!verification.registrationInfo) {
       return res.status(400).json({ verified: false, error: 'Verification failed' });
-    }
-
-    if (!verification.registrationInfo) {
-      console.error('No registrationInfo');
-      return res.status(400).json({ verified: false, error: 'No registration info returned' });
     }
 
     const { credential } = verification.registrationInfo;
@@ -965,16 +945,14 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
-    console.log('SUCCESS: Credential saved for user', user.id);
+    console.log('SUCCESS: Credential saved');
     res.json({ verified: true });
-
   } catch (e) {
     console.error('Register finish error:', e.message);
     res.status(400).json({ error: e.message });
   }
 });
 
-// LOGIN START
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     const options = await generateAuthenticationOptions({
@@ -989,11 +967,9 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
   }
 });
 
-// LOGIN FINISH
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
     const { id: credentialId } = req.body;
-
     const challengeRes = await pool.query('SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1');
     if (!challengeRes.rows[0]) return res.status(400).json({ error: 'Challenge expired' });
     const challenge = challengeRes.rows[0].challenge;
