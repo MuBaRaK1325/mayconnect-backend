@@ -854,7 +854,6 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
-// === HARCODE DAIDAI DA FRONTEND URL DINKA ===
 const RP_ID = 'www.mayconnectdataplug.com.ng';
 const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng';
 
@@ -871,12 +870,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const user = await getUser(req.user.id);
     const userID = new TextEncoder().encode(user.id.toString());
     const company = getCompanyConfig();
-
-    console.log('=== REGISTER START ===');
-    console.log('RP ID HARDCODED:', RP_ID);
-    console.log('Origin HARDCODED:', EXPECTED_ORIGIN);
-    console.log('User:', user.email);
-    console.log('======================');
+    console.log('=== REGISTER START === RP ID:', RP_ID);
 
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [user.id, RP_ID]);
 
@@ -900,7 +894,6 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
     res.json(options);
   } catch (e) {
-    console.error('Register start error:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -908,7 +901,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
-    console.log('=== REGISTER FINISH === RP ID HARDCODED:', RP_ID);
+    console.log('=== REGISTER FINISH === RP ID:', RP_ID);
 
     if (!user.webauthn_challenge) {
       return res.status(400).json({ error: 'Challenge not found' });
@@ -923,7 +916,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
         expectedRPID: RP_ID,
         requireUserVerification: false
       });
-      console.log('Verification result:', verification.verified);
     } catch (verifyError) {
       console.error('VERIFICATION ERROR:', verifyError.message);
       return res.status(400).json({ verified: false, error: verifyError.message });
@@ -948,7 +940,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     console.log('SUCCESS: Credential saved');
     res.json({ verified: true });
   } catch (e) {
-    console.error('Register finish error:', e.message);
     res.status(400).json({ error: e.message });
   }
 });
