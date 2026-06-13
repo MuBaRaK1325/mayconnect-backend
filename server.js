@@ -854,8 +854,6 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL ================= */
-const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
-
 // Dole RP ID ya kasance iri ɗaya da frontend window.location.hostname
 function getRPID(req) {
   let hostname = '';
