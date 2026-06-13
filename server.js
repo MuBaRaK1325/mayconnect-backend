@@ -1566,7 +1566,7 @@ app.post("/api/login", loginLimiter, async (req, res) => {
   }
 });
 
-/* ================= USER HELPER FUNCTION ================= */
+/* ================= USER HELPER FUNCTION - DAYA TILO ================= */
 async function getUser(id) {
   const result = await pool.query(
     `SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet,
@@ -1581,7 +1581,7 @@ async function getUser(id) {
 /* ================= USER INFO - WITH TIER CHECK ================= */
 app.get("/api/me", auth, async (req, res) => {
   try {
-    let user = await getUser(req.user.id); // <- Yi amfani da getUser yanzu
+    let user = await getUser(req.user.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
     // Auto-create DVA if missing for PaymentPoint companies
@@ -1618,7 +1618,7 @@ app.get("/api/me", auth, async (req, res) => {
       pool.query("SELECT 1 FROM top_users WHERE id = $1", [req.user.id])
     ]);
 
-    const userData = {...user }; // <- clone object
+    const userData = {...user };
     userData.is_top_user = topCheck.rows.length > 0;
     userData.user_tier = userData.is_top_user? 'top' : 'default';
 
