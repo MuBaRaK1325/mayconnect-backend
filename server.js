@@ -866,10 +866,9 @@ function adminOnly(req, res, next) {
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
 
-
 function getCompanyConfig() {
   return {
-    name: 'MAYCONNECT DATA PLUG',
+    name: RP_NAME,
     icon: 'https://mayconnectdataplug.com.ng/images/logo.png',
     short: 'mayconnect'
   };
@@ -877,10 +876,18 @@ function getCompanyConfig() {
 
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
+    if (!req.user ||!req.user.id) {
+      return res.status(401).json({ error: 'Unauthorized - Please login first' });
+    }
+
     const user = await getUser(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
     const userID = new TextEncoder().encode(user.id.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === RP ID:', RP_ID);
+    console.log('=== REGISTER START === User:', user.email, 'RP ID:', RP_ID);
 
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [user.id, RP_ID]);
 
@@ -904,14 +911,23 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
     res.json(options);
   } catch (e) {
+    console.error('Register start error:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   try {
+    if (!req.user ||!req.user.id) {
+      return res.status(401).json({ error: 'Unauthorized - Please login first' });
+    }
+
     const user = await getUser(req.user.id);
-    console.log('=== REGISTER FINISH === RP ID:', RP_ID);
+    console.log('=== REGISTER FINISH === User:', user?.email, 'RP ID:', RP_ID);
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
 
     if (!user.webauthn_challenge) {
       return res.status(400).json({ error: 'Challenge not found' });
@@ -926,6 +942,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
         expectedRPID: RP_ID,
         requireUserVerification: false
       });
+      console.log('Verification result:', verification.verified);
     } catch (verifyError) {
       console.error('VERIFICATION ERROR:', verifyError.message);
       return res.status(400).json({ verified: false, error: verifyError.message });
@@ -947,9 +964,10 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
-    console.log('SUCCESS: Credential saved');
+    console.log('SUCCESS: Credential saved for user', user.id);
     res.json({ verified: true });
   } catch (e) {
+    console.error('Register finish error:', e);
     res.status(400).json({ error: e.message });
   }
 });
@@ -964,6 +982,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     await pool.query('INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')', [options.challenge]);
     res.json(options);
   } catch (e) {
+    console.error('Login start error:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1010,6 +1029,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       res.status(400).json({ verified: false, error: 'Auth failed' });
     }
   } catch (e) {
+    console.error('Login finish error:', e);
     res.status(400).json({ error: e.message });
   }
 });
