@@ -855,10 +855,11 @@ function adminOnly(req, res, next) {
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL ================= */
 
+
 function getRPID(req) {
   let hostname = '';
 
-  // GYARA: FARKO karanta Origin na frontend. Wannan shine daidai
+  // FARKO karanta Origin na frontend. Wannan shine daidai
   if (req.headers.origin) {
     try {
       hostname = new URL(req.headers.origin).hostname;
@@ -872,10 +873,7 @@ function getRPID(req) {
     hostname = req.headers.host;
   }
 
-  // Cire port: mayconnectdataplug.com.ng:443 -> mayconnectdataplug.com.ng
   hostname = hostname.split(':')[0];
-
-  // Cire www: www.mayconnectdataplug.com.ng -> mayconnectdataplug.com.ng
   hostname = hostname.replace(/^www\./i, '');
 
   if (process.env.NODE_ENV!== 'production') {
@@ -920,14 +918,12 @@ function getCompanyConfig(req) {
 
   let hostname = '';
 
-  // GYARA: FARKO karanta Origin
   if (req.headers.origin) {
     try {
       hostname = new URL(req.headers.origin).hostname;
     } catch(e) {}
   }
 
-  // Idan babu, sai host
   if (!hostname && req.headers.host) {
     hostname = req.headers.host;
   }
@@ -968,23 +964,23 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
-      rpID: rpID, // MUST BE: mayconnectdataplug.com.ng
+      rpID: rpID,
       rpIcon: company.icon,
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
       attestationType: 'none',
       authenticatorSelection: {
-        authenticatorAttachment: 'platform',
+        // GYARA: Cire authenticatorAttachment + canza residentKey
         userVerification: 'required',
-        residentKey: 'required',
-        requireResidentKey: true
+        residentKey: 'preferred',
+        requireResidentKey: false
       },
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 },
         { type: 'public-key', alg: -257 }
       ],
-      timeout: 60000,
+      timeout: 120000, // GYARA: 2 minti maimakon 60s
       excludeCredentials: []
     });
 
@@ -1062,7 +1058,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       rpID: rpID,
       userVerification: 'required',
       allowCredentials: [],
-      timeout: 60000
+      timeout: 120000 // GYARA: 2 minti
     });
 
     await pool.query(
