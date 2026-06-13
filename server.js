@@ -854,8 +854,9 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL ================= */
+const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
 
-
+// Dole RP ID ya kasance iri ɗaya da frontend window.location.hostname
 function getRPID(req) {
   let hostname = '';
 
@@ -873,15 +874,17 @@ function getRPID(req) {
     hostname = req.headers.host;
   }
 
-  hostname = hostname.split(':')[0];
-  hostname = hostname.replace(/^www\./i, '');
+  hostname = hostname.split(':')[0].toLowerCase();
+  // KAR KA CIRE www. anan! Dole ya match da frontend
+  // Idan URL dinka https://www.dataplug.com.ng to rpID = www.dataplug.com.ng
+  // Idan URL dinka https://dataplug.com.ng to rpID = dataplug.com.ng
 
   if (process.env.NODE_ENV!== 'production') {
     console.log('[DEV] RP ID = localhost');
     return 'localhost';
   }
 
-  console.log(' RP ID resolved to:', hostname);
+  console.log('RP ID resolved to:', hostname);
   return hostname;
 }
 
@@ -896,7 +899,17 @@ const COMPANY_CONFIG = {
     icon: 'https://mayconnectdataplug.com.ng/images/logo.png',
     short: 'mayconnect'
   },
+  'www.mayconnectdataplug.com.ng': {
+    name: 'MAYCONNECT DATA PLUG',
+    icon: 'https://mayconnectdataplug.com.ng/images/logo.png',
+    short: 'mayconnect'
+  },
   'teevershdataplug.com.ng': {
+    name: 'TEEVERSH DATA PLUG',
+    icon: 'https://teevershdataplug.com.ng/images/TEEversh.png',
+    short: 'teeversh'
+  },
+  'www.teevershdataplug.com.ng': {
     name: 'TEEVERSH DATA PLUG',
     icon: 'https://teevershdataplug.com.ng/images/TEEversh.png',
     short: 'teeversh'
@@ -906,7 +919,17 @@ const COMPANY_CONFIG = {
     icon: 'https://sadeeqdatahub.com.ng/images/SADEEQ.PNG',
     short: 'sadeeq'
   },
+  'www.sadeeqdatahub.com.ng': {
+    name: 'SADEEQ DATA HUB',
+    icon: 'https://sadeeqdatahub.com.ng/images/SADEEQ.PNG',
+    short: 'sadeeq'
+  },
   'bnhabeebdatahub.com.ng': {
+    name: 'BNHABEEB DATA HUB',
+    icon: 'https://bnhabeebdatahub.com.ng/images/BNHABEEB.png',
+    short: 'bnhabeeb'
+  },
+  'www.bnhabeebdatahub.com.ng': {
     name: 'BNHABEEB DATA HUB',
     icon: 'https://bnhabeebdatahub.com.ng/images/BNHABEEB.png',
     short: 'bnhabeeb'
@@ -917,18 +940,16 @@ function getCompanyConfig(req) {
   if (process.env.NODE_ENV!== 'production') return COMPANY_CONFIG['localhost'];
 
   let hostname = '';
-
   if (req.headers.origin) {
     try {
       hostname = new URL(req.headers.origin).hostname;
     } catch(e) {}
   }
-
   if (!hostname && req.headers.host) {
     hostname = req.headers.host;
   }
+  hostname = hostname.split(':')[0].toLowerCase();
 
-  hostname = hostname.split(':')[0].replace(/^www\./i, '');
   return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['mayconnectdataplug.com.ng'];
 }
 
@@ -953,14 +974,11 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     console.log('RP ID:', rpID);
     console.log('================================');
 
-    const existingCreds = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
+    // Share tsohon credential don re-register
+    await pool.query(
+      'DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
       [user.id, rpID]
     );
-
-    if (existingCreds.rows.length > 0) {
-      return res.status(400).json({ error: 'Biometric already enabled. Disable first to re-register.' });
-    }
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
@@ -971,17 +989,15 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       userDisplayName: user.username || user.email,
       attestationType: 'none',
       authenticatorSelection: {
-        // GYARA: Cire authenticatorAttachment + canza residentKey
-        userVerification: 'required',
+        authenticatorAttachment: 'platform',
+        userVerification: 'discouraged', // MATCH frontend
         residentKey: 'preferred',
         requireResidentKey: false
       },
       pubKeyCredParams: [
-        { type: 'public-key', alg: -7 },
-        { type: 'public-key', alg: -257 }
+        { type: 'public-key', alg: -7 }
       ],
-      timeout: 120000, // GYARA: 2 minti maimakon 60s
-      excludeCredentials: []
+      timeout: 60000
     });
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
@@ -1014,7 +1030,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
       expectedRPID: rpID,
-      requireUserVerification: true
+      requireUserVerification: false // MATCH frontend discouraged
     });
 
     if (verification.verified) {
@@ -1056,9 +1072,9 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 
     const options = await generateAuthenticationOptions({
       rpID: rpID,
-      userVerification: 'required',
+      userVerification: 'discouraged', // MATCH frontend
       allowCredentials: [],
-      timeout: 120000 // GYARA: 2 minti
+      timeout: 60000
     });
 
     await pool.query(
@@ -1108,7 +1124,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
         publicKey: Buffer.from(cred.public_key, 'base64url'),
         counter: cred.counter
       },
-      requireUserVerification: true
+      requireUserVerification: false // MATCH frontend
     });
 
     if (verification.verified) {
