@@ -1607,7 +1607,7 @@ app.get("/api/me", auth, async (req, res) => {
               user.id
             ]
           );
-          user = await getUser(req.user.id); // <- Refresh data
+          user = await getUser(req.user.id); // Refresh data
         }
       } catch (e) {
         console.log("Account creation failed on /me:", e.message);
