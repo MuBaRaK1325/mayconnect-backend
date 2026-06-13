@@ -854,8 +854,7 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
-const RP_ID = 'www.mayconnectdataplug.com.ng';
-const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng';
+
 
 function getCompanyConfig() {
   return {
