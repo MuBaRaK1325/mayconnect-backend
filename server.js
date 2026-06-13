@@ -273,10 +273,10 @@ const ADMIN_EMAILS = [
   "Sadeeqtukur765@gmail.com"
 ];
 
-// HARCODE DAIDAI DA FRONTEND URL - Kada ka yi amfani da process.env
+// HARCODE DAIDAI DA FRONTEND URL
 const RP_ID = 'www.mayconnectdataplug.com.ng';
 const RP_NAME = 'MAYCONNECT DATA PLUG';
-const ORIGIN = 'https://www.mayconnectdataplug.com.ng';
+const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng'; // <- Wannan shine
 // PAYMENTPOINT CONFIG
 const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE || "https://api.paymentpoint.co";
 
