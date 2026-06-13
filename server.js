@@ -854,13 +854,6 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL ================= */
-const {
-  generateRegistrationOptions,
-  verifyRegistrationResponse,
-  generateAuthenticationOptions,
-  verifyAuthenticationResponse
-} = require('@simplewebauthn/server');
-
 function getRPID(req) {
   const host = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
   let hostname = host.split(':')[0];
