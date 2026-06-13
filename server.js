@@ -854,7 +854,6 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
-const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
 
 // HARCODE don kaucewa proxy mismatch
 const RP_ID = 'www.mayconnectdataplug.com.ng';
