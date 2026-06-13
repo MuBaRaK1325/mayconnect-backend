@@ -853,23 +853,27 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - UPDATED ================= */
+/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL FIX ================= */
+const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
 
-// Cire SHARED_RP_ID gaba daya. Yi amfani da domain din user
+// GYARA: Cire port, www, https gaba daya. WebAuthn yana son domain kawai
 function getRPID(req) {
-  const hostname = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
+  const host = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
 
-  // Production: Yi amfani da hostname kai tsaye
+  // Cire port: dataplug.com.ng:443 -> dataplug.com.ng
+  let hostname = host.split(':')[0];
+
+  // Cire www.: www.dataplug.com.ng -> dataplug.com.ng
+  hostname = hostname.replace(/^www\./, '');
+
   if (process.env.NODE_ENV === 'production') {
-    // Cire www. idan akwai
-    return hostname.replace(/^www\./, '');
+    return hostname;
   }
 
-  // Development
+  // Development: localhost kawai, babu port
   return 'localhost';
 }
 
-// SABON COMPANY_CONFIG DA LOGOS
 const COMPANY_CONFIG = {
   'localhost': {
     name: 'MAYCONNECT DATA PLUG',
@@ -881,47 +885,22 @@ const COMPANY_CONFIG = {
     icon: 'https://dataplug.com.ng/images/logo.png',
     short: 'mayconnect'
   },
-  'www.dataplug.com.ng': {
-    name: 'MAYCONNECT DATA PLUG',
-    icon: 'https://dataplug.com.ng/images/logo.png',
-    short: 'mayconnect'
-  },
   'mayconnectdataplug.com.ng': {
-    name: 'MAYCONNECT DATA PLUG',
-    icon: 'https://dataplug.com.ng/images/logo.png',
-    short: 'mayconnect'
-  },
-  'www.mayconnectdataplug.com.ng': {
     name: 'MAYCONNECT DATA PLUG',
     icon: 'https://dataplug.com.ng/images/logo.png',
     short: 'mayconnect'
   },
   'teeversh.dataplug.com.ng': {
     name: 'TEEVERSH DATA PLUG',
-    icon: 'https://dataplug.com.ng/images/TEEversh.png', // TEEVERSH.png
-    short: 'teeversh'
-  },
-  'www.teeversh.dataplug.com.ng': {
-    name: 'TEEVERSH DATA PLUG',
     icon: 'https://dataplug.com.ng/images/TEEversh.png',
     short: 'teeversh'
   },
   'bnhabeeb.dataplug.com.ng': {
     name: 'BNHABEEB DATA HUB',
-    icon: 'https://dataplug.com.ng/images/BNHABEEB.png', // BNHABEEB.png
-    short: 'bnhabeeb'
-  },
-  'www.bnhabeeb.dataplug.com.ng': {
-    name: 'BNHABEEB DATA HUB',
     icon: 'https://dataplug.com.ng/images/BNHABEEB.png',
     short: 'bnhabeeb'
   },
   'sadeeq.dataplug.com.ng': {
-    name: 'SADEEQ DATA HUB',
-    icon: 'https://dataplug.com.ng/images/SADEEQ.PNG', // SADEEQ.PNG - kula da uppercase
-    short: 'sadeeq'
-  },
-  'www.sadeeq.dataplug.com.ng': {
     name: 'SADEEQ DATA HUB',
     icon: 'https://dataplug.com.ng/images/SADEEQ.PNG',
     short: 'sadeeq'
@@ -930,8 +909,11 @@ const COMPANY_CONFIG = {
 
 function getCompanyConfig(req) {
   if (process.env.NODE_ENV!== 'production') return COMPANY_CONFIG['localhost'];
-  const hostname = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
-  return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['dataplug.com.ng']; // Default zuwa mayconnect
+
+  const host = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
+  let hostname = host.split(':')[0].replace(/^www\./, '');
+
+  return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['dataplug.com.ng'];
 }
 
 function getExpectedOrigin(req) {
@@ -940,13 +922,15 @@ function getExpectedOrigin(req) {
   return origin;
 }
 
-// REGISTER - Save Passkey once
+// REGISTER START
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
     const userID = new TextEncoder().encode(user.id.toString());
     const company = getCompanyConfig(req);
     const rpID = getRPID(req);
+
+    console.log('RP ID:', rpID, 'Origin:', getExpectedOrigin(req)); // DEBUG
 
     const existingCreds = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
@@ -958,9 +942,9 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     }
 
     const options = await generateRegistrationOptions({
-      rpName: company.name, // Sunan app - zai fito a popup
-      rpID: rpID,
-      rpIcon: company.icon, // Logo - zai fito a popup
+      rpName: company.name,
+      rpID: rpID, // MUST BE: dataplug.com.ng, ba https:// ba, ba port ba
+      rpIcon: company.icon,
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -988,13 +972,16 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   }
 });
 
+// REGISTER FINISH
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
-  const user = await getUser(req.user.id);
-  const expectedOrigin = getExpectedOrigin(req);
-  const company = getCompanyConfig(req);
-  const rpID = getRPID(req);
-
   try {
+    const user = await getUser(req.user.id);
+    const expectedOrigin = getExpectedOrigin(req);
+    const company = getCompanyConfig(req);
+    const rpID = getRPID(req);
+
+    console.log('Verifying with RP ID:', rpID, 'Origin:', expectedOrigin); // DEBUG
+
     if (!user.webauthn_challenge) {
       return res.status(400).json({ error: 'Challenge not found. Start registration again.' });
     }
@@ -1043,15 +1030,14 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   }
 });
 
-// LOGIN - INSTANT, NO USERNAME, NO PASSWORD
+// LOGIN START
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     const rpID = getRPID(req);
-    const company = getCompanyConfig(req); // GYARA: Kara wannan don samun logo
+    const company = getCompanyConfig(req);
 
     const options = await generateAuthenticationOptions({
       rpID: rpID,
-      rpIcon: company.icon, // GYARA: Wannan zai sa logo ya fito a popup login
       userVerification: 'required',
       allowCredentials: [],
       timeout: 60000
@@ -1070,12 +1056,13 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
   }
 });
 
+// LOGIN FINISH
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
-  const { id: credentialId } = req.body;
-  const expectedOrigin = getExpectedOrigin(req);
-  const rpID = getRPID(req);
-
   try {
+    const { id: credentialId } = req.body;
+    const expectedOrigin = getExpectedOrigin(req);
+    const rpID = getRPID(req);
+
     const challengeRes = await pool.query(
       'SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1'
     );
