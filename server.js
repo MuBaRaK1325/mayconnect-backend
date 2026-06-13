@@ -854,13 +854,9 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
-// === HARCODE CONFIG - Kada ka canza ===
-// Dole ya match da URL dinka daidai. Idan kana https://www.mayconnectdataplug.com.ng to:
-const RP_ID = 'www.mayconnectdataplug.com.ng';
+constRP_ID  = 'www.mayconnectdataplug.com.ng';
 const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng';
-// Idan kana https://mayconnectdataplug.com.ng ba tare da www ba, to:
-// const RP_ID = 'mayconnectdataplug.com.ng';
-// const EXPECTED_ORIGIN = 'https://mayconnectdataplug.com.ng';
+
 
 function getCompanyConfig() {
   return {
