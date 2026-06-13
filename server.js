@@ -855,9 +855,6 @@ function adminOnly(req, res, next) {
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
 
-// HARCODE - Share duk getRPID() function na baya
-const RP_ID = 'www.mayconnectdataplug.com.ng';
-const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng';
 
 function getCompanyConfig() {
   return {
