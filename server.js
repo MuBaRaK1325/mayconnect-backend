@@ -854,11 +854,8 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL ================= */
-// Dole RP ID ya kasance iri ɗaya da frontend window.location.hostname
 function getRPID(req) {
   let hostname = '';
-
-  // FARKO karanta Origin na frontend. Wannan shine daidai
   if (req.headers.origin) {
     try {
       hostname = new URL(req.headers.origin).hostname;
@@ -866,22 +863,14 @@ function getRPID(req) {
       hostname = req.headers.origin;
     }
   }
-
-  // Idan babu origin, sai host na backend
   if (!hostname && req.headers.host) {
     hostname = req.headers.host;
   }
-
   hostname = hostname.split(':')[0].toLowerCase();
-  // KAR KA CIRE www. anan! Dole ya match da frontend
-  // Idan URL dinka https://www.dataplug.com.ng to rpID = www.dataplug.com.ng
-  // Idan URL dinka https://dataplug.com.ng to rpID = dataplug.com.ng
 
   if (process.env.NODE_ENV!== 'production') {
-    console.log('[DEV] RP ID = localhost');
     return 'localhost';
   }
-
   console.log('RP ID resolved to:', hostname);
   return hostname;
 }
@@ -901,42 +890,11 @@ const COMPANY_CONFIG = {
     name: 'MAYCONNECT DATA PLUG',
     icon: 'https://mayconnectdataplug.com.ng/images/logo.png',
     short: 'mayconnect'
-  },
-  'teevershdataplug.com.ng': {
-    name: 'TEEVERSH DATA PLUG',
-    icon: 'https://teevershdataplug.com.ng/images/TEEversh.png',
-    short: 'teeversh'
-  },
-  'www.teevershdataplug.com.ng': {
-    name: 'TEEVERSH DATA PLUG',
-    icon: 'https://teevershdataplug.com.ng/images/TEEversh.png',
-    short: 'teeversh'
-  },
-  'sadeeqdatahub.com.ng': {
-    name: 'SADEEQ DATA HUB',
-    icon: 'https://sadeeqdatahub.com.ng/images/SADEEQ.PNG',
-    short: 'sadeeq'
-  },
-  'www.sadeeqdatahub.com.ng': {
-    name: 'SADEEQ DATA HUB',
-    icon: 'https://sadeeqdatahub.com.ng/images/SADEEQ.PNG',
-    short: 'sadeeq'
-  },
-  'bnhabeebdatahub.com.ng': {
-    name: 'BNHABEEB DATA HUB',
-    icon: 'https://bnhabeebdatahub.com.ng/images/BNHABEEB.png',
-    short: 'bnhabeeb'
-  },
-  'www.bnhabeebdatahub.com.ng': {
-    name: 'BNHABEEB DATA HUB',
-    icon: 'https://bnhabeebdatahub.com.ng/images/BNHABEEB.png',
-    short: 'bnhabeeb'
   }
 };
 
 function getCompanyConfig(req) {
   if (process.env.NODE_ENV!== 'production') return COMPANY_CONFIG['localhost'];
-
   let hostname = '';
   if (req.headers.origin) {
     try {
@@ -947,8 +905,7 @@ function getCompanyConfig(req) {
     hostname = req.headers.host;
   }
   hostname = hostname.split(':')[0].toLowerCase();
-
-  return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['mayconnectdataplug.com.ng'];
+  return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['www.mayconnectdataplug.com.ng'];
 }
 
 function getExpectedOrigin(req) {
@@ -972,7 +929,6 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     console.log('RP ID:', rpID);
     console.log('================================');
 
-    // Share tsohon credential don re-register
     await pool.query(
       'DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
       [user.id, rpID]
@@ -988,13 +944,11 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       attestationType: 'none',
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
-        userVerification: 'discouraged', // MATCH frontend
+        userVerification: 'discouraged',
         residentKey: 'preferred',
         requireResidentKey: false
       },
-      pubKeyCredParams: [
-        { type: 'public-key', alg: -7 }
-      ],
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
       timeout: 60000
     });
 
@@ -1007,7 +961,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   }
 });
 
-// REGISTER FINISH
+// REGISTER FINISH - GYARA: Kula da error
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
@@ -1017,21 +971,33 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
     console.log('=== WEB AUTHN REGISTER FINISH ===');
     console.log('RP ID:', rpID, 'Origin:', expectedOrigin);
+    console.log('Body received:', JSON.stringify(req.body).substring(0, 200));
     console.log('==================================');
 
     if (!user.webauthn_challenge) {
       return res.status(400).json({ error: 'Challenge not found. Start registration again.' });
     }
 
-    const verification = await verifyRegistrationResponse({
-      response: req.body,
-      expectedChallenge: user.webauthn_challenge,
-      expectedOrigin: expectedOrigin,
-      expectedRPID: rpID,
-      requireUserVerification: false // MATCH frontend discouraged
-    });
+    let verification;
+    try {
+      verification = await verifyRegistrationResponse({
+        response: req.body,
+        expectedChallenge: user.webauthn_challenge,
+        expectedOrigin: expectedOrigin,
+        expectedRPID: rpID,
+        requireUserVerification: false
+      });
+    } catch (verifyError) {
+      console.error('VERIFICATION FAILED:', verifyError);
+      return res.status(400).json({
+        verified: false,
+        error: 'Verification failed: ' + verifyError.message
+      });
+    }
 
-    if (verification.verified) {
+    console.log('Verification result:', verification);
+
+    if (verification.verified && verification.registrationInfo) {
       const { credential } = verification.registrationInfo;
       const credentialID = Buffer.from(credential.id).toString('base64url');
       const publicKey = Buffer.from(credential.publicKey).toString('base64url');
@@ -1054,10 +1020,11 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
       res.json({ verified: true });
     } else {
-      res.status(400).json({ verified: false, error: 'Verification failed' });
+      console.error('Verification not verified:', verification);
+      res.status(400).json({ verified: false, error: 'Verification not verified' });
     }
   } catch (e) {
-    console.error('WebAuthn register error:', e.message);
+    console.error('WebAuthn register error:', e.message, e.stack);
     res.status(400).json({ error: e.message });
   }
 });
@@ -1070,7 +1037,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 
     const options = await generateAuthenticationOptions({
       rpID: rpID,
-      userVerification: 'discouraged', // MATCH frontend
+      userVerification: 'discouraged',
       allowCredentials: [],
       timeout: 60000
     });
@@ -1112,18 +1079,27 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const user = userRes.rows[0];
     if (!user) return res.status(400).json({ error: 'Passkey not found for this user' });
 
-    const verification = await verifyAuthenticationResponse({
-      response: req.body,
-      expectedChallenge: challenge,
-      expectedOrigin: expectedOrigin,
-      expectedRPID: rpID,
-      credential: {
-        id: cred.credential_id,
-        publicKey: Buffer.from(cred.public_key, 'base64url'),
-        counter: cred.counter
-      },
-      requireUserVerification: false // MATCH frontend
-    });
+    let verification;
+    try {
+      verification = await verifyAuthenticationResponse({
+        response: req.body,
+        expectedChallenge: challenge,
+        expectedOrigin: expectedOrigin,
+        expectedRPID: rpID,
+        credential: {
+          id: cred.credential_id,
+          publicKey: Buffer.from(cred.public_key, 'base64url'),
+          counter: cred.counter
+        },
+        requireUserVerification: false
+      });
+    } catch (verifyError) {
+      console.error('AUTH VERIFICATION FAILED:', verifyError);
+      return res.status(400).json({
+        verified: false,
+        error: 'Auth verification failed: ' + verifyError.message
+      });
+    }
 
     if (verification.verified) {
       const { authenticationInfo } = verification;
