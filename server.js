@@ -853,10 +853,9 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FIXED ================= */
+/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - UPDATED ================= */
 
 // Cire SHARED_RP_ID gaba daya. Yi amfani da domain din user
-
 function getRPID(req) {
   const hostname = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
 
@@ -870,10 +869,69 @@ function getRPID(req) {
   return 'localhost';
 }
 
+// SABON COMPANY_CONFIG DA LOGOS
+const COMPANY_CONFIG = {
+  'localhost': {
+    name: 'MAYCONNECT DATA PLUG',
+    icon: 'https://dataplug.com.ng/images/logo.png',
+    short: 'mayconnect'
+  },
+  'dataplug.com.ng': {
+    name: 'MAYCONNECT DATA PLUG',
+    icon: 'https://dataplug.com.ng/images/logo.png',
+    short: 'mayconnect'
+  },
+  'www.dataplug.com.ng': {
+    name: 'MAYCONNECT DATA PLUG',
+    icon: 'https://dataplug.com.ng/images/logo.png',
+    short: 'mayconnect'
+  },
+  'mayconnectdataplug.com.ng': {
+    name: 'MAYCONNECT DATA PLUG',
+    icon: 'https://dataplug.com.ng/images/logo.png',
+    short: 'mayconnect'
+  },
+  'www.mayconnectdataplug.com.ng': {
+    name: 'MAYCONNECT DATA PLUG',
+    icon: 'https://dataplug.com.ng/images/logo.png',
+    short: 'mayconnect'
+  },
+  'teeversh.dataplug.com.ng': {
+    name: 'TEEVERSH DATA PLUG',
+    icon: 'https://dataplug.com.ng/images/TEEversh.png', // TEEVERSH.png
+    short: 'teeversh'
+  },
+  'www.teeversh.dataplug.com.ng': {
+    name: 'TEEVERSH DATA PLUG',
+    icon: 'https://dataplug.com.ng/images/TEEversh.png',
+    short: 'teeversh'
+  },
+  'bnhabeeb.dataplug.com.ng': {
+    name: 'BNHABEEB DATA HUB',
+    icon: 'https://dataplug.com.ng/images/BNHABEEB.png', // BNHABEEB.png
+    short: 'bnhabeeb'
+  },
+  'www.bnhabeeb.dataplug.com.ng': {
+    name: 'BNHABEEB DATA HUB',
+    icon: 'https://dataplug.com.ng/images/BNHABEEB.png',
+    short: 'bnhabeeb'
+  },
+  'sadeeq.dataplug.com.ng': {
+    name: 'SADEEQ DATA HUB',
+    icon: 'https://dataplug.com.ng/images/SADEEQ.PNG', // SADEEQ.PNG - kula da uppercase
+    short: 'sadeeq'
+  },
+  'www.sadeeq.dataplug.com.ng': {
+    name: 'SADEEQ DATA HUB',
+    icon: 'https://dataplug.com.ng/images/SADEEQ.PNG',
+    short: 'sadeeq'
+  }
+};
+
 function getCompanyConfig(req) {
   if (process.env.NODE_ENV!== 'production') return COMPANY_CONFIG['localhost'];
   const hostname = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
-  return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['mayconnectdataplug.com.ng'];
+  return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['dataplug.com.ng']; // Default zuwa mayconnect
 }
 
 function getExpectedOrigin(req) {
@@ -888,11 +946,11 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const user = await getUser(req.user.id);
     const userID = new TextEncoder().encode(user.id.toString());
     const company = getCompanyConfig(req);
-    const rpID = getRPID(req); // DYNAMIC RP_ID
+    const rpID = getRPID(req);
 
     const existingCreds = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
-      [user.id, rpID] // Yi amfani da dynamic rpID
+      [user.id, rpID]
     );
 
     if (existingCreds.rows.length > 0) {
@@ -900,9 +958,9 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     }
 
     const options = await generateRegistrationOptions({
-      rpName: company.name,
-      rpID: rpID, // DYNAMIC
-      rpIcon: company.icon,
+      rpName: company.name, // Sunan app - zai fito a popup
+      rpID: rpID,
+      rpIcon: company.icon, // Logo - zai fito a popup
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -934,7 +992,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
   const expectedOrigin = getExpectedOrigin(req);
   const company = getCompanyConfig(req);
-  const rpID = getRPID(req); // DYNAMIC RP_ID
+  const rpID = getRPID(req);
 
   try {
     if (!user.webauthn_challenge) {
@@ -945,7 +1003,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       response: req.body,
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
-      expectedRPID: rpID, // DYNAMIC
+      expectedRPID: rpID,
       requireUserVerification: true
     });
 
@@ -968,7 +1026,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
           credentialID,
           publicKey,
           credential.counter,
-          rpID, // DYNAMIC
+          rpID,
           company.short,
           req.body.transports || ['internal']
         ]
@@ -988,10 +1046,12 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 // LOGIN - INSTANT, NO USERNAME, NO PASSWORD
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
-    const rpID = getRPID(req); // DYNAMIC
+    const rpID = getRPID(req);
+    const company = getCompanyConfig(req); // GYARA: Kara wannan don samun logo
 
     const options = await generateAuthenticationOptions({
-      rpID: rpID, // DYNAMIC
+      rpID: rpID,
+      rpIcon: company.icon, // GYARA: Wannan zai sa logo ya fito a popup login
       userVerification: 'required',
       allowCredentials: [],
       timeout: 60000
@@ -1013,7 +1073,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   const { id: credentialId } = req.body;
   const expectedOrigin = getExpectedOrigin(req);
-  const rpID = getRPID(req); // DYNAMIC
+  const rpID = getRPID(req);
 
   try {
     const challengeRes = await pool.query(
@@ -1024,7 +1084,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
 
     const credRes = await pool.query(
       'SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2',
-      [credentialId, rpID] // DYNAMIC
+      [credentialId, rpID]
     );
     if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not registered for this domain' });
 
@@ -1037,7 +1097,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       response: req.body,
       expectedChallenge: challenge,
       expectedOrigin: expectedOrigin,
-      expectedRPID: rpID, // DYNAMIC
+      expectedRPID: rpID,
       credential: {
         id: cred.credential_id,
         publicKey: Buffer.from(cred.public_key, 'base64url'),
