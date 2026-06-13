@@ -273,10 +273,10 @@ const ADMIN_EMAILS = [
   "Sadeeqtukur765@gmail.com"
 ];
 
-const RP_ID = process.env.RP_ID || 'mayconnect-backend-1.onrender.com';
-const RP_NAME = 'Mayconnect';
-const ORIGIN = process.env.RP_ORIGIN || 'https://mayconnect-backend-1.onrender.com';
-
+// HARCODE DAIDAI DA FRONTEND URL - Kada ka yi amfani da process.env
+const RP_ID = 'www.mayconnectdataplug.com.ng';
+const RP_NAME = 'MAYCONNECT DATA PLUG';
+const ORIGIN = 'https://www.mayconnectdataplug.com.ng';
 // PAYMENTPOINT CONFIG
 const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE || "https://api.paymentpoint.co";
 
