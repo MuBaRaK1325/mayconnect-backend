@@ -853,24 +853,22 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL FIX ================= */
-const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
+/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL ================= */
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse
+} = require('@simplewebauthn/server');
 
-// GYARA: Cire port, www, https gaba daya. WebAuthn yana son domain kawai
 function getRPID(req) {
   const host = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
-
-  // Cire port: dataplug.com.ng:443 -> dataplug.com.ng
   let hostname = host.split(':')[0];
-
-  // Cire www.: www.dataplug.com.ng -> dataplug.com.ng
   hostname = hostname.replace(/^www\./, '');
 
   if (process.env.NODE_ENV === 'production') {
     return hostname;
   }
-
-  // Development: localhost kawai, babu port
   return 'localhost';
 }
 
@@ -909,10 +907,8 @@ const COMPANY_CONFIG = {
 
 function getCompanyConfig(req) {
   if (process.env.NODE_ENV!== 'production') return COMPANY_CONFIG['localhost'];
-
   const host = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
   let hostname = host.split(':')[0].replace(/^www\./, '');
-
   return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['dataplug.com.ng'];
 }
 
@@ -930,7 +926,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const company = getCompanyConfig(req);
     const rpID = getRPID(req);
 
-    console.log('RP ID:', rpID, 'Origin:', getExpectedOrigin(req)); // DEBUG
+    console.log('RP ID:', rpID, 'Origin:', getExpectedOrigin(req));
 
     const existingCreds = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
@@ -943,7 +939,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
-      rpID: rpID, // MUST BE: dataplug.com.ng, ba https:// ba, ba port ba
+      rpID: rpID,
       rpIcon: company.icon,
       userID: userID,
       userName: user.email,
@@ -980,8 +976,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const company = getCompanyConfig(req);
     const rpID = getRPID(req);
 
-    console.log('Verifying with RP ID:', rpID, 'Origin:', expectedOrigin); // DEBUG
-
     if (!user.webauthn_challenge) {
       return res.status(400).json({ error: 'Challenge not found. Start registration again.' });
     }
@@ -996,11 +990,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
     if (verification.verified) {
       const { credential } = verification.registrationInfo;
-
-      if (!credential ||!credential.id ||!credential.publicKey) {
-        return res.status(400).json({ verified: false, error: 'Incomplete credential data' });
-      }
-
       const credentialID = Buffer.from(credential.id).toString('base64url');
       const publicKey = Buffer.from(credential.publicKey).toString('base64url');
 
@@ -1095,14 +1084,11 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
 
     if (verification.verified) {
       const { authenticationInfo } = verification;
-
       await pool.query('UPDATE webauthn_credentials SET counter=$1, last_used=NOW() WHERE id=$2',
         [authenticationInfo.newCounter, cred.id]);
-
       await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
 
       const company = getCompanyConfig({ headers: { origin: expectedOrigin } });
-
       const token = jwt.sign(
         { id: user.id, username: user.username, is_admin: user.is_admin, company: user.company },
         process.env.JWT_SECRET,
