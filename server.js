@@ -854,8 +854,9 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
+const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
 
-// HARCODE don kaucewa proxy mismatch
+// HARCODE - Share duk getRPID() function na baya
 const RP_ID = 'www.mayconnectdataplug.com.ng';
 const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng';
 
@@ -908,7 +909,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   }
 });
 
-// REGISTER FINISH - GYARAN ƘARSHE
+// REGISTER FINISH
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
@@ -928,8 +929,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       verification = await verifyRegistrationResponse({
         response: req.body,
         expectedChallenge: user.webauthn_challenge,
-        expectedOrigin: EXPECTED_ORIGIN, // HARCODE
-        expectedRPID: RP_ID, // HARCODE
+        expectedOrigin: EXPECTED_ORIGIN,
+        expectedRPID: RP_ID,
         requireUserVerification: false
       });
 
@@ -937,14 +938,12 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
     } catch (verifyError) {
       console.error('VERIFICATION ERROR:', verifyError.message);
-      console.error('Stack:', verifyError.stack);
       return res.status(400).json({
         verified: false,
         error: verifyError.message
       });
     }
 
-    // GYARA: Duba verified da registrationInfo kafin karanta.id
     if (!verification.verified) {
       console.error('Verification not verified');
       return res.status(400).json({ verified: false, error: 'Verification failed' });
