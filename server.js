@@ -854,18 +854,28 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL ================= */
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse
+} = require('@simplewebauthn/server');
 
 function getRPID(req) {
   let hostname = '';
 
-  if (req.headers.host) {
-    hostname = req.headers.host;
-  } else if (req.headers.origin) {
+  // GYARA: FARKO karanta Origin na frontend. Wannan shine daidai
+  if (req.headers.origin) {
     try {
       hostname = new URL(req.headers.origin).hostname;
     } catch(e) {
       hostname = req.headers.origin;
     }
+  }
+
+  // Idan babu origin, sai host na backend
+  if (!hostname && req.headers.host) {
+    hostname = req.headers.host;
   }
 
   // Cire port: mayconnectdataplug.com.ng:443 -> mayconnectdataplug.com.ng
@@ -883,7 +893,6 @@ function getRPID(req) {
   return hostname;
 }
 
-// GYARA: Saka domain dinka na gaskiya + link na logo
 const COMPANY_CONFIG = {
   'localhost': {
     name: 'MAYCONNECT DATA PLUG',
@@ -915,11 +924,18 @@ const COMPANY_CONFIG = {
 function getCompanyConfig(req) {
   if (process.env.NODE_ENV!== 'production') return COMPANY_CONFIG['localhost'];
 
-  let hostname = req.headers.host || '';
-  if (!hostname && req.headers.origin) {
+  let hostname = '';
+
+  // GYARA: FARKO karanta Origin
+  if (req.headers.origin) {
     try {
       hostname = new URL(req.headers.origin).hostname;
     } catch(e) {}
+  }
+
+  // Idan babu, sai host
+  if (!hostname && req.headers.host) {
+    hostname = req.headers.host;
   }
 
   hostname = hostname.split(':')[0].replace(/^www\./i, '');
