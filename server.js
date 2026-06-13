@@ -854,55 +854,76 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL ================= */
-function getRPID(req) {
-  const host = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
-  let hostname = host.split(':')[0];
-  hostname = hostname.replace(/^www\./, '');
 
-  if (process.env.NODE_ENV === 'production') {
-    return hostname;
+function getRPID(req) {
+  let hostname = '';
+
+  if (req.headers.host) {
+    hostname = req.headers.host;
+  } else if (req.headers.origin) {
+    try {
+      hostname = new URL(req.headers.origin).hostname;
+    } catch(e) {
+      hostname = req.headers.origin;
+    }
   }
-  return 'localhost';
+
+  // Cire port: mayconnectdataplug.com.ng:443 -> mayconnectdataplug.com.ng
+  hostname = hostname.split(':')[0];
+
+  // Cire www: www.mayconnectdataplug.com.ng -> mayconnectdataplug.com.ng
+  hostname = hostname.replace(/^www\./i, '');
+
+  if (process.env.NODE_ENV!== 'production') {
+    console.log('[DEV] RP ID = localhost');
+    return 'localhost';
+  }
+
+  console.log(' RP ID resolved to:', hostname);
+  return hostname;
 }
 
+// GYARA: Saka domain dinka na gaskiya + link na logo
 const COMPANY_CONFIG = {
   'localhost': {
     name: 'MAYCONNECT DATA PLUG',
-    icon: 'https://dataplug.com.ng/images/logo.png',
-    short: 'mayconnect'
-  },
-  'dataplug.com.ng': {
-    name: 'MAYCONNECT DATA PLUG',
-    icon: 'https://dataplug.com.ng/images/logo.png',
+    icon: 'https://mayconnectdataplug.com.ng/images/logo.png',
     short: 'mayconnect'
   },
   'mayconnectdataplug.com.ng': {
     name: 'MAYCONNECT DATA PLUG',
-    icon: 'https://dataplug.com.ng/images/logo.png',
+    icon: 'https://mayconnectdataplug.com.ng/images/logo.png',
     short: 'mayconnect'
   },
-  'teeversh.dataplug.com.ng': {
+  'teevershdataplug.com.ng': {
     name: 'TEEVERSH DATA PLUG',
-    icon: 'https://dataplug.com.ng/images/TEEversh.png',
+    icon: 'https://teevershdataplug.com.ng/images/TEEversh.png',
     short: 'teeversh'
   },
-  'bnhabeeb.dataplug.com.ng': {
-    name: 'BNHABEEB DATA HUB',
-    icon: 'https://dataplug.com.ng/images/BNHABEEB.png',
-    short: 'bnhabeeb'
-  },
-  'sadeeq.dataplug.com.ng': {
+  'sadeeqdatahub.com.ng': {
     name: 'SADEEQ DATA HUB',
-    icon: 'https://dataplug.com.ng/images/SADEEQ.PNG',
+    icon: 'https://sadeeqdatahub.com.ng/images/SADEEQ.PNG',
     short: 'sadeeq'
+  },
+  'bnhabeebdatahub.com.ng': {
+    name: 'BNHABEEB DATA HUB',
+    icon: 'https://bnhabeebdatahub.com.ng/images/BNHABEEB.png',
+    short: 'bnhabeeb'
   }
 };
 
 function getCompanyConfig(req) {
   if (process.env.NODE_ENV!== 'production') return COMPANY_CONFIG['localhost'];
-  const host = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
-  let hostname = host.split(':')[0].replace(/^www\./, '');
-  return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['dataplug.com.ng'];
+
+  let hostname = req.headers.host || '';
+  if (!hostname && req.headers.origin) {
+    try {
+      hostname = new URL(req.headers.origin).hostname;
+    } catch(e) {}
+  }
+
+  hostname = hostname.split(':')[0].replace(/^www\./i, '');
+  return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['mayconnectdataplug.com.ng'];
 }
 
 function getExpectedOrigin(req) {
@@ -918,8 +939,13 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const userID = new TextEncoder().encode(user.id.toString());
     const company = getCompanyConfig(req);
     const rpID = getRPID(req);
+    const origin = getExpectedOrigin(req);
 
-    console.log('RP ID:', rpID, 'Origin:', getExpectedOrigin(req));
+    console.log('=== WEB AUTHN REGISTER START ===');
+    console.log('Host:', req.headers.host);
+    console.log('Origin:', origin);
+    console.log('RP ID:', rpID);
+    console.log('================================');
 
     const existingCreds = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
@@ -932,7 +958,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
-      rpID: rpID,
+      rpID: rpID, // MUST BE: mayconnectdataplug.com.ng
       rpIcon: company.icon,
       userID: userID,
       userName: user.email,
@@ -968,6 +994,10 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const expectedOrigin = getExpectedOrigin(req);
     const company = getCompanyConfig(req);
     const rpID = getRPID(req);
+
+    console.log('=== WEB AUTHN REGISTER FINISH ===');
+    console.log('RP ID:', rpID, 'Origin:', expectedOrigin);
+    console.log('==================================');
 
     if (!user.webauthn_challenge) {
       return res.status(400).json({ error: 'Challenge not found. Start registration again.' });
@@ -1060,7 +1090,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const cred = credRes.rows[0];
     const userRes = await pool.query('SELECT * FROM users WHERE id=$1', [cred.user_id]);
     const user = userRes.rows[0];
-    if (!user) return res.status(400).json({ error: 'User not found' });
+    if (!user) return res.status(400).json({ error: 'Passkey not found for this user' });
 
     const verification = await verifyAuthenticationResponse({
       response: req.body,
