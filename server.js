@@ -853,81 +853,22 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= WEBAUTHN - BIOMETRIC PASSKEYS ================= */
-// NOTE: Ka tabbata 'require' din @simplewebauthn/server yana saman file dinka sau daya kawai
+/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FIXED ================= */
 
-// Company config - Logo da Sunan kowacce brand
-const COMPANY_CONFIG = {
-  'mayconnectdataplug.com.ng': {
-    name: 'MAYCONNECT DATA PLUG',
-    icon: 'https://mayconnectdataplug.com.ng/logo.png',
-    short: 'mayconnect'
-  },
-  'www.mayconnectdataplug.com.ng': {
-    name: 'MAYCONNECT DATA PLUG',
-    icon: 'https://mayconnectdataplug.com.ng/logo.png',
-    short: 'mayconnect'
-  },
-  'teevershdataplug.com.ng': {
-    name: 'TEEVERSH DATA PLUG',
-    icon: 'https://teevershdataplug.com.ng/TEEVERSH.png',
-    short: 'teeversh'
-  },
-  'www.teevershdataplug.com.ng': {
-    name: 'TEEVERSH DATA PLUG',
-    icon: 'https://teevershdataplug.com.ng/TEEVERSH.png',
-    short: 'teeversh'
-  },
-  'sadeeqdatahub.com.ng': {
-    name: 'SADEEQ DATA HUB',
-    icon: 'https://sadeeqdatahub.com.ng/SADEEQ.PNG',
-    short: 'sadeeq'
-  },
-  'www.sadeeqdatahub.com.ng': {
-    name: 'SADEEQ DATA HUB',
-    icon: 'https://sadeeqdatahub.com.ng/SADEEQ.PNG',
-    short: 'sadeeq'
-  },
-  'bnhabeebdatahub.com.ng': {
-    name: 'BNHABEEB DATA HUB',
-    icon: 'https://bnhabeebdatahub.com.ng/BNHABEEB.png',
-    short: 'bnhabeeb'
-  },
-  'www.bnhabeebdatahub.com.ng': {
-    name: 'BNHABEEB DATA HUB',
-    icon: 'https://bnhabeebdatahub.com.ng/BNHABEEB.png',
-    short: 'bnhabeeb'
-  },
-  'mayconnect-frontend.onrender.com': {
-    name: 'MAYCONNECT DATA PLUG',
-    icon: 'https://mayconnect-frontend.onrender.com/logo.png',
-    short: 'mayconnect'
-  },
-  'teeversh-frontend.onrender.com': {
-    name: 'TEEVERSH DATA PLUG',
-    icon: 'https://teeversh-frontend.onrender.com/TEEVERSH.png',
-    short: 'teeversh'
-  },
-  'bnhabeeb-frontend.onrender.com': {
-    name: 'BNHABEEB DATA HUB',
-    icon: 'https://bnhabeeb-frontend.onrender.com/BNHABEEB.png',
-    short: 'bnhabeeb'
-  },
-  'sadeeq-frontend.onrender.com': {
-    name: 'SADEEQ DATA HUB',
-    icon: 'https://sadeeq-frontend.onrender.com/SADEEQ.PNG',
-    short: 'sadeeq'
-  },
-  'localhost': {
-    name: 'MAYCONNECT DEV',
-    icon: 'http://localhost:3000/logo.png',
-    short: 'mayconnect'
+// Cire SHARED_RP_ID gaba daya. Yi amfani da domain din user
+
+function getRPID(req) {
+  const hostname = req.headers.host || new URL(req.headers.origin || req.headers.referer).hostname;
+
+  // Production: Yi amfani da hostname kai tsaye
+  if (process.env.NODE_ENV === 'production') {
+    // Cire www. idan akwai
+    return hostname.replace(/^www\./, '');
   }
-};
 
-const SHARED_RP_ID = process.env.NODE_ENV === 'production'
-? 'mayconnectdataplug.com.ng'
-  : 'localhost';
+  // Development
+  return 'localhost';
+}
 
 function getCompanyConfig(req) {
   if (process.env.NODE_ENV!== 'production') return COMPANY_CONFIG['localhost'];
@@ -941,74 +882,17 @@ function getExpectedOrigin(req) {
   return origin;
 }
 
-/* ================= WEBAUTHN ROUTES - PASSKEY INSTANT LOGIN ================= */
-app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
-  try {
-    const creds = await pool.query(
-      'SELECT id, rp_id FROM webauthn_credentials WHERE user_id=$1',
-      [req.user.id]
-    );
-    res.json({
-      enabled: creds.rows.length > 0,
-      user_id: req.user.id,
-      rp_id: creds.rows[0]?.rp_id || null
-    });
-  } catch (e) {
-    console.error('Check enabled error:', e.message);
-    if (e.code === '42703') {
-      return res.json({ enabled: false });
-    }
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/auth/webauthn/status', auth, async (req, res) => {
-  try {
-    const creds = await pool.query(
-      'SELECT id, rp_id FROM webauthn_credentials WHERE user_id=$1',
-      [req.user.id]
-    );
-    res.json({
-      enabled: creds.rows.length > 0,
-      user_id: req.user.id,
-      rp_id: creds.rows[0]?.rp_id || null
-    });
-  } catch (e) {
-    console.error('Status check error:', e.message);
-    res.json({ enabled: false });
-  }
-});
-
-app.post('/api/auth/webauthn/disable', auth, async (req, res) => {
-  try {
-    const result = await pool.query(
-      'DELETE FROM webauthn_credentials WHERE user_id=$1 RETURNING id',
-      [req.user.id]
-    );
-
-    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [req.user.id]);
-
-    if (result.rows.length === 0) {
-      return res.status(400).json({ error: 'Biometric not enabled' });
-    }
-
-    res.json({ success: true, message: 'Biometric disabled successfully' });
-  } catch (e) {
-    console.error('Disable error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
 // REGISTER - Save Passkey once
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
     const userID = new TextEncoder().encode(user.id.toString());
     const company = getCompanyConfig(req);
+    const rpID = getRPID(req); // DYNAMIC RP_ID
 
     const existingCreds = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
-      [user.id, SHARED_RP_ID]
+      [user.id, rpID] // Yi amfani da dynamic rpID
     );
 
     if (existingCreds.rows.length > 0) {
@@ -1017,7 +901,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
-      rpID: SHARED_RP_ID,
+      rpID: rpID, // DYNAMIC
       rpIcon: company.icon,
       userID: userID,
       userName: user.email,
@@ -1050,6 +934,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const user = await getUser(req.user.id);
   const expectedOrigin = getExpectedOrigin(req);
   const company = getCompanyConfig(req);
+  const rpID = getRPID(req); // DYNAMIC RP_ID
 
   try {
     if (!user.webauthn_challenge) {
@@ -1060,7 +945,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       response: req.body,
       expectedChallenge: user.webauthn_challenge,
       expectedOrigin: expectedOrigin,
-      expectedRPID: SHARED_RP_ID,
+      expectedRPID: rpID, // DYNAMIC
       requireUserVerification: true
     });
 
@@ -1083,7 +968,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
           credentialID,
           publicKey,
           credential.counter,
-          SHARED_RP_ID,
+          rpID, // DYNAMIC
           company.short,
           req.body.transports || ['internal']
         ]
@@ -1103,10 +988,12 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 // LOGIN - INSTANT, NO USERNAME, NO PASSWORD
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
+    const rpID = getRPID(req); // DYNAMIC
+
     const options = await generateAuthenticationOptions({
-      rpID: SHARED_RP_ID,
+      rpID: rpID, // DYNAMIC
       userVerification: 'required',
-      allowCredentials: [], // EMPTY = Browser zai nemo passkey da kansa
+      allowCredentials: [],
       timeout: 60000
     });
 
@@ -1126,6 +1013,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   const { id: credentialId } = req.body;
   const expectedOrigin = getExpectedOrigin(req);
+  const rpID = getRPID(req); // DYNAMIC
 
   try {
     const challengeRes = await pool.query(
@@ -1136,7 +1024,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
 
     const credRes = await pool.query(
       'SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2',
-      [credentialId, SHARED_RP_ID]
+      [credentialId, rpID] // DYNAMIC
     );
     if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not registered for this domain' });
 
@@ -1149,7 +1037,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       response: req.body,
       expectedChallenge: challenge,
       expectedOrigin: expectedOrigin,
-      expectedRPID: SHARED_RP_ID,
+      expectedRPID: rpID, // DYNAMIC
       credential: {
         id: cred.credential_id,
         publicKey: Buffer.from(cred.public_key, 'base64url'),
