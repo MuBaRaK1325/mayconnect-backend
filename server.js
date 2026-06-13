@@ -908,12 +908,6 @@ function getCompanyConfig(req) {
   return COMPANY_CONFIG[hostname] || COMPANY_CONFIG['www.mayconnectdataplug.com.ng'];
 }
 
-function getExpectedOrigin(req) {
-  const origin = req.headers.origin;
-  if (!origin) throw new Error('No origin header');
-  return origin;
-}
-
 // REGISTER START
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
@@ -921,23 +915,19 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const userID = new TextEncoder().encode(user.id.toString());
     const company = getCompanyConfig(req);
     const rpID = getRPID(req);
-    const origin = getExpectedOrigin(req);
+    const expectedOrigin = req.headers.origin;
 
-    console.log('=== WEB AUTHN REGISTER START ===');
-    console.log('Host:', req.headers.host);
-    console.log('Origin:', origin);
+    console.log('=== REGISTER START ===');
+    console.log('Origin header:', req.headers.origin);
+    console.log('Host header:', req.headers.host);
     console.log('RP ID:', rpID);
-    console.log('================================');
+    console.log('======================');
 
-    await pool.query(
-      'DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
-      [user.id, rpID]
-    );
+    await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [user.id, rpID]);
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
       rpID: rpID,
-      rpIcon: company.icon,
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -956,26 +946,31 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     res.json(options);
 
   } catch (e) {
-    console.error('Register start error:', e.message);
+    console.error('Register start error:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// REGISTER FINISH - GYARA: Kula da error
+// REGISTER FINISH - Wannan shine gyaran ƙarshe
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   try {
     const user = await getUser(req.user.id);
-    const expectedOrigin = getExpectedOrigin(req);
-    const company = getCompanyConfig(req);
+    const expectedOrigin = req.headers.origin;
     const rpID = getRPID(req);
 
-    console.log('=== WEB AUTHN REGISTER FINISH ===');
-    console.log('RP ID:', rpID, 'Origin:', expectedOrigin);
-    console.log('Body received:', JSON.stringify(req.body).substring(0, 200));
-    console.log('==================================');
+    console.log('=== REGISTER FINISH ===');
+    console.log('Origin header:', expectedOrigin);
+    console.log('RP ID:', rpID);
+    console.log('Challenge from DB:', user.webauthn_challenge);
+    console.log('Challenge from body:', req.body.response?.clientDataJSON?.substring(0, 50));
+    console.log('=======================');
 
     if (!user.webauthn_challenge) {
       return res.status(400).json({ error: 'Challenge not found. Start registration again.' });
+    }
+
+    if (!expectedOrigin) {
+      return res.status(400).json({ error: 'No Origin header. Use HTTPS + proper domain' });
     }
 
     let verification;
@@ -988,14 +983,13 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
         requireUserVerification: false
       });
     } catch (verifyError) {
-      console.error('VERIFICATION FAILED:', verifyError);
+      console.error('VERIFICATION FAILED:', verifyError.message);
+      console.error('Full error:', verifyError);
       return res.status(400).json({
         verified: false,
-        error: 'Verification failed: ' + verifyError.message
+        error: verifyError.message // Wannan zai nuna ainihin matsalar
       });
     }
-
-    console.log('Verification result:', verification);
 
     if (verification.verified && verification.registrationInfo) {
       const { credential } = verification.registrationInfo;
@@ -1003,28 +997,21 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       const publicKey = Buffer.from(credential.publicKey).toString('base64url');
 
       await pool.query(
-        `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company, transports)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4, company=$6, transports=$7`,
-        [
-          user.id,
-          credentialID,
-          publicKey,
-          credential.counter,
-          rpID,
-          company.short,
-          req.body.transports || ['internal']
-        ]
+        `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
+        [user.id, credentialID, publicKey, credential.counter, rpID, 'mayconnect']
       );
 
       await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
+      console.log('SUCCESS: Credential saved');
       res.json({ verified: true });
     } else {
-      console.error('Verification not verified:', verification);
-      res.status(400).json({ verified: false, error: 'Verification not verified' });
+      console.error('Verification returned false:', verification);
+      res.status(400).json({ verified: false, error: 'Verification failed' });
     }
   } catch (e) {
-    console.error('WebAuthn register error:', e.message, e.stack);
+    console.error('Register finish error:', e);
     res.status(400).json({ error: e.message });
   }
 });
@@ -1033,24 +1020,14 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     const rpID = getRPID(req);
-    const company = getCompanyConfig(req);
-
     const options = await generateAuthenticationOptions({
       rpID: rpID,
       userVerification: 'discouraged',
-      allowCredentials: [],
       timeout: 60000
     });
-
-    await pool.query(
-      'INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')',
-      [options.challenge]
-    );
-
+    await pool.query('INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')', [options.challenge]);
     res.json(options);
-
   } catch (e) {
-    console.error('Login start error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1059,25 +1036,19 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
     const { id: credentialId } = req.body;
-    const expectedOrigin = getExpectedOrigin(req);
+    const expectedOrigin = req.headers.origin;
     const rpID = getRPID(req);
 
-    const challengeRes = await pool.query(
-      'SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1'
-    );
-    if (!challengeRes.rows[0]) return res.status(400).json({ error: 'Challenge expired. Try again.' });
+    const challengeRes = await pool.query('SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1');
+    if (!challengeRes.rows[0]) return res.status(400).json({ error: 'Challenge expired' });
     const challenge = challengeRes.rows[0].challenge;
 
-    const credRes = await pool.query(
-      'SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2',
-      [credentialId, rpID]
-    );
-    if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not registered for this domain' });
+    const credRes = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2', [credentialId, rpID]);
+    if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not found' });
 
     const cred = credRes.rows[0];
     const userRes = await pool.query('SELECT * FROM users WHERE id=$1', [cred.user_id]);
     const user = userRes.rows[0];
-    if (!user) return res.status(400).json({ error: 'Passkey not found for this user' });
 
     let verification;
     try {
@@ -1094,37 +1065,19 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
         requireUserVerification: false
       });
     } catch (verifyError) {
-      console.error('AUTH VERIFICATION FAILED:', verifyError);
-      return res.status(400).json({
-        verified: false,
-        error: 'Auth verification failed: ' + verifyError.message
-      });
+      console.error('AUTH FAILED:', verifyError.message);
+      return res.status(400).json({ verified: false, error: verifyError.message });
     }
 
     if (verification.verified) {
-      const { authenticationInfo } = verification;
-      await pool.query('UPDATE webauthn_credentials SET counter=$1, last_used=NOW() WHERE id=$2',
-        [authenticationInfo.newCounter, cred.id]);
+      await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE id=$2', [verification.authenticationInfo.newCounter, cred.id]);
       await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
-
-      const company = getCompanyConfig({ headers: { origin: expectedOrigin } });
-      const token = jwt.sign(
-        { id: user.id, username: user.username, is_admin: user.is_admin, company: user.company },
-        process.env.JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      res.json({
-        token,
-        user: { id: user.id, username: user.username, company: user.company },
-        company: company.short,
-        logo: company.icon
-      });
+      const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
+      res.json({ token, user: { id: user.id, username: user.username } });
     } else {
-      res.status(400).json({ verified: false, error: 'Authentication failed' });
+      res.status(400).json({ verified: false, error: 'Auth failed' });
     }
   } catch (e) {
-    console.error('WebAuthn login error:', e.message);
     res.status(400).json({ error: e.message });
   }
 });
