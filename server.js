@@ -1566,13 +1566,29 @@ app.post("/api/login", loginLimiter, async (req, res) => {
   }
 });
 
-/* ================= USER INFO - WITH TIER CHECK + WEBAUTHN CHALLENGE ================= */
+/* ================= USER HELPER FUNCTION - DAYA TILO KAWAI ================= */
+async function getUser(id) {
+  const result = await pool.query(
+    `SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet,
+            account_number, bank_name, account_name, webauthn_challenge
+     FROM users WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0];
+}
+
+/* ================= USER INFO - WITH TIER CHECK ================= */
 app.get("/api/me", auth, async (req, res) => {
   try {
+    console.log('req.user:', req.user); // ← Debug line. Share bayan ya yi aiki
+
+    if (!req.user ||!req.user.id) {
+      return res.status(401).json({ message: "Unauthorized - req.user missing" });
+    }
+
     let user = await getUser(req.user.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // Auto-create DVA if missing for PaymentPoint companies
     const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
     if (!user.account_number && paymentpointCompanies.includes(user.company?.toLowerCase()) && user.phone) {
       try {
@@ -1583,7 +1599,7 @@ app.get("/api/me", auth, async (req, res) => {
             `UPDATE users SET account_number=$1, account_name=$2, bank_name=$3, paymentmethod='paymentpoint', customer_id=$4 WHERE id=$5`,
             [account.accountNumber, account.accountName, account.bankName, ppResponse.customer?.customer_id || null, user.id]
           );
-          user = await getUser(req.user.id); // Refresh data
+          user = await getUser(req.user.id);
         }
       } catch (e) {
         console.log("Account creation failed on /me:", e.message);
@@ -1591,11 +1607,9 @@ app.get("/api/me", auth, async (req, res) => {
     }
 
     const [topCheck] = await Promise.all([pool.query("SELECT 1 FROM top_users WHERE id=$1", [req.user.id])]);
-
     const userData = {...user };
     userData.is_top_user = topCheck.rows.length > 0;
     userData.user_tier = userData.is_top_user? 'top' : 'default';
-
     delete userData.password;
     delete userData.pin;
     res.json(userData);
