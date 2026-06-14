@@ -1566,22 +1566,9 @@ app.post("/api/login", loginLimiter, async (req, res) => {
   }
 });
 
-/* ================= USER HELPER FUNCTION - DAYA TILO KAWAI ================= */
-async function getUser(id) {
-  const result = await pool.query(
-    `SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet,
-            account_number, bank_name, account_name, webauthn_challenge
-     FROM users WHERE id = $1`,
-    [id]
-  );
-  return result.rows[0];
-}
-
 /* ================= USER INFO - WITH TIER CHECK ================= */
 app.get("/api/me", auth, async (req, res) => {
   try {
-    console.log('req.user:', req.user); // ← Debug line. Share bayan ya yi aiki
-
     if (!req.user ||!req.user.id) {
       return res.status(401).json({ message: "Unauthorized - req.user missing" });
     }
