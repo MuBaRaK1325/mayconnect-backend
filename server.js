@@ -885,7 +885,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID, 'ORIGIN:', EXPECTED_ORIGIN);
+    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email);
 
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
 
@@ -907,7 +907,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     });
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, userId]);
-    return res.json(options); // ← return
+    return res.json(options);
   } catch (e) {
     console.error('Register start error:', e.message);
     return res.status(500).json({ error: e.message });
@@ -916,14 +916,14 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const userId = Number(req.user?.id || 0);
-  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+  if (!userId) return res.status(401).json({ verified: false, error: 'Unauthorized' });
 
-  console.log('=== REGISTER FINISH === UserID:', userId, 'RP_ID:', RP_ID, 'ORIGIN:', EXPECTED_ORIGIN);
+  console.log('=== REGISTER FINISH === UserID:', userId);
 
   try {
     const userRes = await pool.query('SELECT webauthn_challenge FROM users WHERE id=$1', [userId]);
     const challenge = userRes.rows[0]?.webauthn_challenge;
-    if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired. Please start again' });
+    if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired' });
 
     const verification = await verifyRegistrationResponse({
       response: req.body,
@@ -935,16 +935,33 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
     console.log('Verification result:', verification.verified);
     if (!verification.verified) {
-      console.error('Verification failed details:', verification);
       return res.status(400).json({ verified: false, error: 'Backend verification failed' });
     }
 
-    const regInfo = verification.registrationInfo;
-    if (!regInfo?.credential) return res.status(400).json({ verified: false, error: 'No credential info' });
+    // FALLBACK KARSHE: Idan registrationInfo babu, mu karɓi daga req.body
+    let credId, pubKey, counter;
 
-    const credId = Buffer.from(regInfo.credential.id).toString('base64url');
-    const pubKey = Buffer.from(regInfo.credential.publicKey).toString('base64url');
-    const counter = regInfo.credential.counter || 0;
+    if (verification.registrationInfo?.credential) {
+      credId = Buffer.from(verification.registrationInfo.credential.id).toString('base64url');
+      pubKey = Buffer.from(verification.registrationInfo.credential.publicKey).toString('base64url');
+      counter = verification.registrationInfo.credential.counter || 0;
+    } else {
+      // Version na tsoho - mu cire daga body
+      const body = req.body;
+      credId = body.id || body.rawId;
+      // attestationObject yana ɗauke da publicKey
+      pubKey = body.response?.attestationObject || '';
+      counter = 0;
+
+      if (!credId ||!pubKey) {
+        console.error('Body keys:', Object.keys(body));
+        return res.status(400).json({ verified: false, error: 'No credential info from browser' });
+      }
+
+      // Convert to base64url idan string ne
+      if (typeof credId === 'string') credId = Buffer.from(credId, 'base64url').toString('base64url');
+      if (typeof pubKey === 'string') pubKey = Buffer.from(pubKey, 'base64').toString('base64url');
+    }
 
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
@@ -959,7 +976,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
   } catch (e) {
-    console.error('Register finish error:', e.message, e.stack);
+    console.error('Register finish error:', e.message);
     return res.status(400).json({ verified: false, error: e.message || 'Registration failed' });
   }
 });
