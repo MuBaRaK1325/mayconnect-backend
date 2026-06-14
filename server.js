@@ -885,7 +885,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email);
+    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID, 'ORIGIN:', EXPECTED_ORIGIN);
 
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
 
@@ -907,10 +907,10 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     });
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, userId]);
-    res.json(options);
+    return res.json(options); // ← return
   } catch (e) {
     console.error('Register start error:', e.message);
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
@@ -918,12 +918,12 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const userId = Number(req.user?.id || 0);
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-  console.log('=== REGISTER FINISH === UserID:', userId);
+  console.log('=== REGISTER FINISH === UserID:', userId, 'RP_ID:', RP_ID, 'ORIGIN:', EXPECTED_ORIGIN);
 
   try {
     const userRes = await pool.query('SELECT webauthn_challenge FROM users WHERE id=$1', [userId]);
     const challenge = userRes.rows[0]?.webauthn_challenge;
-    if (!challenge) return res.status(400).json({ error: 'Challenge expired' });
+    if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired. Please start again' });
 
     const verification = await verifyRegistrationResponse({
       response: req.body,
@@ -934,10 +934,13 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     });
 
     console.log('Verification result:', verification.verified);
-    if (!verification.verified) return res.status(400).json({ verified: false });
+    if (!verification.verified) {
+      console.error('Verification failed details:', verification);
+      return res.status(400).json({ verified: false, error: 'Backend verification failed' });
+    }
 
     const regInfo = verification.registrationInfo;
-    if (!regInfo?.credential) return res.status(400).json({ verified: false });
+    if (!regInfo?.credential) return res.status(400).json({ verified: false, error: 'No credential info' });
 
     const credId = Buffer.from(regInfo.credential.id).toString('base64url');
     const pubKey = Buffer.from(regInfo.credential.publicKey).toString('base64url');
@@ -956,7 +959,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
   } catch (e) {
-    console.error('Register finish error:', e.message);
+    console.error('Register finish error:', e.message, e.stack);
     return res.status(400).json({ verified: false, error: e.message || 'Registration failed' });
   }
 });
@@ -969,10 +972,10 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       timeout: 60000
     });
     await pool.query('INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')', [options.challenge]);
-    res.json(options);
+    return res.json(options);
   } catch (e) {
     console.error('Login start error:', e.message);
-    res.status(500).json({ error: 'Internal error' });
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -1008,13 +1011,13 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2', [verification.authenticationInfo.newCounter, cred.credential_id]);
       await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
       const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
-      res.json({ verified: true, token, user: { id: user.id, username: user.username } });
+      return res.json({ verified: true, token, user: { id: user.id, username: user.username } });
     } else {
-      res.status(400).json({ verified: false, error: 'Auth failed' });
+      return res.status(400).json({ verified: false, error: 'Auth failed' });
     }
   } catch (e) {
     console.error('Login finish error:', e.message);
-    res.status(400).json({ error: 'Internal error' });
+    return res.status(400).json({ error: 'Internal error' });
   }
 });
 
