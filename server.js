@@ -946,10 +946,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       pubKey = Buffer.from(verification.registrationInfo.credential.publicKey).toString('base64url');
       counter = verification.registrationInfo.credential.counter || 0;
     } else {
-      // Version na tsoho - mu cire daga body
       const body = req.body;
       credId = body.id || body.rawId;
-      // attestationObject yana ɗauke da publicKey
       pubKey = body.response?.attestationObject || '';
       counter = 0;
 
@@ -958,7 +956,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
         return res.status(400).json({ verified: false, error: 'No credential info from browser' });
       }
 
-      // Convert to base64url idan string ne
       if (typeof credId === 'string') credId = Buffer.from(credId, 'base64url').toString('base64url');
       if (typeof pubKey === 'string') pubKey = Buffer.from(pubKey, 'base64').toString('base64url');
     }
@@ -1035,6 +1032,26 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   } catch (e) {
     console.error('Login finish error:', e.message);
     return res.status(400).json({ error: 'Internal error' });
+  }
+});
+
+/* ================= CHECK STATUS - DON UI YA NUNA ENABLED ================= */
+app.get('/api/auth/webauthn/status', auth, async (req, res) => {
+  try {
+    const userId = Number(req.user?.id || 0);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const result = await pool.query(
+      'SELECT 1 FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1',
+      [userId, RP_ID]
+    );
+
+    res.json({
+      hasPasskey: result.rows.length > 0
+    });
+  } catch (e) {
+    console.error('Status check error:', e.message);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
