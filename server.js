@@ -274,7 +274,7 @@ const ADMIN_EMAILS = [
 ];
 
 // HARCODE DAIDAI DA FRONTEND URL
-const RP_ID = 'www.mayconnectdataplug.com.ng';
+const RP_ID = 'mayconnectdataplug.com.ng';
 const RP_NAME = 'MAYCONNECT DATA PLUG';
 const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng'; // <- Wannan shine
 // PAYMENTPOINT CONFIG
@@ -864,10 +864,7 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
-
-// GYARA: Cire www. daga RP_ID ta atomatik
-const RP_ID = process.env.RP_ID || process.env.HOSTNAME || 'mayconnectdataplug.com.ng';
+/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% NO DUPLICATE ================= */
 const CLEAN_RP_ID = RP_ID.replace(/^www\./, '');
 
 function getCompanyConfig() {
@@ -896,7 +893,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
-      rpID: CLEAN_RP_ID, // GYARA: Kullum ba tare da www ba
+      rpID: CLEAN_RP_ID,
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -933,8 +930,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: `https://${req.headers.host}`, // GYARA: Auto detect origin
-      expectedRPID: CLEAN_RP_ID, // GYARA: Kullum ba tare da www ba
+      expectedOrigin: `https://${req.headers.host}`,
+      expectedRPID: CLEAN_RP_ID,
       requireUserVerification: false
     });
 
@@ -964,7 +961,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
-      [userId, credId, pubKey, counter, CLEAN_RP_ID, 'mayconnect'] // GYARA: CLEAN_RP_ID
+      [userId, credId, pubKey, counter, CLEAN_RP_ID, 'mayconnect']
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
@@ -981,7 +978,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     console.log('Login start RP_ID:', CLEAN_RP_ID);
     const options = await generateAuthenticationOptions({
-      rpID: CLEAN_RP_ID, // GYARA: Kullum ba tare da www ba
+      rpID: CLEAN_RP_ID,
       userVerification: 'discouraged',
       timeout: 60000
     });
@@ -1000,7 +997,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     if (!challengeRes.rows[0]) return res.status(400).json({ error: 'Challenge expired' });
     const challenge = challengeRes.rows[0].challenge;
 
-    const credRes = await pool.query('SELECT user_id, credential_id, public_key, counter FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2', [credentialId, CLEAN_RP_ID]); // GYARA
+    const credRes = await pool.query('SELECT user_id, credential_id, public_key, counter FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2', [credentialId, CLEAN_RP_ID]);
     if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not found' });
 
     const cred = credRes.rows[0];
@@ -1011,8 +1008,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: `https://${req.headers.host}`, // GYARA: Auto detect
-      expectedRPID: CLEAN_RP_ID, // GYARA
+      expectedOrigin: `https://${req.headers.host}`,
+      expectedRPID: CLEAN_RP_ID,
       credential: {
         id: cred.credential_id,
         publicKey: Buffer.from(cred.public_key, 'base64url'),
@@ -1043,7 +1040,7 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 
     const result = await pool.query(
       'SELECT 1 FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1',
-      [userId, CLEAN_RP_ID] // GYARA
+      [userId, CLEAN_RP_ID]
     );
 
     res.json({ enabled: result.rows.length > 0 });
