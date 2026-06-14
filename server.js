@@ -864,14 +864,14 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= WEBAUTHN - FINAL 100% - NO DUPLICATE RP_ID ================= */
+/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% FIXED ================= */
 
-// KAISHI: Kada ka sake declare const RP_ID anan. Yi amfani da RP_ID da ke sama a fayil ɗinka
-// Muna cire www. kawai idan akwai, don WebAuthn ya daidaita
+// KAISHI: Kada ka declare const RP_ID anan. Yi amfani da RP_ID da EXPECTED_ORIGIN da ke sama a fayil ɗinka
+// Muna cire www. don WebAuthn ya daidaita
 const CLEAN_RP_ID = RP_ID.replace(/^www\./, '');
 
-// GYARA: Dole ne expectedOrigin ya zama URL ɗin frontend, ba backend ba
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://www.mayconnectdataplug.com.ng';
+// GYARA: Idan EXPECTED_ORIGIN babu, yi amfani da frontend URL
+const EXPECTED_ORIGIN = process.env.FRONTEND_URL || 'https://www.mayconnectdataplug.com.ng';
 
 function getCompanyConfig() {
   return {
@@ -892,13 +892,13 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === UserID:', userId, 'RP_ID:', CLEAN_RP_ID, 'Origin:', FRONTEND_URL);
+    console.log('=== REGISTER START === UserID:', userId, 'RP_ID:', CLEAN_RP_ID);
 
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, CLEAN_RP_ID]);
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
-      rpID: CLEAN_RP_ID,
+      rpID: CLEAN_RP_ID, // mayconnectdataplug.com.ng
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -935,7 +935,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: FRONTEND_URL,
+      expectedOrigin: EXPECTED_ORIGIN,
       expectedRPID: CLEAN_RP_ID,
       requireUserVerification: false
     });
@@ -956,6 +956,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       pubKey = body.response?.attestationObject || '';
       counter = 0;
       if (!credId ||!pubKey) {
+        console.error('Body keys:', Object.keys(body));
         return res.status(400).json({ verified: false, error: 'No credential info from browser' });
       }
       if (typeof credId === 'string') credId = Buffer.from(credId, 'base64url').toString('base64url');
@@ -1010,27 +1011,44 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const user = userRes.rows[0];
     if (!user) return res.status(400).json({ error: 'User not found' });
 
-    const verification = await verifyAuthenticationResponse({
-      response: req.body,
-      expectedChallenge: challenge,
-      expectedOrigin: FRONTEND_URL,
-      expectedRPID: CLEAN_RP_ID,
-      credential: {
-        id: cred.credential_id,
-        publicKey: Buffer.from(cred.public_key, 'base64url'),
-        counter: cred.counter
-      },
-      requireUserVerification: false
-    });
+    // GYARA KARSHE: Gwada duka origin 2 saboda Render proxy
+    const requestOrigin = `${req.protocol}://${req.get('host')}`;
+    const origins = [requestOrigin, EXPECTED_ORIGIN];
 
-    if (verification.verified) {
-      await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2', [verification.authenticationInfo.newCounter, cred.credential_id]);
-      await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
-      const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
-      return res.json({ verified: true, token, user: { id: user.id, username: user.username } });
-    } else {
-      return res.status(400).json({ verified: false, error: 'Auth failed' });
+    let verification;
+    let lastError;
+    for (const origin of origins) {
+      try {
+        verification = await verifyAuthenticationResponse({
+          response: req.body,
+          expectedChallenge: challenge,
+          expectedOrigin: origin,
+          expectedRPID: CLEAN_RP_ID,
+          credential: {
+            id: cred.credential_id,
+            publicKey: Buffer.from(cred.public_key, 'base64url'),
+            counter: cred.counter
+          },
+          requireUserVerification: false
+        });
+        if (verification.verified) {
+          console.log('Login verified with origin:', origin);
+          break;
+        }
+      } catch (e) {
+        lastError = e;
+      }
     }
+
+    if (!verification?.verified) {
+      throw lastError || new Error('All origins failed');
+    }
+
+    await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2', [verification.authenticationInfo.newCounter, cred.credential_id]);
+    await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
+    const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    return res.json({ verified: true, token, user: { id: user.id, username: user.username } });
+
   } catch (e) {
     console.error('Login finish error:', e.message);
     return res.status(400).json({ error: 'Internal error' });
