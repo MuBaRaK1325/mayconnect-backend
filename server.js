@@ -920,7 +920,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized - Please login first' });
     }
 
-    const user = await getUser(req.user.id);
+    const userId = req.user.id; // ← Yi amfani da kai tsaye don kaucewa undefined
+    const user = await getUser(userId);
     console.log('=== REGISTER FINISH === User:', user?.email, 'RP ID:', RP_ID);
 
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -953,11 +954,11 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
-      [user.id, credentialID, publicKey, credential.counter, RP_ID, 'mayconnect']
+      [userId, credentialID, publicKey, credential.counter, RP_ID, 'mayconnect'] // ← userId kai tsaye
     );
 
-    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
-    console.log('SUCCESS: Credential saved for user', user.id);
+    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
+    console.log('SUCCESS: Credential saved for user', userId);
     res.json({ verified: true, message: 'Biometric registered successfully' });
   } catch (e) {
     console.error('Register finish error:', e);
@@ -1026,8 +1027,6 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     res.status(400).json({ error: e.message });
   }
 });
-
-
 
 // 4. TEST ROUTE
 app.get('/api/ping', (req, res) => {
