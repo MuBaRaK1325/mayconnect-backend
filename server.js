@@ -865,15 +865,6 @@ function adminOnly(req, res, next) {
 }
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
-
-function getCompanyConfig() {
-  return {
-    name: RP_NAME,
-    icon: 'https://mayconnectdataplug.com.ng/images/logo.png',
-    short: 'mayconnect'
-  };
-}
-
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     if (!req.user ||!req.user.id) {
@@ -930,7 +921,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     }
 
     if (!user.webauthn_challenge) {
-      return res.status(400).json({ error: 'Challenge not found' });
+      return res.status(400).json({ error: 'Challenge not found. Please start registration again' });
     }
 
     let verification;
@@ -965,7 +956,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [user.id]);
     console.log('SUCCESS: Credential saved for user', user.id);
-    res.json({ verified: true });
+    res.json({ verified: true, message: 'Biometric registered successfully' });
   } catch (e) {
     console.error('Register finish error:', e);
     res.status(400).json({ error: e.message });
@@ -998,7 +989,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not found' });
 
     const cred = credRes.rows[0];
-    const userRes = await pool.query('SELECT * FROM users WHERE id=$1', [cred.user_id]);
+    const userRes = await pool.query('SELECT id, username FROM users WHERE id=$1', [cred.user_id]);
     const user = userRes.rows[0];
 
     let verification;
@@ -1024,7 +1015,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE id=$2', [verification.authenticationInfo.newCounter, cred.id]);
       await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
       const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
-      res.json({ token, user: { id: user.id, username: user.username } });
+      res.json({ verified: true, token, user: { id: user.id, username: user.username } });
     } else {
       res.status(400).json({ verified: false, error: 'Auth failed' });
     }
