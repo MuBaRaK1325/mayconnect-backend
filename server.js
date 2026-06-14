@@ -876,18 +876,16 @@ function getCompanyConfig() {
 
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
-    if (!req.user?.id) {
-      return res.status(401).json({ error: 'Unauthorized - Please login first' });
-    }
+    const userId = Number(req.user?.id || 0);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    const userId = Number(req.user.id);
-    const userRes = await pool.query('SELECT id, email, username FROM users WHERE id=$1', [userId]);
+    const userRes = await pool.query('SELECT email, username FROM users WHERE id=$1', [userId]);
     const user = userRes.rows[0];
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP ID:', RP_ID);
+    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email);
 
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
 
@@ -918,47 +916,38 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const userId = Number(req.user?.id || 0);
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-  if (!userId) {
-    return res.status(401).json({ error: 'Unauthorized - Please login first' });
-  }
-
-  console.log('=== REGISTER FINISH === UserID:', userId, 'RP ID:', RP_ID);
+  console.log('=== REGISTER FINISH === UserID:', userId);
 
   try {
-    const userRes = await pool.query('SELECT id, email, webauthn_challenge FROM users WHERE id=$1', [userId]);
-    const user = userRes.rows[0];
-
-    if (!user?.webauthn_challenge) {
-      return res.status(400).json({ error: 'Challenge not found. Please start registration again' });
-    }
-
-    console.log('User email:', user.email);
+    const userRes = await pool.query('SELECT webauthn_challenge FROM users WHERE id=$1', [userId]);
+    const challenge = userRes.rows[0]?.webauthn_challenge;
+    if (!challenge) return res.status(400).json({ error: 'Challenge expired' });
 
     const verification = await verifyRegistrationResponse({
       response: req.body,
-      expectedChallenge: user.webauthn_challenge,
+      expectedChallenge: challenge,
       expectedOrigin: EXPECTED_ORIGIN,
       expectedRPID: RP_ID,
       requireUserVerification: false
     });
 
     console.log('Verification result:', verification.verified);
+    if (!verification.verified) return res.status(400).json({ verified: false });
 
-    if (!verification.verified ||!verification.registrationInfo) {
-      return res.status(400).json({ verified: false, error: 'Verification failed' });
-    }
+    const regInfo = verification.registrationInfo;
+    if (!regInfo?.credential) return res.status(400).json({ verified: false });
 
-    const cred = verification.registrationInfo.credential;
-    const credentialID = Buffer.from(cred.id).toString('base64url');
-    const publicKey = Buffer.from(cred.publicKey).toString('base64url');
-    const counter = cred.counter || 0;
+    const credId = Buffer.from(regInfo.credential.id).toString('base64url');
+    const pubKey = Buffer.from(regInfo.credential.publicKey).toString('base64url');
+    const counter = regInfo.credential.counter || 0;
 
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
-      [userId, credentialID, publicKey, counter, RP_ID, 'mayconnect']
+      [userId, credId, pubKey, counter, RP_ID, 'mayconnect']
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
@@ -968,7 +957,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
   } catch (e) {
     console.error('Register finish error:', e.message);
-    return res.status(400).json({ verified: false, error: e.message });
+    return res.status(400).json({ verified: false, error: e.message || 'Registration failed' });
   }
 });
 
@@ -982,7 +971,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     await pool.query('INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')', [options.challenge]);
     res.json(options);
   } catch (e) {
-    console.error('Login start error:', e);
+    console.error('Login start error:', e.message);
     res.status(500).json({ error: 'Internal error' });
   }
 });
@@ -994,7 +983,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     if (!challengeRes.rows[0]) return res.status(400).json({ error: 'Challenge expired' });
     const challenge = challengeRes.rows[0].challenge;
 
-    const credRes = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2', [credentialId, RP_ID]);
+    const credRes = await pool.query('SELECT user_id, credential_id, public_key, counter FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2', [credentialId, RP_ID]);
     if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not found' });
 
     const cred = credRes.rows[0];
@@ -1002,27 +991,21 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const user = userRes.rows[0];
     if (!user) return res.status(400).json({ error: 'User not found' });
 
-    let verification;
-    try {
-      verification = await verifyAuthenticationResponse({
-        response: req.body,
-        expectedChallenge: challenge,
-        expectedOrigin: EXPECTED_ORIGIN,
-        expectedRPID: RP_ID,
-        credential: {
-          id: cred.credential_id,
-          publicKey: Buffer.from(cred.public_key, 'base64url'),
-          counter: cred.counter
-        },
-        requireUserVerification: false
-      });
-    } catch (verifyError) {
-      console.error('AUTH FAILED:', verifyError.message);
-      return res.status(400).json({ verified: false, error: verifyError.message });
-    }
+    const verification = await verifyAuthenticationResponse({
+      response: req.body,
+      expectedChallenge: challenge,
+      expectedOrigin: EXPECTED_ORIGIN,
+      expectedRPID: RP_ID,
+      credential: {
+        id: cred.credential_id,
+        publicKey: Buffer.from(cred.public_key, 'base64url'),
+        counter: cred.counter
+      },
+      requireUserVerification: false
+    });
 
     if (verification.verified) {
-      await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE id=$2', [verification.authenticationInfo.newCounter, cred.id]);
+      await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2', [verification.authenticationInfo.newCounter, cred.credential_id]);
       await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
       const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
       res.json({ verified: true, token, user: { id: user.id, username: user.username } });
@@ -1030,7 +1013,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       res.status(400).json({ verified: false, error: 'Auth failed' });
     }
   } catch (e) {
-    console.error('Login finish error:', e);
+    console.error('Login finish error:', e.message);
     res.status(400).json({ error: 'Internal error' });
   }
 });
