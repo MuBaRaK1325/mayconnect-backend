@@ -864,16 +864,7 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= USER HELPER FUNCTION - DAYA TILO KAWAI ================= */
-async function getUser(id) {
-  const result = await pool.query(
-    `SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet,
-            account_number, bank_name, account_name, webauthn_challenge
-     FROM users WHERE id = $1`,
-    [id]
-  );
-  return result.rows[0];
-}
+/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
 
 function getCompanyConfig() {
   return {
@@ -883,7 +874,6 @@ function getCompanyConfig() {
   };
 }
 
-/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     if (!req.user ||!req.user.id) {
@@ -891,9 +881,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     }
 
     const user = await getUser(req.user.id);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
     const userID = new TextEncoder().encode(user.id.toString());
     const company = getCompanyConfig();
@@ -935,13 +923,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const user = await getUser(req.user.id);
     console.log('=== REGISTER FINISH === User:', user?.email, 'RP ID:', RP_ID);
 
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    if (!user.webauthn_challenge) {
-      return res.status(400).json({ error: 'Challenge not found. Please start registration again' });
-    }
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (!user.webauthn_challenge) return res.status(400).json({ error: 'Challenge not found. Please start registration again' });
 
     let verification;
     try {
