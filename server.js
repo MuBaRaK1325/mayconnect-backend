@@ -881,12 +881,13 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     }
 
     const userId = Number(req.user.id);
-    const user = await getUser(userId);
+    const userRes = await pool.query('SELECT id, email, username FROM users WHERE id=$1', [userId]);
+    const user = userRes.rows[0];
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === User:', user.email, 'RP ID:', RP_ID);
+    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP ID:', RP_ID);
 
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
 
@@ -910,61 +911,64 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, userId]);
     res.json(options);
   } catch (e) {
-    console.error('Register start error:', e);
+    console.error('Register start error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
-  try {
-    if (!req.user?.id) {
-      return res.status(401).json({ error: 'Unauthorized - Please login first' });
-    }
+  const userId = Number(req.user?.id || 0);
 
-    const userId = Number(req.user.id); // ← Dole ne number. Babu user.id daga nan zuwa ƙarshe
-    const user = await getUser(userId);
-    console.log('=== REGISTER FINISH === UserID:', userId, 'Email:', user?.email, 'RP ID:', RP_ID);
+  if (!userId) {
+    return res.status(401).json({ error: 'Unauthorized - Please login first' });
+  }
+
+  console.log('=== REGISTER FINISH === UserID:', userId, 'RP ID:', RP_ID);
+
+  try {
+    const userRes = await pool.query('SELECT id, email, webauthn_challenge FROM users WHERE id=$1', [userId]);
+    const user = userRes.rows[0];
 
     if (!user?.webauthn_challenge) {
       return res.status(400).json({ error: 'Challenge not found. Please start registration again' });
     }
 
-    let verification;
-    try {
-      verification = await verifyRegistrationResponse({
-        response: req.body,
-        expectedChallenge: user.webauthn_challenge,
-        expectedOrigin: EXPECTED_ORIGIN,
-        expectedRPID: RP_ID,
-        requireUserVerification: false
-      });
-      console.log('Verification result:', verification.verified);
-    } catch (verifyError) {
-      console.error('VERIFICATION ERROR:', verifyError.message);
-      return res.status(400).json({ verified: false, error: verifyError.message });
-    }
+    console.log('User email:', user.email);
+
+    const verification = await verifyRegistrationResponse({
+      response: req.body,
+      expectedChallenge: user.webauthn_challenge,
+      expectedOrigin: EXPECTED_ORIGIN,
+      expectedRPID: RP_ID,
+      requireUserVerification: false
+    });
+
+    console.log('Verification result:', verification.verified);
 
     if (!verification.verified ||!verification.registrationInfo) {
       return res.status(400).json({ verified: false, error: 'Verification failed' });
     }
 
-    const { credential } = verification.registrationInfo;
-    const credentialID = Buffer.from(credential.id).toString('base64url');
-    const publicKey = Buffer.from(credential.publicKey).toString('base64url');
+    const cred = verification.registrationInfo.credential;
+    const credentialID = Buffer.from(cred.id).toString('base64url');
+    const publicKey = Buffer.from(cred.publicKey).toString('base64url');
+    const counter = cred.counter || 0;
 
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
-      [userId, credentialID, publicKey, credential.counter, RP_ID, 'mayconnect']
+      [userId, credentialID, publicKey, counter, RP_ID, 'mayconnect']
     );
 
-    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]); // ← Nan ne ya kasance yana faduwa
+    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
+
     console.log('SUCCESS: Credential saved for user', userId);
-    res.json({ verified: true, message: 'Biometric registered successfully' });
+    return res.json({ verified: true, message: 'Biometric registered successfully' });
+
   } catch (e) {
-    console.error('Register finish error:', e.message, e.stack);
-    res.status(400).json({ error: e.message });
+    console.error('Register finish error:', e.message);
+    return res.status(400).json({ verified: false, error: e.message });
   }
 });
 
