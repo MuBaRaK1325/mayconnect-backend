@@ -880,14 +880,15 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized - Please login first' });
     }
 
-    const user = await getUser(req.user.id);
+    const userId = req.user.id; // ← Koma da kai tsaye
+    const user = await getUser(userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const userID = new TextEncoder().encode(user.id.toString());
+    const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
     console.log('=== REGISTER START === User:', user.email, 'RP ID:', RP_ID);
 
-    await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [user.id, RP_ID]);
+    await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
@@ -906,7 +907,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       timeout: 60000
     });
 
-    await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, user.id]);
+    await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, userId]);
     res.json(options);
   } catch (e) {
     console.error('Register start error:', e);
@@ -920,7 +921,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized - Please login first' });
     }
 
-    const userId = req.user.id; // ← Yi amfani da kai tsaye don kaucewa undefined
+    const userId = req.user.id; // ← Koma da kai tsaye. Babu user.id
     const user = await getUser(userId);
     console.log('=== REGISTER FINISH === User:', user?.email, 'RP ID:', RP_ID);
 
@@ -954,10 +955,10 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
-      [userId, credentialID, publicKey, credential.counter, RP_ID, 'mayconnect'] // ← userId kai tsaye
+      [userId, credentialID, publicKey, credential.counter, RP_ID, 'mayconnect']
     );
 
-    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
+    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]); // ← Nan ne error dinka ya kasance
     console.log('SUCCESS: Credential saved for user', userId);
     res.json({ verified: true, message: 'Biometric registered successfully' });
   } catch (e) {
@@ -977,7 +978,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     res.json(options);
   } catch (e) {
     console.error('Login start error:', e);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
@@ -994,6 +995,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const cred = credRes.rows[0];
     const userRes = await pool.query('SELECT id, username FROM users WHERE id=$1', [cred.user_id]);
     const user = userRes.rows[0];
+    if (!user) return res.status(400).json({ error: 'User not found' });
 
     let verification;
     try {
@@ -1024,7 +1026,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     }
   } catch (e) {
     console.error('Login finish error:', e);
-    res.status(400).json({ error: e.message });
+    res.status(400).json({ error: 'Internal error' });
   }
 });
 
