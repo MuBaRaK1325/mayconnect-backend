@@ -864,6 +864,25 @@ function adminOnly(req, res, next) {
   next();
 }
 
+/* ================= USER HELPER FUNCTION - DAYA TILO KAWAI ================= */
+async function getUser(id) {
+  const result = await pool.query(
+    `SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet,
+            account_number, bank_name, account_name, webauthn_challenge
+     FROM users WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0];
+}
+
+function getCompanyConfig() {
+  return {
+    name: RP_NAME,
+    icon: 'https://mayconnectdataplug.com.ng/images/logo.png',
+    short: 'mayconnect'
+  };
+}
+
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
