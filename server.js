@@ -866,9 +866,13 @@ function adminOnly(req, res, next) {
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
 
+// GYARA: Cire www. daga RP_ID ta atomatik
+const RP_ID = process.env.RP_ID || process.env.HOSTNAME || 'mayconnectdataplug.com.ng';
+const CLEAN_RP_ID = RP_ID.replace(/^www\./, '');
+
 function getCompanyConfig() {
   return {
-    name: RP_NAME,
+    name: RP_NAME || 'MAYCONNECT DATA PLUG',
     icon: 'https://mayconnectdataplug.com.ng/images/logo.png',
     short: 'mayconnect'
   };
@@ -885,13 +889,14 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email);
+    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', CLEAN_RP_ID);
 
-    await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
+    // Share tsohon passkey don a ajiye sabo
+    await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, CLEAN_RP_ID]);
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
-      rpID: RP_ID,
+      rpID: CLEAN_RP_ID, // GYARA: Kullum ba tare da www ba
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -928,8 +933,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: `https://${req.headers.host}`, // GYARA: Auto detect origin
+      expectedRPID: CLEAN_RP_ID, // GYARA: Kullum ba tare da www ba
       requireUserVerification: false
     });
 
@@ -959,11 +964,11 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
-      [userId, credId, pubKey, counter, RP_ID, 'mayconnect']
+      [userId, credId, pubKey, counter, CLEAN_RP_ID, 'mayconnect'] // GYARA: CLEAN_RP_ID
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
-    console.log('SUCCESS: Credential saved for user', userId);
+    console.log('SUCCESS: Credential saved for user', userId, 'RP_ID:', CLEAN_RP_ID);
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
   } catch (e) {
@@ -974,8 +979,9 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
+    console.log('Login start RP_ID:', CLEAN_RP_ID);
     const options = await generateAuthenticationOptions({
-      rpID: RP_ID,
+      rpID: CLEAN_RP_ID, // GYARA: Kullum ba tare da www ba
       userVerification: 'discouraged',
       timeout: 60000
     });
@@ -994,7 +1000,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     if (!challengeRes.rows[0]) return res.status(400).json({ error: 'Challenge expired' });
     const challenge = challengeRes.rows[0].challenge;
 
-    const credRes = await pool.query('SELECT user_id, credential_id, public_key, counter FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2', [credentialId, RP_ID]);
+    const credRes = await pool.query('SELECT user_id, credential_id, public_key, counter FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2', [credentialId, CLEAN_RP_ID]); // GYARA
     if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not found' });
 
     const cred = credRes.rows[0];
@@ -1005,8 +1011,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: `https://${req.headers.host}`, // GYARA: Auto detect
+      expectedRPID: CLEAN_RP_ID, // GYARA
       credential: {
         id: cred.credential_id,
         publicKey: Buffer.from(cred.public_key, 'base64url'),
@@ -1029,7 +1035,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   }
 });
 
-/* ================= CHECK-ENABLED - YA DAIDAI DA FRONTEND ================= */
+/* ================= CHECK-ENABLED ================= */
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
     const userId = Number(req.user?.id || 0);
@@ -1037,7 +1043,7 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 
     const result = await pool.query(
       'SELECT 1 FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1',
-      [userId, RP_ID]
+      [userId, CLEAN_RP_ID] // GYARA
     );
 
     res.json({ enabled: result.rows.length > 0 });
