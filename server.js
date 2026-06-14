@@ -864,9 +864,10 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= WEBAUTHN - FINAL 100% - GYARAN ORIGIN ================= */
+/* ================= WEBAUTHN - FINAL 100% - NO DUPLICATE RP_ID ================= */
 
-// Yi amfani da RP_ID ɗinka da ke sama
+// KAISHI: Kada ka sake declare const RP_ID anan. Yi amfani da RP_ID da ke sama a fayil ɗinka
+// Muna cire www. kawai idan akwai, don WebAuthn ya daidaita
 const CLEAN_RP_ID = RP_ID.replace(/^www\./, '');
 
 // GYARA: Dole ne expectedOrigin ya zama URL ɗin frontend, ba backend ba
@@ -931,7 +932,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const challenge = userRes.rows[0]?.webauthn_challenge;
     if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired' });
 
-    // GYARA KARSHE: Yi amfani da FRONTEND_URL maimakon req.headers.host
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
@@ -1010,7 +1010,6 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const user = userRes.rows[0];
     if (!user) return res.status(400).json({ error: 'User not found' });
 
-    // GYARA KARSHE: FRONTEND_URL maimakon req.headers.host
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: challenge,
