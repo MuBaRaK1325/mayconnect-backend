@@ -864,14 +864,16 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% FIXED ================= */
+/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% NO DUPLICATE ================= */
 
-// KAISHI: Kada ka declare const RP_ID anan. Yi amfani da RP_ID da EXPECTED_ORIGIN da ke sama a fayil ɗinka
-// Muna cire www. don WebAuthn ya daidaita
+// KAISHI: Kada ka declare RP_ID da EXPECTED_ORIGIN anan. Yi amfani da na da ke sama
+// Muna cire www. kawai don WebAuthn
 const CLEAN_RP_ID = RP_ID.replace(/^www\./, '');
 
-// GYARA: Idan EXPECTED_ORIGIN babu, yi amfani da frontend URL
-const EXPECTED_ORIGIN = process.env.FRONTEND_URL || 'https://www.mayconnectdataplug.com.ng';
+// GYARA: Idan EXPECTED_ORIGIN babu, sai mu ƙirƙira. Idan yana nan mu yi amfani da shi
+if (typeof EXPECTED_ORIGIN === 'undefined') {
+  global.EXPECTED_ORIGIN = process.env.FRONTEND_URL || 'https://www.mayconnectdataplug.com.ng';
+}
 
 function getCompanyConfig() {
   return {
@@ -898,7 +900,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
-      rpID: CLEAN_RP_ID, // mayconnectdataplug.com.ng
+      rpID: CLEAN_RP_ID,
       userID: userID,
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -940,7 +942,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       requireUserVerification: false
     });
 
-    console.log('Verification result:', verification.verified);
     if (!verification.verified) {
       return res.status(400).json({ verified: false, error: 'Backend verification failed' });
     }
@@ -956,7 +957,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       pubKey = body.response?.attestationObject || '';
       counter = 0;
       if (!credId ||!pubKey) {
-        console.error('Body keys:', Object.keys(body));
         return res.status(400).json({ verified: false, error: 'No credential info from browser' });
       }
       if (typeof credId === 'string') credId = Buffer.from(credId, 'base64url').toString('base64url');
@@ -971,7 +971,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
-    console.log('SUCCESS: Credential saved for user', userId);
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
   } catch (e) {
@@ -982,7 +981,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
-    console.log('Login start RP_ID:', CLEAN_RP_ID);
     const options = await generateAuthenticationOptions({
       rpID: CLEAN_RP_ID,
       userVerification: 'discouraged',
@@ -1009,9 +1007,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const cred = credRes.rows[0];
     const userRes = await pool.query('SELECT id, username FROM users WHERE id=$1', [cred.user_id]);
     const user = userRes.rows[0];
-    if (!user) return res.status(400).json({ error: 'User not found' });
 
-    // GYARA KARSHE: Gwada duka origin 2 saboda Render proxy
+    // GYARA: Gwada duka origin 2
     const requestOrigin = `${req.protocol}://${req.get('host')}`;
     const origins = [requestOrigin, EXPECTED_ORIGIN];
 
@@ -1031,10 +1028,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
           },
           requireUserVerification: false
         });
-        if (verification.verified) {
-          console.log('Login verified with origin:', origin);
-          break;
-        }
+        if (verification.verified) break;
       } catch (e) {
         lastError = e;
       }
@@ -1055,17 +1049,11 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   }
 });
 
-/* ================= CHECK-ENABLED ================= */
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
     const userId = Number(req.user?.id || 0);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-
-    const result = await pool.query(
-      'SELECT 1 FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1',
-      [userId, CLEAN_RP_ID]
-    );
-
+    const result = await pool.query('SELECT 1 FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1', [userId, CLEAN_RP_ID]);
     res.json({ enabled: result.rows.length > 0 });
   } catch (e) {
     console.error('Check enabled error:', e.message);
