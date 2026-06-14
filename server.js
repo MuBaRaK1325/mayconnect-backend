@@ -938,9 +938,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       return res.status(400).json({ verified: false, error: 'Backend verification failed' });
     }
 
-    // FALLBACK KARSHE: Idan registrationInfo babu, mu karɓi daga req.body
     let credId, pubKey, counter;
-
     if (verification.registrationInfo?.credential) {
       credId = Buffer.from(verification.registrationInfo.credential.id).toString('base64url');
       pubKey = Buffer.from(verification.registrationInfo.credential.publicKey).toString('base64url');
@@ -950,12 +948,9 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       credId = body.id || body.rawId;
       pubKey = body.response?.attestationObject || '';
       counter = 0;
-
       if (!credId ||!pubKey) {
-        console.error('Body keys:', Object.keys(body));
         return res.status(400).json({ verified: false, error: 'No credential info from browser' });
       }
-
       if (typeof credId === 'string') credId = Buffer.from(credId, 'base64url').toString('base64url');
       if (typeof pubKey === 'string') pubKey = Buffer.from(pubKey, 'base64').toString('base64url');
     }
@@ -968,7 +963,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
-
     console.log('SUCCESS: Credential saved for user', userId);
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
@@ -1035,8 +1029,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   }
 });
 
-/* ================= CHECK STATUS - DON UI YA NUNA ENABLED ================= */
-app.get('/api/auth/webauthn/status', auth, async (req, res) => {
+/* ================= CHECK-ENABLED - YA DAIDAI DA FRONTEND ================= */
+app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
     const userId = Number(req.user?.id || 0);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
@@ -1046,16 +1040,13 @@ app.get('/api/auth/webauthn/status', auth, async (req, res) => {
       [userId, RP_ID]
     );
 
-    res.json({
-      hasPasskey: result.rows.length > 0
-    });
+    res.json({ enabled: result.rows.length > 0 });
   } catch (e) {
-    console.error('Status check error:', e.message);
+    console.error('Check enabled error:', e.message);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// 4. TEST ROUTE
 app.get('/api/ping', (req, res) => {
   console.log('PING HIT');
   res.send('pong');
