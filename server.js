@@ -864,8 +864,13 @@ function adminOnly(req, res, next) {
   next();
 }
 
-/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% NO DUPLICATE ================= */
+/* ================= WEBAUTHN - FINAL 100% - GYARAN ORIGIN ================= */
+
+// Yi amfani da RP_ID ɗinka da ke sama
 const CLEAN_RP_ID = RP_ID.replace(/^www\./, '');
+
+// GYARA: Dole ne expectedOrigin ya zama URL ɗin frontend, ba backend ba
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://www.mayconnectdataplug.com.ng';
 
 function getCompanyConfig() {
   return {
@@ -886,9 +891,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', CLEAN_RP_ID);
+    console.log('=== REGISTER START === UserID:', userId, 'RP_ID:', CLEAN_RP_ID, 'Origin:', FRONTEND_URL);
 
-    // Share tsohon passkey don a ajiye sabo
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, CLEAN_RP_ID]);
 
     const options = await generateRegistrationOptions({
@@ -927,10 +931,11 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const challenge = userRes.rows[0]?.webauthn_challenge;
     if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired' });
 
+    // GYARA KARSHE: Yi amfani da FRONTEND_URL maimakon req.headers.host
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: `https://${req.headers.host}`,
+      expectedOrigin: FRONTEND_URL,
       expectedRPID: CLEAN_RP_ID,
       requireUserVerification: false
     });
@@ -965,7 +970,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
-    console.log('SUCCESS: Credential saved for user', userId, 'RP_ID:', CLEAN_RP_ID);
+    console.log('SUCCESS: Credential saved for user', userId);
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
   } catch (e) {
@@ -1005,10 +1010,11 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     const user = userRes.rows[0];
     if (!user) return res.status(400).json({ error: 'User not found' });
 
+    // GYARA KARSHE: FRONTEND_URL maimakon req.headers.host
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: `https://${req.headers.host}`,
+      expectedOrigin: FRONTEND_URL,
       expectedRPID: CLEAN_RP_ID,
       credential: {
         id: cred.credential_id,
