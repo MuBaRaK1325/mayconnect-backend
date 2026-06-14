@@ -1566,47 +1566,33 @@ app.post("/api/login", loginLimiter, async (req, res) => {
   }
 });
 
-/* ================= USER INFO - WITH TIER CHECK ================= */
+/* ================= USER INFO - WITH TIER CHECK + WEBAUTHN CHALLENGE ================= */
 app.get("/api/me", auth, async (req, res) => {
   try {
-    let user = await pool.query("SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet, account_number, bank_name, account_name FROM users WHERE id = $1", [req.user.id]);
-    if (!user.rows.length) return res.status(404).json({ message: "User not found" });
+    let user = await getUser(req.user.id);
+    if (!user) return res.status(404).json({ message: "User not found" });
 
     // Auto-create DVA if missing for PaymentPoint companies
     const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
-    if (!user.rows[0].account_number && paymentpointCompanies.includes(user.rows[0].company.toLowerCase()) && user.rows[0].phone) {
+    if (!user.account_number && paymentpointCompanies.includes(user.company?.toLowerCase()) && user.phone) {
       try {
-        const ppResponse = await createPaymentPointAccount(user.rows[0]);
+        const ppResponse = await createPaymentPointAccount(user);
         if (ppResponse.status === "success" && ppResponse.bankAccounts?.length > 0) {
           const account = ppResponse.bankAccounts[0];
           await pool.query(
-            `UPDATE users SET
-              account_number = $1,
-              account_name = $2,
-              bank_name = $3,
-              paymentmethod = 'paymentpoint',
-              customer_id = $4
-             WHERE id = $5`,
-            [
-              account.accountNumber,
-              account.accountName,
-              account.bankName,
-              ppResponse.customer?.customer_id || null,
-              user.rows[0].id
-            ]
+            `UPDATE users SET account_number=$1, account_name=$2, bank_name=$3, paymentmethod='paymentpoint', customer_id=$4 WHERE id=$5`,
+            [account.accountNumber, account.accountName, account.bankName, ppResponse.customer?.customer_id || null, user.id]
           );
-          user = await pool.query("SELECT id, username, email, wallet_balance, company, phone, is_admin, admin_wallet, account_number, bank_name, account_name FROM users WHERE id = $1", [req.user.id]);
+          user = await getUser(req.user.id); // Refresh data
         }
       } catch (e) {
         console.log("Account creation failed on /me:", e.message);
       }
     }
 
-    const [topCheck] = await Promise.all([
-      pool.query("SELECT 1 FROM top_users WHERE id = $1", [req.user.id])
-    ]);
+    const [topCheck] = await Promise.all([pool.query("SELECT 1 FROM top_users WHERE id=$1", [req.user.id])]);
 
-    const userData = user.rows[0];
+    const userData = {...user };
     userData.is_top_user = topCheck.rows.length > 0;
     userData.user_tier = userData.is_top_user? 'top' : 'default';
 
@@ -1614,6 +1600,7 @@ app.get("/api/me", auth, async (req, res) => {
     delete userData.pin;
     res.json(userData);
   } catch (err) {
+    console.error('/api/me error:', err);
     res.status(500).json({ message: "Failed to fetch user" });
   }
 });
