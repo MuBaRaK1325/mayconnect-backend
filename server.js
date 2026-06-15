@@ -980,12 +980,29 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
-    console.log('=== LOGIN START === Origin:', req.get('origin'), 'Host:', req.get('host'), 'RP_ID:', RP_ID);
+    const userId = req.user?.id? Number(req.user.id) : null;
+    console.log('=== LOGIN START === Origin:', req.get('origin'), 'Host:', req.get('host'), 'UserID:', userId, 'RP_ID:', RP_ID);
+
+    // Nemo duk passkey na user idan an login - WANNAN SHINE ALLOWCREDENTIALS
+    let allowCredentials = [];
+    if (userId) {
+      const credsRes = await pool.query(
+        'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
+        [userId, RP_ID]
+      );
+      allowCredentials = credsRes.rows.map(r => ({
+        id: r.credential_id,
+        type: 'public-key',
+        transports: ['internal']
+      }));
+      console.log('AllowCredentials found:', allowCredentials.length);
+    }
 
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       userVerification: 'discouraged',
-      timeout: 60000
+      timeout: 60000,
+      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined
     });
 
     await pool.query('INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')', [options.challenge]);
