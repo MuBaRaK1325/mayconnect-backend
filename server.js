@@ -917,88 +917,36 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   }
 });
 
-app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
-  const userId = Number(req.user?.id || 0);
-  if (!userId) return res.status(401).json({ verified: false, error: 'Unauthorized' });
-
-  console.log('=== REGISTER FINISH === UserID:', userId);
-
-  try {
-    const userRes = await pool.query('SELECT webauthn_challenge FROM users WHERE id=$1', [userId]);
-    const challenge = userRes.rows[0]?.webauthn_challenge;
-    if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired' });
-
-    const verification = await verifyRegistrationResponse({
-      response: req.body,
-      expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
-      requireUserVerification: false
-    });
-
-    if (!verification.verified) {
-      return res.status(400).json({ verified: false, error: 'Backend verification failed' });
-    }
-
-    // GYARA NAN: Fallback idan registrationInfo undefined ne
-    let credId, pubKey, counter = 0;
-
-    if (verification.registrationInfo?.credential?.id && verification.registrationInfo?.credential?.publicKey) {
-      credId = Buffer.from(verification.registrationInfo.credential.id).toString('base64url');
-      pubKey = Buffer.from(verification.registrationInfo.credential.publicKey).toString('base64url');
-      counter = verification.registrationInfo.credential.counter || 0;
-      console.log('Using registrationInfo from SimpleWebAuthn');
-    } else {
-      // Fallback: karba daga browser response kai tsaye
-      const body = req.body;
-      credId = body.id || body.rawId;
-
-      // pubKey daga attestationObject
-      const attObj = body.response?.attestationObject;
-      if (!credId ||!attObj) {
-        return res.status(400).json({ verified: false, error: 'No credential data from browser' });
-      }
-
-      // Convert id to base64url
-      if (typeof credId === 'string') {
-        credId = Buffer.from(credId, 'base64url').toString('base64url');
-      }
-
-      // pubKey shine attestationObject don ajiya
-      pubKey = Buffer.from(attObj, 'base64').toString('base64url');
-      console.log('Using fallback from req.body');
-    }
-
-    console.log('CredID saved:', credId.substring(0, 20) + '...');
-
-    await pool.query(
-      `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
-      [userId, credId, pubKey, counter, RP_ID, 'mayconnect']
-    );
-
-    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
-    console.log('SUCCESS: Discoverable credential saved for user', userId);
-    return res.json({ verified: true, message: 'Biometric registered successfully' });
-
-  } catch (e) {
-    console.error('Register finish error:', e.message, e.stack);
-    return res.status(400).json({ verified: false, error: e.message || 'Registration failed' });
-  }
-});
-
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     console.log('=== LOGIN START === Origin:', req.get('origin'), 'RP_ID:', RP_ID);
 
+    // GYARA: Nemo duk credentials na duk users saboda login page ba ta san user ba
+    const credsRes = await pool.query(
+      'SELECT credential_id FROM webauthn_credentials WHERE rp_id=$1',
+      [RP_ID]
+    );
+
+    // GYARA: Wannan shine browser zai amfani don nuna popup
+    const allowCredentials = credsRes.rows.map(r => ({
+      id: r.credential_id,
+      type: 'public-key',
+      transports: ['internal', 'hybrid'] // internal=fingerprint, hybrid=phone
+    }));
+
+    console.log('AllowCredentials found:', allowCredentials.length, 'creds');
+
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
-      userVerification: 'discouraged',
-      timeout: 60000
+      userVerification: 'preferred', // GYARA: discouraged → preferred don Android
+      timeout: 60000,
+      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined // <-- WANNAN SHINE KEY
     });
 
-    await pool.query('INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')', [options.challenge]);
+    await pool.query(
+      'INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')',
+      [options.challenge]
+    );
     console.log('Login challenge saved:', options.challenge.substring(0, 20) + '...');
     return res.json(options);
   } catch (e) {
@@ -1010,31 +958,33 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
     console.log('=== LOGIN FINISH START ===');
-    console.log('Credential ID from browser:', req.body.id);
-
     const { id: credentialId } = req.body;
-    if (!credentialId) {
-      return res.status(400).json({ error: 'No credential ID' });
-    }
+    if (!credentialId) return res.status(400).json({ error: 'No credential ID' });
 
-    const challengeRes = await pool.query('SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1');
-    if (!challengeRes.rows[0]) {
-      return res.status(400).json({ error: 'Challenge expired' });
-    }
-    const challenge = challengeRes.rows[0].challenge;
-
-    const credRes = await pool.query('SELECT user_id, credential_id, public_key, counter, rp_id FROM webauthn_credentials WHERE credential_id=$1', [credentialId]);
-    if (!credRes.rows.length) {
-      return res.status(400).json({ error: 'Passkey not found' });
-    }
+    // 1. Nemo credential don sanin user_id
+    const credRes = await pool.query(
+      'SELECT user_id, credential_id, public_key, counter, rp_id FROM webauthn_credentials WHERE credential_id=$1',
+      [credentialId]
+    );
+    if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not found' });
 
     const cred = credRes.rows[0];
-    const userRes = await pool.query('SELECT id, username FROM users WHERE id=$1', [cred.user_id]);
-    const user = userRes.rows[0];
-    if (!user) {
-      return res.status(400).json({ error: 'User not found' });
-    }
 
+    // 2. Nemo challenge na ƙarshe
+    const challengeRes = await pool.query(
+      'SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1'
+    );
+    if (!challengeRes.rows[0]) return res.status(400).json({ error: 'Challenge expired' });
+
+    const challenge = challengeRes.rows[0].challenge;
+    await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
+
+    // 3. Nemo user
+    const userRes = await pool.query('SELECT id, username, email FROM users WHERE id=$1', [cred.user_id]);
+    const user = userRes.rows[0];
+    if (!user) return res.status(400).json({ error: 'User not found' });
+
+    // 4. Verify
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: challenge,
@@ -1043,16 +993,18 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       credential: {
         id: cred.credential_id,
         publicKey: Buffer.from(cred.public_key, 'base64url'),
-        counter: cred.counter
+        counter: Number(cred.counter || 0) // GYARA: Number type
       },
-      requireUserVerification: false
+      requireUserVerification: true // GYARA: false → true
     });
 
     if (verification.verified) {
-      await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2', [verification.authenticationInfo.newCounter, cred.credential_id]);
-      await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
+      await pool.query(
+        'UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2',
+        [verification.authenticationInfo.newCounter, cred.credential_id]
+      );
       const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
-      console.log('SUCCESS: Passwordless login for user', user.id);
+      console.log('SUCCESS: Login verified for user', user.id);
       return res.json({ verified: true, token, user: { id: user.id, username: user.username } });
     } else {
       return res.status(400).json({ verified: false, error: 'Auth failed' });
