@@ -273,10 +273,10 @@ const ADMIN_EMAILS = [
   "Sadeeqtukur765@gmail.com"
 ];
 
-// HARCODE DAIDAI DA FRONTEND URL DA KAKE SHIGA YANZU
-const RP_ID = 'dataplug.com.ng'; // BA www ba
+/ // HARCODE 
+const RP_ID = 'www.mayconnectdataplug.com.ng';
 const RP_NAME = 'MAYCONNECT DATA PLUG';
-const EXPECTED_ORIGIN = 'https://dataplug.com.ng'; // <- Wannan shinen
+const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng'; // <- Wannan shine
 // PAYMENTPOINT CONFIG
 const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE || "https://api.paymentpoint.co";
 
