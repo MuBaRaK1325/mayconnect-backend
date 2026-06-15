@@ -980,22 +980,35 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
+    const { username } = req.body; // KARBA USERNAME/EMAIL DAGA FRONTEND
     const userId = req.user?.id? Number(req.user.id) : null;
-    console.log('=== LOGIN START === Origin:', req.get('origin'), 'Host:', req.get('host'), 'UserID:', userId, 'RP_ID:', RP_ID);
 
-    // Nemo duk passkey na user idan an login - WANNAN SHINE ALLOWCREDENTIALS
+    console.log('=== LOGIN START === Origin:', req.get('origin'), 'Username:', username, 'UserID:', userId, 'RP_ID:', RP_ID);
+
     let allowCredentials = [];
-    if (userId) {
+    let targetUserId = userId;
+
+    // Idan ba a login ba, nemo userId daga username/email
+    if (!targetUserId && username) {
+      const userRes = await pool.query('SELECT id FROM users WHERE email=$1 OR username=$1', [username]);
+      targetUserId = userRes.rows[0]?.id;
+      console.log('Found userId from username:', targetUserId);
+    }
+
+    // Nemo duk passkey na user
+    if (targetUserId) {
       const credsRes = await pool.query(
         'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
-        [userId, RP_ID]
+        [targetUserId, RP_ID]
       );
       allowCredentials = credsRes.rows.map(r => ({
         id: r.credential_id,
         type: 'public-key',
-        transports: ['internal']
+        transports: ['internal', 'hybrid', 'usb', 'nfc', 'ble']
       }));
       console.log('AllowCredentials found:', allowCredentials.length);
+    } else {
+      console.log('No userId found, allowCredentials will be empty');
     }
 
     const options = await generateAuthenticationOptions({
@@ -1018,11 +1031,9 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
     console.log('=== LOGIN FINISH START ===');
     console.log('Request Origin:', req.get('origin'));
-    console.log('Request Host:', req.get('host'));
     console.log('RP_ID Config:', RP_ID);
     console.log('EXPECTED_ORIGIN Config:', EXPECTED_ORIGIN);
     console.log('Credential ID from browser:', req.body.id);
-    console.log('Body keys:', Object.keys(req.body));
 
     const { id: credentialId } = req.body;
     if (!credentialId) {
@@ -1047,9 +1058,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     }
 
     const cred = credRes.rows[0];
-    console.log('DB Credential rp_id:', cred.rp_id);
-    console.log('Expected rp_id:', RP_ID);
-    console.log('RP_ID Match:', cred.rp_id === RP_ID);
+    console.log('DB Credential rp_id:', cred.rp_id, 'Match:', cred.rp_id === RP_ID);
     console.log('User ID:', cred.user_id);
 
     const userRes = await pool.query('SELECT id, username FROM users WHERE id=$1', [cred.user_id]);
@@ -1091,7 +1100,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   }
 });
 
-/* ================= CHECK-ENABLED - YA DAIDAI DA FRONTEND ================= */
+/* ================= CHECK-ENABLED ================= */
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
     const userId = Number(req.user?.id || 0);
