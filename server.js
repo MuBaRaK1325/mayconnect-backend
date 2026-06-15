@@ -871,7 +871,7 @@ function adminOnly(req, res, next) {
 function getCompanyConfig() {
   return {
     name: RP_NAME,
-    icon: 'https://mayconnectdataplug.com.ng/images/logo.png',
+    icon: 'https://dataplug.com.ng/images/logo.png', // Gyara logo URL ma
     short: 'mayconnect'
   };
 }
@@ -887,7 +887,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email);
+    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID);
 
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
 
