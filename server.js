@@ -866,7 +866,7 @@ function adminOnly(req, res, next) {
 
 
 
-/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
+/* ================= WEBAUTHN - BIOMETRIC PASSKEYS - PASSWORDLESS 100% ================= */
 
 function getCompanyConfig() {
   return {
@@ -887,7 +887,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID, 'Origin:', req.get('origin'));
+    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID);
 
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
 
@@ -901,8 +901,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
         userVerification: 'discouraged',
-        residentKey: 'preferred',
-        requireResidentKey: false
+        residentKey: 'required', // <-- WAJIBI DON PASSWORDLESS
+        requireResidentKey: true // <-- WAJIBI
       },
       pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
       timeout: 60000
@@ -921,15 +921,12 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const userId = Number(req.user?.id || 0);
   if (!userId) return res.status(401).json({ verified: false, error: 'Unauthorized' });
 
-  console.log('=== REGISTER FINISH === UserID:', userId, 'Origin:', req.get('origin'));
+  console.log('=== REGISTER FINISH === UserID:', userId);
 
   try {
     const userRes = await pool.query('SELECT webauthn_challenge FROM users WHERE id=$1', [userId]);
     const challenge = userRes.rows[0]?.webauthn_challenge;
     if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired' });
-
-    console.log('Expected Origin:', EXPECTED_ORIGIN, 'Expected RPID:', RP_ID);
-    console.log('Challenge length:', challenge.length);
 
     const verification = await verifyRegistrationResponse({
       response: req.body,
@@ -939,27 +936,13 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       requireUserVerification: false
     });
 
-    console.log('Verification result:', verification.verified);
     if (!verification.verified) {
       return res.status(400).json({ verified: false, error: 'Backend verification failed' });
     }
 
-    let credId, pubKey, counter;
-    if (verification.registrationInfo?.credential) {
-      credId = Buffer.from(verification.registrationInfo.credential.id).toString('base64url');
-      pubKey = Buffer.from(verification.registrationInfo.credential.publicKey).toString('base64url');
-      counter = verification.registrationInfo.credential.counter || 0;
-    } else {
-      const body = req.body;
-      credId = body.id || body.rawId;
-      pubKey = body.response?.attestationObject || '';
-      counter = 0;
-      if (!credId ||!pubKey) {
-        return res.status(400).json({ verified: false, error: 'No credential info from browser' });
-      }
-      if (typeof credId === 'string') credId = Buffer.from(credId, 'base64url').toString('base64url');
-      if (typeof pubKey === 'string') pubKey = Buffer.from(pubKey, 'base64').toString('base64url');
-    }
+    const credId = Buffer.from(verification.registrationInfo.credential.id).toString('base64url');
+    const pubKey = Buffer.from(verification.registrationInfo.credential.publicKey).toString('base64url');
+    const counter = verification.registrationInfo.credential.counter || 0;
 
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
@@ -969,7 +952,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
-    console.log('SUCCESS: Credential saved for user', userId, 'CredID:', credId.substring(0, 20) + '...');
+    console.log('SUCCESS: Discoverable credential saved for user', userId);
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
   } catch (e) {
@@ -980,42 +963,14 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
-    const { username } = req.body; // KARBA USERNAME/EMAIL DAGA FRONTEND
-    const userId = req.user?.id? Number(req.user.id) : null;
+    console.log('=== LOGIN START === Origin:', req.get('origin'), 'RP_ID:', RP_ID);
 
-    console.log('=== LOGIN START === Origin:', req.get('origin'), 'Username:', username, 'UserID:', userId, 'RP_ID:', RP_ID);
-
-    let allowCredentials = [];
-    let targetUserId = userId;
-
-    // Idan ba a login ba, nemo userId daga username/email
-    if (!targetUserId && username) {
-      const userRes = await pool.query('SELECT id FROM users WHERE email=$1 OR username=$1', [username]);
-      targetUserId = userRes.rows[0]?.id;
-      console.log('Found userId from username:', targetUserId);
-    }
-
-    // Nemo duk passkey na user
-    if (targetUserId) {
-      const credsRes = await pool.query(
-        'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
-        [targetUserId, RP_ID]
-      );
-      allowCredentials = credsRes.rows.map(r => ({
-        id: r.credential_id,
-        type: 'public-key',
-        transports: ['internal', 'hybrid', 'usb', 'nfc', 'ble']
-      }));
-      console.log('AllowCredentials found:', allowCredentials.length);
-    } else {
-      console.log('No userId found, allowCredentials will be empty');
-    }
-
+    // BA TURA allowCredentials BA - don browser ya nuna duk passkey
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       userVerification: 'discouraged',
-      timeout: 60000,
-      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined
+      timeout: 60000
+      // allowCredentials: undefined <-- BAR KOMAI BABU
     });
 
     await pool.query('INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')', [options.challenge]);
@@ -1030,45 +985,31 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
     console.log('=== LOGIN FINISH START ===');
-    console.log('Request Origin:', req.get('origin'));
-    console.log('RP_ID Config:', RP_ID);
-    console.log('EXPECTED_ORIGIN Config:', EXPECTED_ORIGIN);
     console.log('Credential ID from browser:', req.body.id);
 
     const { id: credentialId } = req.body;
     if (!credentialId) {
-      console.log('ERROR: No credential ID in request');
       return res.status(400).json({ error: 'No credential ID' });
     }
 
     const challengeRes = await pool.query('SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1');
     if (!challengeRes.rows[0]) {
-      console.log('ERROR: No valid challenge found');
       return res.status(400).json({ error: 'Challenge expired' });
     }
     const challenge = challengeRes.rows[0].challenge;
-    console.log('Challenge found, length:', challenge.length);
 
     const credRes = await pool.query('SELECT user_id, credential_id, public_key, counter, rp_id FROM webauthn_credentials WHERE credential_id=$1', [credentialId]);
-    console.log('Credentials found in DB:', credRes.rows.length);
-
     if (!credRes.rows.length) {
-      console.log('ERROR: Passkey not found in DB for credentialId:', credentialId.substring(0, 20) + '...');
       return res.status(400).json({ error: 'Passkey not found' });
     }
 
     const cred = credRes.rows[0];
-    console.log('DB Credential rp_id:', cred.rp_id, 'Match:', cred.rp_id === RP_ID);
-    console.log('User ID:', cred.user_id);
-
     const userRes = await pool.query('SELECT id, username FROM users WHERE id=$1', [cred.user_id]);
     const user = userRes.rows[0];
     if (!user) {
-      console.log('ERROR: User not found:', cred.user_id);
       return res.status(400).json({ error: 'User not found' });
     }
 
-    console.log('Calling verifyAuthenticationResponse...');
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: challenge,
@@ -1082,16 +1023,13 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       requireUserVerification: false
     });
 
-    console.log('Verification result:', verification.verified);
-
     if (verification.verified) {
       await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2', [verification.authenticationInfo.newCounter, cred.credential_id]);
       await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
       const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
-      console.log('SUCCESS: Login verified for user', user.id);
+      console.log('SUCCESS: Passwordless login for user', user.id);
       return res.json({ verified: true, token, user: { id: user.id, username: user.username } });
     } else {
-      console.log('ERROR: Verification failed');
       return res.status(400).json({ verified: false, error: 'Auth failed' });
     }
   } catch (e) {
@@ -1100,31 +1038,23 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   }
 });
 
-/* ================= CHECK-ENABLED ================= */
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
     const userId = Number(req.user?.id || 0);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    console.log('=== CHECK-ENABLED === UserID:', userId, 'RP_ID:', RP_ID);
-
     const result = await pool.query(
-      'SELECT credential_id, rp_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1',
+      'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1',
       [userId, RP_ID]
     );
 
-    console.log('Check result rows:', result.rows.length, 'RP_ID in DB:', result.rows[0]?.rp_id);
     res.json({ enabled: result.rows.length > 0 });
   } catch (e) {
-    console.error('Check enabled error:', e.message, e.stack);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-app.get('/api/ping', (req, res) => {
-  console.log('PING HIT');
-  res.send('pong');
-});
+app.get('/api/ping', (req, res) => res.send('pong'));
 
 /* ================= FUND INIT ================= */
 app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
