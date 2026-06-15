@@ -889,7 +889,6 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const company = getCompanyConfig();
     console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID);
 
-    // Delete duk tsoffin credentials na wannan user
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1', [userId]);
 
     const options = await generateRegistrationOptions({
@@ -901,7 +900,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       attestationType: 'none',
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
-        userVerification: 'preferred', // Android yana buƙata
+        userVerification: 'preferred',
         residentKey: 'required',
         requireResidentKey: true
       },
@@ -909,10 +908,10 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       timeout: 60000
     });
 
-    // GYARA: Double quotes don guje wa 'unexpected token'
+    // GYARA: Amfani da backticks + parameterized interval don guje wa quote issue
     await pool.query(
-      "INSERT INTO webauthn_challenges(user_id, challenge, expires_at) VALUES($1,$2,NOW() + INTERVAL '5 minutes')",
-      [userId, options.challenge]
+      `INSERT INTO webauthn_challenges(user_id, challenge, expires_at) VALUES($1, $2, NOW() + $3::interval)`,
+      [userId, options.challenge, '5 minutes']
     );
     console.log('Register challenge saved:', options.challenge.substring(0, 20) + '...');
     return res.json(options);
