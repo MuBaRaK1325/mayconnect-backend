@@ -901,8 +901,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
         userVerification: 'discouraged',
-        residentKey: 'required', // <-- WAJIBI DON PASSWORDLESS
-        requireResidentKey: true // <-- WAJIBI
+        residentKey: 'required',
+        requireResidentKey: true
       },
       pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
       timeout: 60000
@@ -940,9 +940,36 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       return res.status(400).json({ verified: false, error: 'Backend verification failed' });
     }
 
-    const credId = Buffer.from(verification.registrationInfo.credential.id).toString('base64url');
-    const pubKey = Buffer.from(verification.registrationInfo.credential.publicKey).toString('base64url');
-    const counter = verification.registrationInfo.credential.counter || 0;
+    // GYARA NAN: Fallback idan registrationInfo undefined ne
+    let credId, pubKey, counter = 0;
+
+    if (verification.registrationInfo?.credential?.id && verification.registrationInfo?.credential?.publicKey) {
+      credId = Buffer.from(verification.registrationInfo.credential.id).toString('base64url');
+      pubKey = Buffer.from(verification.registrationInfo.credential.publicKey).toString('base64url');
+      counter = verification.registrationInfo.credential.counter || 0;
+      console.log('Using registrationInfo from SimpleWebAuthn');
+    } else {
+      // Fallback: karba daga browser response kai tsaye
+      const body = req.body;
+      credId = body.id || body.rawId;
+
+      // pubKey daga attestationObject
+      const attObj = body.response?.attestationObject;
+      if (!credId ||!attObj) {
+        return res.status(400).json({ verified: false, error: 'No credential data from browser' });
+      }
+
+      // Convert id to base64url
+      if (typeof credId === 'string') {
+        credId = Buffer.from(credId, 'base64url').toString('base64url');
+      }
+
+      // pubKey shine attestationObject don ajiya
+      pubKey = Buffer.from(attObj, 'base64').toString('base64url');
+      console.log('Using fallback from req.body');
+    }
+
+    console.log('CredID saved:', credId.substring(0, 20) + '...');
 
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
@@ -965,12 +992,10 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     console.log('=== LOGIN START === Origin:', req.get('origin'), 'RP_ID:', RP_ID);
 
-    // BA TURA allowCredentials BA - don browser ya nuna duk passkey
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       userVerification: 'discouraged',
       timeout: 60000
-      // allowCredentials: undefined <-- BAR KOMAI BABU
     });
 
     await pool.query('INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')', [options.challenge]);
