@@ -887,9 +887,9 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID);
+    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email);
 
-    await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1', [userId]);
+    await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
@@ -900,23 +900,18 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       attestationType: 'none',
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
-        userVerification: 'preferred',
-        residentKey: 'required',
-        requireResidentKey: true
+        userVerification: 'discouraged',
+        residentKey: 'preferred',
+        requireResidentKey: false
       },
       pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
       timeout: 60000
     });
 
-    // GYARA: Amfani da backticks + parameterized interval don guje wa quote issue
-    await pool.query(
-      `INSERT INTO webauthn_challenges(user_id, challenge, expires_at) VALUES($1, $2, NOW() + $3::interval)`,
-      [userId, options.challenge, '5 minutes']
-    );
-    console.log('Register challenge saved:', options.challenge.substring(0, 20) + '...');
+    await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, userId]);
     return res.json(options);
   } catch (e) {
-    console.error('Register start error:', e.message, e.stack);
+    console.error('Register start error:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
