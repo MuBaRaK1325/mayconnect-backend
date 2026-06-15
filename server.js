@@ -273,7 +273,7 @@ const ADMIN_EMAILS = [
   "Sadeeqtukur765@gmail.com"
 ];
 
-/ // HARCODE 
+// HARCODE DAIDAI DA FRONTEND URL
 const RP_ID = 'www.mayconnectdataplug.com.ng';
 const RP_NAME = 'MAYCONNECT DATA PLUG';
 const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng'; // <- Wannan shine
