@@ -871,7 +871,7 @@ function adminOnly(req, res, next) {
 function getCompanyConfig() {
   return {
     name: RP_NAME,
-    icon: 'https://dataplug.com.ng/images/logo.png', // Gyara logo URL ma
+    icon: 'https://www.mayconnectdataplug.com.ng/images/logo.png',
     short: 'mayconnect'
   };
 }
@@ -1053,30 +1053,6 @@ app.get('/api/ping', (req, res) => {
   console.log('PING HIT');
   res.send('pong');
 });
-
-/* ================= AUTH ================= */
-function auth(req, res, next) {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader ||!authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ message: "Unauthorized" });
-    }
-
-    const token = authHeader.split(" ")[1];
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
-    next();
-  } catch (e) {
-    console.error("AUTH ERROR:", e.message);
-    res.status(401).json({ message: "Unauthorized" });
-  }
-}
-
-function adminOnly(req, res, next) {
-  if (req.user.role!== 'admin') {
-    return res.status(403).json({ message: "Forbidden" });
-  }
-  next();
-}
 
 /* ================= FUND INIT ================= */
 app.post("/api/fund/init", auth, fundInitLimiter, async (req, res) => {
