@@ -887,7 +887,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const userID = new TextEncoder().encode(userId.toString());
     const company = getCompanyConfig();
-    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID);
+    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID, 'Origin:', req.get('origin'));
 
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
 
@@ -909,9 +909,10 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     });
 
     await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, userId]);
+    console.log('Register challenge saved:', options.challenge.substring(0, 20) + '...');
     return res.json(options);
   } catch (e) {
-    console.error('Register start error:', e.message);
+    console.error('Register start error:', e.message, e.stack);
     return res.status(500).json({ error: e.message });
   }
 });
@@ -920,12 +921,15 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const userId = Number(req.user?.id || 0);
   if (!userId) return res.status(401).json({ verified: false, error: 'Unauthorized' });
 
-  console.log('=== REGISTER FINISH === UserID:', userId);
+  console.log('=== REGISTER FINISH === UserID:', userId, 'Origin:', req.get('origin'));
 
   try {
     const userRes = await pool.query('SELECT webauthn_challenge FROM users WHERE id=$1', [userId]);
     const challenge = userRes.rows[0]?.webauthn_challenge;
     if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired' });
+
+    console.log('Expected Origin:', EXPECTED_ORIGIN, 'Expected RPID:', RP_ID);
+    console.log('Challenge length:', challenge.length);
 
     const verification = await verifyRegistrationResponse({
       response: req.body,
@@ -965,45 +969,80 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
-    console.log('SUCCESS: Credential saved for user', userId);
+    console.log('SUCCESS: Credential saved for user', userId, 'CredID:', credId.substring(0, 20) + '...');
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
   } catch (e) {
-    console.error('Register finish error:', e.message);
+    console.error('Register finish error:', e.message, e.stack);
     return res.status(400).json({ verified: false, error: e.message || 'Registration failed' });
   }
 });
 
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
+    console.log('=== LOGIN START === Origin:', req.get('origin'), 'Host:', req.get('host'), 'RP_ID:', RP_ID);
+
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       userVerification: 'discouraged',
       timeout: 60000
     });
+
     await pool.query('INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')', [options.challenge]);
+    console.log('Login challenge saved:', options.challenge.substring(0, 20) + '...');
     return res.json(options);
   } catch (e) {
-    console.error('Login start error:', e.message);
+    console.error('Login start error:', e.message, e.stack);
     return res.status(500).json({ error: 'Internal error' });
   }
 });
 
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
-    const { id: credentialId } = req.body;
-    const challengeRes = await pool.query('SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1');
-    if (!challengeRes.rows[0]) return res.status(400).json({ error: 'Challenge expired' });
-    const challenge = challengeRes.rows[0].challenge;
+    console.log('=== LOGIN FINISH START ===');
+    console.log('Request Origin:', req.get('origin'));
+    console.log('Request Host:', req.get('host'));
+    console.log('RP_ID Config:', RP_ID);
+    console.log('EXPECTED_ORIGIN Config:', EXPECTED_ORIGIN);
+    console.log('Credential ID from browser:', req.body.id);
+    console.log('Body keys:', Object.keys(req.body));
 
-    const credRes = await pool.query('SELECT user_id, credential_id, public_key, counter FROM webauthn_credentials WHERE credential_id=$1 AND rp_id=$2', [credentialId, RP_ID]);
-    if (!credRes.rows.length) return res.status(400).json({ error: 'Passkey not found' });
+    const { id: credentialId } = req.body;
+    if (!credentialId) {
+      console.log('ERROR: No credential ID in request');
+      return res.status(400).json({ error: 'No credential ID' });
+    }
+
+    const challengeRes = await pool.query('SELECT challenge FROM webauthn_challenges WHERE expires_at > NOW() ORDER BY created_at DESC LIMIT 1');
+    if (!challengeRes.rows[0]) {
+      console.log('ERROR: No valid challenge found');
+      return res.status(400).json({ error: 'Challenge expired' });
+    }
+    const challenge = challengeRes.rows[0].challenge;
+    console.log('Challenge found, length:', challenge.length);
+
+    const credRes = await pool.query('SELECT user_id, credential_id, public_key, counter, rp_id FROM webauthn_credentials WHERE credential_id=$1', [credentialId]);
+    console.log('Credentials found in DB:', credRes.rows.length);
+
+    if (!credRes.rows.length) {
+      console.log('ERROR: Passkey not found in DB for credentialId:', credentialId.substring(0, 20) + '...');
+      return res.status(400).json({ error: 'Passkey not found' });
+    }
 
     const cred = credRes.rows[0];
+    console.log('DB Credential rp_id:', cred.rp_id);
+    console.log('Expected rp_id:', RP_ID);
+    console.log('RP_ID Match:', cred.rp_id === RP_ID);
+    console.log('User ID:', cred.user_id);
+
     const userRes = await pool.query('SELECT id, username FROM users WHERE id=$1', [cred.user_id]);
     const user = userRes.rows[0];
-    if (!user) return res.status(400).json({ error: 'User not found' });
+    if (!user) {
+      console.log('ERROR: User not found:', cred.user_id);
+      return res.status(400).json({ error: 'User not found' });
+    }
 
+    console.log('Calling verifyAuthenticationResponse...');
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: challenge,
@@ -1017,17 +1056,21 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       requireUserVerification: false
     });
 
+    console.log('Verification result:', verification.verified);
+
     if (verification.verified) {
       await pool.query('UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2', [verification.authenticationInfo.newCounter, cred.credential_id]);
       await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
       const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '7d' });
+      console.log('SUCCESS: Login verified for user', user.id);
       return res.json({ verified: true, token, user: { id: user.id, username: user.username } });
     } else {
+      console.log('ERROR: Verification failed');
       return res.status(400).json({ verified: false, error: 'Auth failed' });
     }
   } catch (e) {
-    console.error('Login finish error:', e.message);
-    return res.status(400).json({ error: 'Internal error' });
+    console.error('Login finish error:', e.message, e.stack);
+    return res.status(400).json({ error: 'Internal error: ' + e.message });
   }
 });
 
@@ -1037,14 +1080,17 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
     const userId = Number(req.user?.id || 0);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
+    console.log('=== CHECK-ENABLED === UserID:', userId, 'RP_ID:', RP_ID);
+
     const result = await pool.query(
-      'SELECT 1 FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1',
+      'SELECT credential_id, rp_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1',
       [userId, RP_ID]
     );
 
+    console.log('Check result rows:', result.rows.length, 'RP_ID in DB:', result.rows[0]?.rp_id);
     res.json({ enabled: result.rows.length > 0 });
   } catch (e) {
-    console.error('Check enabled error:', e.message);
+    console.error('Check enabled error:', e.message, e.stack);
     res.status(500).json({ error: 'Server error' });
   }
 });
