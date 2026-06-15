@@ -982,9 +982,9 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       [RP_ID]
     );
 
-    // Convert base64url → Uint8Array don browser
+    // GYARA: Tura base64url string kawai, kada ka convert
     const allowCredentials = credsRes.rows.map(r => ({
-      id: Uint8Array.from(Buffer.from(r.credential_id, 'base64url')),
+      id: r.credential_id, // <-- string kawai, ba Uint8Array ba
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
@@ -998,10 +998,9 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       allowCredentials: allowCredentials.length > 0? allowCredentials : undefined
     });
 
-    // Login challenge ba ta da user_id saboda ba mu san user ba tukuna
     await pool.query(
-      "INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL '5 minutes')",
-      [options.challenge]
+      `INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + $2::interval)`,
+      [options.challenge, '5 minutes']
     );
     console.log('Login challenge saved:', options.challenge.substring(0, 20) + '...');
     return res.json(options);
