@@ -864,6 +864,8 @@ function adminOnly(req, res, next) {
   next();
 }
 
+
+
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - FINAL 100% ================= */
 
 function getCompanyConfig() {
@@ -938,27 +940,19 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       return res.status(400).json({ verified: false, error: 'Backend verification failed' });
     }
 
-    // FALLBACK KARSHE: Idan registrationInfo babu, mu karɓi daga req.body
     let credId, pubKey, counter;
-
     if (verification.registrationInfo?.credential) {
       credId = Buffer.from(verification.registrationInfo.credential.id).toString('base64url');
       pubKey = Buffer.from(verification.registrationInfo.credential.publicKey).toString('base64url');
       counter = verification.registrationInfo.credential.counter || 0;
     } else {
-      // Version na tsoho - mu cire daga body
       const body = req.body;
       credId = body.id || body.rawId;
-      // attestationObject yana ɗauke da publicKey
       pubKey = body.response?.attestationObject || '';
       counter = 0;
-
       if (!credId ||!pubKey) {
-        console.error('Body keys:', Object.keys(body));
         return res.status(400).json({ verified: false, error: 'No credential info from browser' });
       }
-
-      // Convert to base64url idan string ne
       if (typeof credId === 'string') credId = Buffer.from(credId, 'base64url').toString('base64url');
       if (typeof pubKey === 'string') pubKey = Buffer.from(pubKey, 'base64').toString('base64url');
     }
@@ -971,7 +965,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
-
     console.log('SUCCESS: Credential saved for user', userId);
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
@@ -1038,9 +1031,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   }
 });
 
-
-
-/* ================= CHECK-ENABLED ================= */
+/* ================= CHECK-ENABLED - YA DAIDAI DA FRONTEND ================= */
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
     const userId = Number(req.user?.id || 0);
@@ -1048,7 +1039,7 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 
     const result = await pool.query(
       'SELECT 1 FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1',
-      [userId, CLEAN_RP_ID]
+      [userId, RP_ID]
     );
 
     res.json({ enabled: result.rows.length > 0 });
