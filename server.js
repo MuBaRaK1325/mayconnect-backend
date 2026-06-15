@@ -889,7 +889,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const company = getCompanyConfig();
     console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID);
 
-    await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2', [userId, RP_ID]);
+    // GYARA 1: Delete ALL old credentials for this user - ba tare da rp_id ba
+    await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1', [userId]);
 
     const options = await generateRegistrationOptions({
       rpName: company.name,
@@ -900,7 +901,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       attestationType: 'none',
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
-        userVerification: 'discouraged',
+        userVerification: 'preferred', // GYARA 2: discouraged → preferred don Android
         residentKey: 'required',
         requireResidentKey: true
       },
@@ -908,7 +909,11 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       timeout: 60000
     });
 
-    await pool.query('UPDATE users SET webauthn_challenge=$1 WHERE id=$2', [options.challenge, userId]);
+    // GYARA 3: Save challenge with user_id maimakon update users table
+    await pool.query(
+      'INSERT INTO webauthn_challenges(user_id, challenge, expires_at) VALUES($1,$2,NOW()+INTERVAL \'5 minutes\')',
+      [userId, options.challenge]
+    );
     console.log('Register challenge saved:', options.challenge.substring(0, 20) + '...');
     return res.json(options);
   } catch (e) {
@@ -927,9 +932,9 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       [RP_ID]
     );
 
-    // GYARA: Wannan shine browser zai amfani don nuna popup
+    // GYARA: Convert base64url string → Uint8Array don browser
     const allowCredentials = credsRes.rows.map(r => ({
-      id: r.credential_id,
+      id: Uint8Array.from(Buffer.from(r.credential_id, 'base64url')), // <-- WANNAN YA WARWARE ArrayBuffer error
       type: 'public-key',
       transports: ['internal', 'hybrid'] // internal=fingerprint, hybrid=phone
     }));
@@ -938,11 +943,12 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
-      userVerification: 'preferred', // GYARA: discouraged → preferred don Android
+      userVerification: 'preferred', // discouraged → preferred don Android
       timeout: 60000,
-      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined // <-- WANNAN SHINE KEY
+      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined // WANNAN SHINE KEY
     });
 
+    // GYARA: Save challenge ba tare da user_id ba saboda ba mu san user ba tukuna
     await pool.query(
       'INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')',
       [options.challenge]
