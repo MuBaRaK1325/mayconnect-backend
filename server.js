@@ -889,7 +889,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const company = getCompanyConfig();
     console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email, 'RP_ID:', RP_ID);
 
-    // GYARA 1: Delete ALL old credentials for this user - ba tare da rp_id ba
+    // Delete duk tsoffin credentials na wannan user
     await pool.query('DELETE FROM webauthn_credentials WHERE user_id=$1', [userId]);
 
     const options = await generateRegistrationOptions({
@@ -901,7 +901,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       attestationType: 'none',
       authenticatorSelection: {
         authenticatorAttachment: 'platform',
-        userVerification: 'preferred', // GYARA 2: discouraged → preferred don Android
+        userVerification: 'preferred', // Android yana buƙata
         residentKey: 'required',
         requireResidentKey: true
       },
@@ -909,9 +909,9 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       timeout: 60000
     });
 
-    // GYARA 3: Save challenge with user_id maimakon update users table
+    // GYARA: Double quotes don guje wa 'unexpected token'
     await pool.query(
-      'INSERT INTO webauthn_challenges(user_id, challenge, expires_at) VALUES($1,$2,NOW()+INTERVAL \'5 minutes\')',
+      "INSERT INTO webauthn_challenges(user_id, challenge, expires_at) VALUES($1,$2,NOW() + INTERVAL '5 minutes')",
       [userId, options.challenge]
     );
     console.log('Register challenge saved:', options.challenge.substring(0, 20) + '...');
@@ -926,31 +926,30 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     console.log('=== LOGIN START === Origin:', req.get('origin'), 'RP_ID:', RP_ID);
 
-    // GYARA: Nemo duk credentials na duk users saboda login page ba ta san user ba
     const credsRes = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE rp_id=$1',
       [RP_ID]
     );
 
-    // GYARA: Convert base64url string → Uint8Array don browser
+    // Convert base64url → Uint8Array don browser
     const allowCredentials = credsRes.rows.map(r => ({
-      id: Uint8Array.from(Buffer.from(r.credential_id, 'base64url')), // <-- WANNAN YA WARWARE ArrayBuffer error
+      id: Uint8Array.from(Buffer.from(r.credential_id, 'base64url')),
       type: 'public-key',
-      transports: ['internal', 'hybrid'] // internal=fingerprint, hybrid=phone
+      transports: ['internal', 'hybrid']
     }));
 
     console.log('AllowCredentials found:', allowCredentials.length, 'creds');
 
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
-      userVerification: 'preferred', // discouraged → preferred don Android
+      userVerification: 'preferred',
       timeout: 60000,
-      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined // WANNAN SHINE KEY
+      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined
     });
 
-    // GYARA: Save challenge ba tare da user_id ba saboda ba mu san user ba tukuna
+    // Login challenge ba ta da user_id saboda ba mu san user ba tukuna
     await pool.query(
-      'INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL \'5 minutes\')',
+      "INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + INTERVAL '5 minutes')",
       [options.challenge]
     );
     console.log('Login challenge saved:', options.challenge.substring(0, 20) + '...');
