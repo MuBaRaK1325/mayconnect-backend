@@ -982,14 +982,15 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       [RP_ID]
     );
 
-    // Convert credential_id daga base64url string -> Buffer don simplewebauthn
+    // GYARA: Tura base64url string kawai, kada ka juya shi Buffer
     const allowCredentials = credsRes.rows.map(r => ({
-      id: Buffer.from(r.credential_id, 'base64url'), // <-- Buffer anan
+      id: r.credential_id, // <-- string kawai, base64url
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
 
     console.log('AllowCredentials found:', allowCredentials.length, 'creds');
+    console.log('First cred id type:', typeof allowCredentials[0]?.id); // Dole ne string
 
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
@@ -1008,12 +1009,13 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       }))
     };
 
+    // Ajiye raw Buffer a DB don verification
     await pool.query(
       `INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + $2::interval)`,
-      [options.challenge, '5 minutes'] // Ajiye raw Buffer a DB don verification
+      [options.challenge, '5 minutes']
     );
     console.log('Login challenge saved:', options.challenge.toString('base64url').substring(0, 20) + '...');
-    return res.json(optionsForClient); // Aika encoded version
+    return res.json(optionsForClient);
   } catch (e) {
     console.error('Login start error:', e.message, e.stack);
     return res.status(500).json({ error: 'Internal error' });
