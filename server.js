@@ -982,9 +982,9 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       [RP_ID]
     );
 
-    // GYARA: Tura base64url string kawai, kada ka convert
+    // Convert credential_id daga base64url string -> Buffer don simplewebauthn
     const allowCredentials = credsRes.rows.map(r => ({
-      id: r.credential_id, // <-- string kawai, ba Uint8Array ba
+      id: Buffer.from(r.credential_id, 'base64url'), // <-- Buffer anan
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
@@ -995,15 +995,25 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       rpID: RP_ID,
       userVerification: 'preferred',
       timeout: 60000,
-      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined
+      allowCredentials: allowCredentials.length > 0 ? allowCredentials : undefined
     });
+
+    // GYARA: Convert challenge + credential IDs zuwa base64url string kafin aika zuwa frontend
+    const optionsForClient = {
+      ...options,
+      challenge: Buffer.from(options.challenge).toString('base64url'),
+      allowCredentials: options.allowCredentials?.map(c => ({
+        ...c,
+        id: Buffer.from(c.id).toString('base64url')
+      }))
+    };
 
     await pool.query(
       `INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + $2::interval)`,
-      [options.challenge, '5 minutes']
+      [options.challenge, '5 minutes'] // Ajiye raw Buffer a DB don verification
     );
-    console.log('Login challenge saved:', options.challenge.substring(0, 20) + '...');
-    return res.json(options);
+    console.log('Login challenge saved:', options.challenge.toString('base64url').substring(0, 20) + '...');
+    return res.json(optionsForClient); // Aika encoded version
   } catch (e) {
     console.error('Login start error:', e.message, e.stack);
     return res.status(500).json({ error: 'Internal error' });
