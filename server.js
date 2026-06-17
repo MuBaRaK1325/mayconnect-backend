@@ -987,6 +987,13 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
+    console.log(
+  'OPTIONS FOR CLIENT:',
+  JSON.stringify(options, null, 2)
+);
+
+// DON'T RE-ENCODE ANYTHING
+return res.json(options);
 
     console.log('AllowCredentials found:', allowCredentials.length);
 
@@ -1018,6 +1025,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     });
   }
 });
+
 
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
