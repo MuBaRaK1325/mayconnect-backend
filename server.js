@@ -975,50 +975,55 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
-    console.log('=== LOGIN START === Origin:', req.get('origin'), 'RP_ID:', RP_ID);
+    console.log(
+      '=== LOGIN START === Origin:',
+      req.get('origin'),
+      'RP_ID:',
+      RP_ID
+    );
 
     const credsRes = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE rp_id=$1',
       [RP_ID]
     );
 
-    // GYARA: Tura base64url string kawai, kada ka juya shi Buffer
     const allowCredentials = credsRes.rows.map(r => ({
-      id: r.credential_id, // <-- string kawai, base64url
+      id: r.credential_id, // base64url string from DB
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
 
-    console.log('AllowCredentials found:', allowCredentials.length, 'creds');
-    console.log('First cred id type:', typeof allowCredentials[0]?.id); // Dole ne string
+    console.log('AllowCredentials found:', allowCredentials.length);
+    console.log('First cred id type:', typeof allowCredentials[0]?.id);
 
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       userVerification: 'preferred',
       timeout: 60000,
-      allowCredentials: allowCredentials.length > 0 ? allowCredentials : undefined
+      allowCredentials:
+        allowCredentials.length > 0 ? allowCredentials : undefined
     });
 
-    // GYARA: Convert challenge + credential IDs zuwa base64url string kafin aika zuwa frontend
-    const optionsForClient = {
-      ...options,
-      challenge: Buffer.from(options.challenge).toString('base64url'),
-      allowCredentials: options.allowCredentials?.map(c => ({
-        ...c,
-        id: Buffer.from(c.id).toString('base64url')
-      }))
-    };
-
-    // Ajiye raw Buffer a DB don verification
+    // Store challenge exactly as returned
     await pool.query(
-      `INSERT INTO webauthn_challenges(challenge, expires_at) VALUES($1, NOW() + $2::interval)`,
-      [options.challenge, '5 minutes']
+      `INSERT INTO webauthn_challenges (challenge, expires_at)
+       VALUES ($1, NOW() + INTERVAL '5 minutes')`,
+      [options.challenge]
     );
-    console.log('Login challenge saved:', options.challenge.toString('base64url').substring(0, 20) + '...');
-    return res.json(optionsForClient);
+
+    console.log(
+      'Login challenge saved:',
+      options.challenge.substring(0, 20) + '...'
+    );
+
+    // Return options unchanged
+    return res.json(options);
+
   } catch (e) {
     console.error('Login start error:', e.message, e.stack);
-    return res.status(500).json({ error: 'Internal error' });
+    return res.status(500).json({
+      error: 'Internal error'
+    });
   }
 });
 
