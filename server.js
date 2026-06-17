@@ -983,35 +983,28 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     );
 
     const allowCredentials = credsRes.rows.map(r => {
-      // GYARA: Tabbatar id string ne kuma share komai
-      let id = r.credential_id;
-      
-      // Idan Buffer ne, convert zuwa string
-      if (Buffer.isBuffer(id)) {
-        id = id.toString('base64url');
-      }
-      
-      // Idan object ne ko kuma yana da quotes, share shi
-      id = String(id).trim().replace(/^"|"$/g, '').replace(/^'|'$/g, '');
-      
+      // Convert base64url -> bytes -> array don tabbatarwa
+      const base64 = r.credential_id.replace(/-/g, '+').replace(/_/g, '/');
+      const padded = base64.padEnd(base64.length + (4 - base64.length % 4) % 4, '=');
+      const binary = Buffer.from(padded, 'base64');
+
       return {
-        id: id,
+        id: Array.from(binary), // Array of numbers, Chrome zai convert shi
         type: 'public-key',
         transports: ['internal', 'hybrid']
       };
     });
-    
+
     console.log('AllowCredentials found:', allowCredentials.length);
     if(allowCredentials.length > 0) {
-      console.log('First cred id type:', typeof allowCredentials[0].id);
-      console.log('First cred id sample:', allowCredentials[0].id.substring(0, 30));
+      console.log('First cred id length:', allowCredentials[0].id.length);
     }
 
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       userVerification: 'preferred',
       timeout: 60000,
-      allowCredentials: allowCredentials.length ? allowCredentials : undefined
+      allowCredentials: allowCredentials.length? allowCredentials : undefined
     });
 
     await pool.query(
@@ -1020,15 +1013,11 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       [options.challenge]
     );
 
-    console.log('Login challenge saved:', options.challenge.substring(0, 20) + '...');
-
     return res.json(options);
 
   } catch (e) {
     console.error('Login start error:', e);
-    return res.status(500).json({
-      error: 'Internal error'
-    });
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
 
