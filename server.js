@@ -978,22 +978,35 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     console.log('=== LOGIN START === Origin:', req.get('origin'), 'RP_ID:', RP_ID);
 
     const credsRes = await pool.query(
-      'SELECT credential_id FROM webauthn_credentials WHERE rp_id=$1',
+      'SELECT credential_id::text as credential_id FROM webauthn_credentials WHERE rp_id=$1',
       [RP_ID]
     );
 
-    const allowCredentials = credsRes.rows.map(r => ({
-      id: r.credential_id, // Dole ne base64url string ne
-      type: 'public-key',
-      transports: ['internal', 'hybrid']
-    }));
+    const allowCredentials = credsRes.rows.map(r => {
+      // GYARA: Tabbatar id string ne kuma share komai
+      let id = r.credential_id;
+      
+      // Idan Buffer ne, convert zuwa string
+      if (Buffer.isBuffer(id)) {
+        id = id.toString('base64url');
+      }
+      
+      // Idan object ne ko kuma yana da quotes, share shi
+      id = String(id).trim().replace(/^"|"$/g, '').replace(/^'|'$/g, '');
+      
+      return {
+        id: id,
+        type: 'public-key',
+        transports: ['internal', 'hybrid']
+      };
+    });
     
     console.log('AllowCredentials found:', allowCredentials.length);
     if(allowCredentials.length > 0) {
       console.log('First cred id type:', typeof allowCredentials[0].id);
+      console.log('First cred id sample:', allowCredentials[0].id.substring(0, 30));
     }
 
-    // GYARA: Declare options KAFIN ka amfani da shi
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       userVerification: 'preferred',
@@ -1009,7 +1022,6 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 
     console.log('Login challenge saved:', options.challenge.substring(0, 20) + '...');
 
-    // DON'T RE-ENCODE ANYTHING - aika haka
     return res.json(options);
 
   } catch (e) {
