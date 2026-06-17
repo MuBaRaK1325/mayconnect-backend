@@ -983,20 +983,17 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     );
 
     const allowCredentials = credsRes.rows.map(r => ({
-      id: r.credential_id,
+      id: r.credential_id, // Dole ne base64url string ne
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
-    console.log(
-  'OPTIONS FOR CLIENT:',
-  JSON.stringify(options, null, 2)
-);
-
-// DON'T RE-ENCODE ANYTHING
-return res.json(options);
-
+    
     console.log('AllowCredentials found:', allowCredentials.length);
+    if(allowCredentials.length > 0) {
+      console.log('First cred id type:', typeof allowCredentials[0].id);
+    }
 
+    // GYARA: Declare options KAFIN ka amfani da shi
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       userVerification: 'preferred',
@@ -1010,12 +1007,9 @@ return res.json(options);
       [options.challenge]
     );
 
-    console.log(
-      'Login challenge saved:',
-      options.challenge.substring(0, 20) + '...'
-    );
+    console.log('Login challenge saved:', options.challenge.substring(0, 20) + '...');
 
-    // DON'T RE-ENCODE ANYTHING
+    // DON'T RE-ENCODE ANYTHING - aika haka
     return res.json(options);
 
   } catch (e) {
