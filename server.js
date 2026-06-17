@@ -975,12 +975,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
-    console.log(
-      '=== LOGIN START === Origin:',
-      req.get('origin'),
-      'RP_ID:',
-      RP_ID
-    );
+    console.log('=== LOGIN START === Origin:', req.get('origin'), 'RP_ID:', RP_ID);
 
     const credsRes = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE rp_id=$1',
@@ -988,25 +983,22 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     );
 
     const allowCredentials = credsRes.rows.map(r => ({
-      id: r.credential_id, // base64url string from DB
+      id: r.credential_id,
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
 
     console.log('AllowCredentials found:', allowCredentials.length);
-    console.log('First cred id type:', typeof allowCredentials[0]?.id);
 
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       userVerification: 'preferred',
       timeout: 60000,
-      allowCredentials:
-        allowCredentials.length > 0 ? allowCredentials : undefined
+      allowCredentials: allowCredentials.length ? allowCredentials : undefined
     });
 
-    // Store challenge exactly as returned
     await pool.query(
-      `INSERT INTO webauthn_challenges (challenge, expires_at)
+      `INSERT INTO webauthn_challenges(challenge, expires_at)
        VALUES ($1, NOW() + INTERVAL '5 minutes')`,
       [options.challenge]
     );
@@ -1016,11 +1008,11 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       options.challenge.substring(0, 20) + '...'
     );
 
-    // Return options unchanged
+    // DON'T RE-ENCODE ANYTHING
     return res.json(options);
 
   } catch (e) {
-    console.error('Login start error:', e.message, e.stack);
+    console.error('Login start error:', e);
     return res.status(500).json({
       error: 'Internal error'
     });
