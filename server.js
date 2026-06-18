@@ -868,12 +868,6 @@ function adminOnly(req, res, next) {
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - PASSWORDLESS 100% ================= */
 
-const { generateRegistrationOptions, verifyRegistrationResponse } = require('@simplewebauthn/server');
-
-const RP_NAME = 'MayConnect DataPlug';
-const RP_ID = 'www.mayconnectdataplug.com.ng'; // BABU https://
-const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng'; // DA https://
-
 function getCompanyConfig() {
   return {
     name: RP_NAME,
@@ -914,7 +908,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       rpName: RP_NAME,
       rpID: RP_ID,
 
-      // MUHIMMI: Buffer ne, simplewebauthn zai convert shi zuwa Uint8Array
+      // Buffer ne, simplewebauthn zai convert shi
       userID: Buffer.from(userId.toString()),
 
       userName: user.email,
@@ -923,17 +917,17 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       attestationType: 'none',
 
       authenticatorSelection: {
-        authenticatorAttachment: 'platform', // phone fingerprint/face
+        authenticatorAttachment: 'platform',
         residentKey: 'required', // GYARA: required don synced passkey
-        userVerification: 'required' // GYARA: required don Chrome ya ajiye
+        userVerification: 'required' // GYARA: required
       },
 
       supportedAlgorithmIDs: [-7, -257],
       timeout: 60000,
-      excludeCredentials: [] // mun share tsoho a sama
+      excludeCredentials: []
     });
 
-    // Save challenge exactly as generated - base64url string
+    // Save challenge
     await pool.query(
       `UPDATE users SET webauthn_challenge=$1 WHERE id=$2`,
       [options.challenge, userId]
@@ -961,7 +955,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   console.log('=== REGISTER FINISH === UserID:', userId);
 
   try {
-    // Get saved challenge
     const userRes = await pool.query(
       'SELECT webauthn_challenge FROM users WHERE id=$1',
       [userId]
@@ -972,13 +965,12 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       return res.status(400).json({ verified: false, error: 'Challenge expired' });
     }
 
-    // Verify registration response
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN, // https://www...
-      expectedRPID: RP_ID, // www... babu https
-      requireUserVerification: true // GYARA: dole ne true saboda 'required' a sama
+      expectedOrigin: EXPECTED_ORIGIN,
+      expectedRPID: RP_ID,
+      requireUserVerification: true // GYARA: dole ne true
     });
 
     console.log('Verification result:', verification.verified);
@@ -992,7 +984,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     console.log('Credential ID:', credentialID.substring(0, 30) + '...');
     console.log('Counter:', counter);
 
-    // Ajiye credential_id a matsayin base64url string, public_key binary
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1,$2,$3,$4,$5,$6)
@@ -1000,15 +991,14 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
        DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
       [
         userId,
-        credentialID, // base64url string
-        Buffer.from(credentialPublicKey), // binary
+        credentialID,
+        Buffer.from(credentialPublicKey),
         counter,
         RP_ID,
         'mayconnect'
       ]
     );
 
-    // Clear challenge
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
 
     console.log('SUCCESS: Credential saved for user', userId);
