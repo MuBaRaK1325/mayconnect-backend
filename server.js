@@ -880,7 +880,6 @@ function getCompanyConfig() {
 
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
-
     const userId = Number(req.user?.id || 0);
 
     if (!userId) {
@@ -889,9 +888,12 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       });
     }
 
-    // Get user
     const userRes = await pool.query(
-      'SELECT email, username FROM users WHERE id=$1',
+      `
+      SELECT email, username
+      FROM users
+      WHERE id=$1
+      `,
       [userId]
     );
 
@@ -910,9 +912,13 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       user.email
     );
 
-    // Optional: remove old credential for same RP_ID
+    // Remove previous passkey for same RP
     await pool.query(
-      'DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
+      `
+      DELETE FROM webauthn_credentials
+      WHERE user_id=$1
+      AND rp_id=$2
+      `,
       [userId, RP_ID]
     );
 
@@ -920,8 +926,10 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       rpName: RP_NAME,
       rpID: RP_ID,
 
-      // IMPORTANT: string, NOT TextEncoder()
-      userID: String(userId),
+      // MUST BE Uint8Array
+      userID: Uint8Array.from(
+        Buffer.from(userId.toString())
+      ),
 
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -934,12 +942,18 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
         userVerification: 'preferred'
       },
 
+      supportedAlgorithmIDs: [-7, -257],
+
       timeout: 60000
     });
 
-    // Save challenge
+    // Save challenge exactly as generated
     await pool.query(
-      'UPDATE users SET webauthn_challenge=$1 WHERE id=$2',
+      `
+      UPDATE users
+      SET webauthn_challenge=$1
+      WHERE id=$2
+      `,
       [
         options.challenge,
         userId
@@ -951,12 +965,16 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       options.challenge.substring(0, 20) + '...'
     );
 
-    // DON'T re-encode anything
+    // Return exactly as generated
     return res.json(options);
 
   } catch (e) {
 
-    console.error('Register start error:', e);
+    console.error(
+      'Register start error:',
+      e.message,
+      e.stack
+    );
 
     return res.status(500).json({
       error: e.message
