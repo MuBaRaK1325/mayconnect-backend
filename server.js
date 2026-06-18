@@ -1002,20 +1002,23 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       [RP_ID]
     );
 
-    // ✅ GYARA: Convert base64url string daga DB zuwa Buffer/ArrayBuffer
+    // ✅ GYARA: Bar shi string base64url, kada ka yi Buffer.from
     const allowCredentials = credsRes.rows.map(row => ({
-      id: Buffer.from(row.credential_id, 'base64url'), // ← Wannan ya gyara TypeError
+      id: row.credential_id, // ← Kai tsaye string daga DB
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
 
     console.log('AllowCredentials found:', allowCredentials.length);
+    if (allowCredentials.length > 0) {
+      console.log('First cred id sample:', allowCredentials[0].id.substring(0, 30));
+    }
 
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       timeout: 60000,
       userVerification: 'preferred',
-      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined
+      allowCredentials: allowCredentials.length > 0 ? allowCredentials : undefined
     });
 
     await pool.query(
@@ -1024,7 +1027,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     );
 
     console.log('Login challenge saved');
-    return res.json(options); // SimpleWebAuthn zai convert Buffer zuwa base64url ta atomatik
+    return res.json(options);
 
   } catch (e) {
     console.error('Login start error:', e);
