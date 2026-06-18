@@ -867,9 +867,6 @@ function adminOnly(req, res, next) {
 
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - PASSWORDLESS 100% ================= */
-
-const { generateRegistrationOptions, verifyRegistrationResponse } = require('@simplewebauthn/server');
-
 // MUHIMMI: RP_ID BABU www. | EXPECTED_ORIGIN DA www
 const RP_NAME = 'MayConnect DataPlug';
 const RP_ID = 'mayconnectdataplug.com.ng';
