@@ -1111,95 +1111,69 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
-
     console.log('=== LOGIN FINISH START ===');
+    console.log('RP_ID:', RP_ID, 'EXPECTED_ORIGIN:', EXPECTED_ORIGIN);
 
     const credentialId = req.body.id;
 
     if (!credentialId) {
-      return res.status(400).json({
-        error: 'No credential ID'
-      });
+      return res.status(400).json({ error: 'No credential ID' });
     }
 
     // Find credential
     const credRes = await pool.query(
-      `
-      SELECT
-        user_id,
-        credential_id,
-        public_key,
-        counter,
-        rp_id
-      FROM webauthn_credentials
-      WHERE credential_id=$1
-      `,
+      `SELECT user_id, credential_id, public_key, counter, rp_id
+       FROM webauthn_credentials
+       WHERE credential_id=$1`,
       [credentialId]
     );
 
     if (!credRes.rows.length) {
-      return res.status(400).json({
-        error: 'Passkey not found'
-      });
+      console.log('Passkey not found in DB:', credentialId.substring(0, 30));
+      return res.status(400).json({ error: 'Passkey not found' });
     }
 
     const cred = credRes.rows[0];
+    console.log('Credential found for user:', cred.user_id, 'RP_ID in DB:', cred.rp_id);
 
     // Get latest challenge
     const challengeRes = await pool.query(
-      `
-      SELECT challenge
-      FROM webauthn_challenges
-      WHERE expires_at > NOW()
-      ORDER BY created_at DESC
-      LIMIT 1
-      `
+      `SELECT challenge FROM webauthn_challenges
+       WHERE expires_at > NOW()
+       ORDER BY created_at DESC LIMIT 1`
     );
 
     if (!challengeRes.rows.length) {
-      return res.status(400).json({
-        error: 'Challenge expired'
-      });
+      return res.status(400).json({ error: 'Challenge expired' });
     }
 
     const challenge = challengeRes.rows[0].challenge;
 
     // Remove used challenge
-    await pool.query(
-      'DELETE FROM webauthn_challenges WHERE challenge=$1',
-      [challenge]
-    );
+    await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
 
     // Find user
     const userRes = await pool.query(
-      `
-      SELECT id, username, email
-      FROM users
-      WHERE id=$1
-      `,
+      `SELECT id, username, email FROM users WHERE id=$1`,
       [cred.user_id]
     );
 
     const user = userRes.rows[0];
-
     if (!user) {
-      return res.status(400).json({
-        error: 'User not found'
-      });
+      return res.status(400).json({ error: 'User not found' });
     }
+
+    console.log('Verifying with RP_ID:', RP_ID, 'Origin:', EXPECTED_ORIGIN);
 
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: EXPECTED_ORIGIN, // 'https://www.mayconnectdataplug.com.ng'
+      expectedRPID: RP_ID, // 'www.mayconnectdataplug.com.ng' - daskare da www
 
       credential: {
         id: cred.credential_id,
-        publicKey: Buffer.from(
-          cred.public_key,
-          'base64url'
-        ),
+        publicKey: Buffer.from(cred.public_key, 'base64'), // ✅ GYARA: base64 maimakon base64url
         counter: Number(cred.counter || 0),
         transports: ['internal', 'hybrid']
       },
@@ -1208,61 +1182,33 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     });
 
     if (!verification.verified) {
-      return res.status(400).json({
-        verified: false,
-        error: 'Authentication failed'
-      });
+      console.log('Verification failed');
+      return res.status(400).json({ verified: false, error: 'Authentication failed' });
     }
 
+    // Update counter
     await pool.query(
-      `
-      UPDATE webauthn_credentials
-      SET counter=$1
-      WHERE credential_id=$2
-      `,
-      [
-        verification.authenticationInfo.newCounter,
-        cred.credential_id
-      ]
+      `UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2`,
+      [verification.authenticationInfo.newCounter, cred.credential_id]
     );
 
     const token = jwt.sign(
-      {
-        id: user.id,
-        username: user.username
-      },
+      { id: user.id, username: user.username },
       process.env.JWT_SECRET,
-      {
-        expiresIn: '7d'
-      }
+      { expiresIn: '7d' }
     );
 
-    console.log(
-      'SUCCESS: Login verified for user',
-      user.id
-    );
+    console.log('=== AUTHENTICATE FINISH === UserID:', user.id, 'Success!');
 
     return res.json({
       verified: true,
       token,
-      user: {
-        id: user.id,
-        username: user.username
-      }
+      user: { id: user.id, username: user.username }
     });
 
   } catch (e) {
-
-    console.error(
-      'Login finish error:',
-      e.message,
-      e.stack
-    );
-
-    return res.status(400).json({
-      error: e.message
-    });
-
+    console.error('=== AUTHENTICATE FINISH === Error:', e.message, e.stack);
+    return res.status(400).json({ error: e.message });
   }
 });
 
