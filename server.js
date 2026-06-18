@@ -868,6 +868,12 @@ function adminOnly(req, res, next) {
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - PASSWORDLESS 100% ================= */
 
+const { generateRegistrationOptions, verifyRegistrationResponse } = require('@simplewebauthn/server');
+
+const RP_NAME = 'MayConnect DataPlug';
+const RP_ID = 'www.mayconnectdataplug.com.ng'; // BABU https://
+const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng'; // DA https://
+
 function getCompanyConfig() {
   return {
     name: RP_NAME,
@@ -883,42 +889,24 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
     const userId = Number(req.user?.id || 0);
 
     if (!userId) {
-      return res.status(401).json({
-        error: 'Unauthorized'
-      });
+      return res.status(401).json({ error: 'Unauthorized' });
     }
 
     const userRes = await pool.query(
-      `
-      SELECT email, username
-      FROM users
-      WHERE id=$1
-      `,
+      `SELECT email, username FROM users WHERE id=$1`,
       [userId]
     );
 
     const user = userRes.rows[0];
-
     if (!user) {
-      return res.status(404).json({
-        error: 'User not found'
-      });
+      return res.status(404).json({ error: 'User not found' });
     }
 
-    console.log(
-      '=== REGISTER START === UserID:',
-      userId,
-      'Email:',
-      user.email
-    );
+    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email);
 
     // Remove previous passkey for same RP
     await pool.query(
-      `
-      DELETE FROM webauthn_credentials
-      WHERE user_id=$1
-      AND rp_id=$2
-      `,
+      `DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2`,
       [userId, RP_ID]
     );
 
@@ -926,10 +914,8 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       rpName: RP_NAME,
       rpID: RP_ID,
 
-      // MUST BE Uint8Array
-      userID: Uint8Array.from(
-        Buffer.from(userId.toString())
-      ),
+      // MUHIMMI: Buffer ne, simplewebauthn zai convert shi zuwa Uint8Array
+      userID: Buffer.from(userId.toString()),
 
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -937,65 +923,44 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       attestationType: 'none',
 
       authenticatorSelection: {
-        authenticatorAttachment: 'platform',
-        residentKey: 'preferred',
-        userVerification: 'preferred'
+        authenticatorAttachment: 'platform', // phone fingerprint/face
+        residentKey: 'required', // GYARA: required don synced passkey
+        userVerification: 'required' // GYARA: required don Chrome ya ajiye
       },
 
       supportedAlgorithmIDs: [-7, -257],
-
-      timeout: 60000
+      timeout: 60000,
+      excludeCredentials: [] // mun share tsoho a sama
     });
 
-    // Save challenge exactly as generated
+    // Save challenge exactly as generated - base64url string
     await pool.query(
-      `
-      UPDATE users
-      SET webauthn_challenge=$1
-      WHERE id=$2
-      `,
-      [
-        options.challenge,
-        userId
-      ]
+      `UPDATE users SET webauthn_challenge=$1 WHERE id=$2`,
+      [options.challenge, userId]
     );
 
-    console.log(
-      'Register challenge saved:',
-      options.challenge.substring(0, 20) + '...'
-    );
+    console.log('Register challenge saved:', options.challenge.substring(0, 20) + '...');
 
-    // Return exactly as generated
     return res.json(options);
 
   } catch (e) {
-
-    console.error(
-      'Register start error:',
-      e.message,
-      e.stack
-    );
-
-    return res.status(500).json({
-      error: e.message
-    });
-
+    console.error('Register start error:', e.message, e.stack);
+    return res.status(500).json({ error: e.message });
   }
 });
+
+/* ================= WEBAUTHN REGISTER FINISH ================= */
+
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const userId = Number(req.user?.id || 0);
 
   if (!userId) {
-    return res.status(401).json({
-      verified: false,
-      error: 'Unauthorized'
-    });
+    return res.status(401).json({ verified: false, error: 'Unauthorized' });
   }
 
   console.log('=== REGISTER FINISH === UserID:', userId);
 
   try {
-
     // Get saved challenge
     const userRes = await pool.query(
       'SELECT webauthn_challenge FROM users WHERE id=$1',
@@ -1003,78 +968,40 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     const challenge = userRes.rows[0]?.webauthn_challenge;
-
     if (!challenge) {
-      return res.status(400).json({
-        verified: false,
-        error: 'Challenge expired'
-      });
+      return res.status(400).json({ verified: false, error: 'Challenge expired' });
     }
 
     // Verify registration response
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
-      requireUserVerification: false
+      expectedOrigin: EXPECTED_ORIGIN, // https://www...
+      expectedRPID: RP_ID, // www... babu https
+      requireUserVerification: true // GYARA: dole ne true saboda 'required' a sama
     });
 
     console.log('Verification result:', verification.verified);
 
-    if (
-      !verification.verified ||
-      !verification.registrationInfo
-    ) {
-      return res.status(400).json({
-        verified: false,
-        error: 'Backend verification failed'
-      });
+    if (!verification.verified ||!verification.registrationInfo) {
+      return res.status(400).json({ verified: false, error: 'Backend verification failed' });
     }
 
-    const {
-      credential
-    } = verification.registrationInfo;
+    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
 
-    // credential.id is already a base64url string
-    const credentialID = credential.id;
-
-    // Convert public key once
-    const publicKey = Buffer
-      .from(credential.publicKey)
-      .toString('base64url');
-
-    const counter = Number(credential.counter || 0);
-
-    console.log(
-      'Credential ID:',
-      credentialID.substring(0, 30) + '...'
-    );
-
+    console.log('Credential ID:', credentialID.substring(0, 30) + '...');
     console.log('Counter:', counter);
 
-    // Save credential
+    // Ajiye credential_id a matsayin base64url string, public_key binary
     await pool.query(
-      `
-      INSERT INTO webauthn_credentials
-      (
-        user_id,
-        credential_id,
-        public_key,
-        counter,
-        rp_id,
-        company
-      )
-      VALUES ($1,$2,$3,$4,$5,$6)
-      ON CONFLICT (credential_id)
-      DO UPDATE SET
-        public_key = EXCLUDED.public_key,
-        counter = EXCLUDED.counter
-      `,
+      `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (credential_id)
+       DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
       [
         userId,
-        credentialID,
-        publicKey,
+        credentialID, // base64url string
+        Buffer.from(credentialPublicKey), // binary
         counter,
         RP_ID,
         'mayconnect'
@@ -1082,34 +1009,15 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     // Clear challenge
-    await pool.query(
-      'UPDATE users SET webauthn_challenge=NULL WHERE id=$1',
-      [userId]
-    );
+    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
 
-    console.log(
-      'SUCCESS: Credential saved for user',
-      userId
-    );
+    console.log('SUCCESS: Credential saved for user', userId);
 
-    return res.json({
-      verified: true,
-      message: 'Biometric registered successfully'
-    });
+    return res.json({ verified: true, message: 'Biometric registered successfully' });
 
   } catch (e) {
-
-    console.error(
-      'Register finish error:',
-      e.message,
-      e.stack
-    );
-
-    return res.status(400).json({
-      verified: false,
-      error: e.message || 'Registration failed'
-    });
-
+    console.error('Register finish error:', e.message, e.stack);
+    return res.status(400).json({ verified: false, error: e.message || 'Registration failed' });
   }
 });
 
