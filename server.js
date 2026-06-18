@@ -979,11 +979,31 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       return res.status(400).json({ verified: false, error: 'Backend verification failed' });
     }
 
-    // GYARA: simplewebauthn v9+ yana mayar da kai tsaye
-    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+    // GYARA 100%: Dauko data daga duk version na simplewebauthn
+    const regInfo = verification.registrationInfo;
 
-    console.log('Credential ID:', credentialID? credentialID.substring(0, 30) + '...' : 'undefined');
+    let credentialID, credentialPublicKey, counter;
+
+    if (regInfo.credentialID) {
+      // v9+
+      credentialID = regInfo.credentialID;
+      credentialPublicKey = regInfo.credentialPublicKey;
+      counter = regInfo.counter;
+    } else if (regInfo.credential) {
+      // v7/v8
+      credentialID = regInfo.credential.id;
+      credentialPublicKey = regInfo.credential.publicKey;
+      counter = regInfo.credential.counter;
+    } else {
+      throw new Error('Cannot find credential data in registrationInfo');
+    }
+
+    console.log('Credential ID:', credentialID?.substring(0, 30) + '...');
     console.log('Counter:', counter);
+
+    if (!credentialID ||!credentialPublicKey) {
+      throw new Error('Missing credential data');
+    }
 
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
@@ -992,9 +1012,9 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
        DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
       [
         userId,
-        credentialID, // base64url string
-        Buffer.from(credentialPublicKey), // binary
-        counter,
+        credentialID,
+        Buffer.from(credentialPublicKey),
+        Number(counter) || 0,
         RP_ID,
         'mayconnect'
       ]
