@@ -867,10 +867,6 @@ function adminOnly(req, res, next) {
 
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - PASSWORDLESS 100% ================= */
-// MUHIMMI: RP_ID BABU www. | EXPECTED_ORIGIN DA www
-const RP_NAME = 'MayConnect DataPlug';
-const RP_ID = 'mayconnectdataplug.com.ng';
-const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng';
 
 function getCompanyConfig() {
   return {
@@ -912,7 +908,6 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       rpName: RP_NAME,
       rpID: RP_ID, // mayconnectdataplug.com.ng - BABU www
 
-      // Buffer ne, simplewebauthn zai convert shi
       userID: Buffer.from(userId.toString()),
 
       userName: user.email,
@@ -921,9 +916,9 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       attestationType: 'none',
 
       authenticatorSelection: {
-        // GYARA: share authenticatorAttachment don ya yi aiki da duk device
-        residentKey: 'required', // Dole ne required don synced passkey
-        userVerification: 'required' // Dole ne required
+        // GYARA: share authenticatorAttachment
+        residentKey: 'required',
+        userVerification: 'required'
       },
 
       supportedAlgorithmIDs: [-7, -257],
@@ -972,8 +967,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN, // https://www.mayconnectdataplug.com.ng
-      expectedRPID: RP_ID, // mayconnectdataplug.com.ng
+      expectedOrigin: EXPECTED_ORIGIN,
+      expectedRPID: RP_ID,
       requireUserVerification: true
     });
 
@@ -1002,7 +997,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     console.log('Credential ID:', credentialID.substring(0, 30) + '...');
     console.log('Counter:', counter);
 
-    // MUHIMMI: public_key dole ne BYTEA a Postgres
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1,$2,$3,$4,$5,$6)
@@ -1011,7 +1005,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       [
         userId,
         credentialID,
-        Buffer.from(credentialPublicKey), // binary Buffer -> BYTEA
+        Buffer.from(credentialPublicKey),
         Number(counter) || 0,
         RP_ID,
         'mayconnect'
@@ -1020,7 +1014,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
 
-    console.log('SUCCESS: Credential saved for user', userId);
+    console.log('SUCCESS: Credential saved for user', [userId]);
 
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
