@@ -868,6 +868,13 @@ function adminOnly(req, res, next) {
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - PASSWORDLESS 100% ================= */
 
+const { generateRegistrationOptions, verifyRegistrationResponse } = require('@simplewebauthn/server');
+
+// MUHIMMI: RP_ID BABU www. | EXPECTED_ORIGIN DA www
+const RP_NAME = 'MayConnect DataPlug';
+const RP_ID = 'mayconnectdataplug.com.ng';
+const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng';
+
 function getCompanyConfig() {
   return {
     name: RP_NAME,
@@ -906,7 +913,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
-      rpID: RP_ID,
+      rpID: RP_ID, // mayconnectdataplug.com.ng - BABU www
 
       // Buffer ne, simplewebauthn zai convert shi
       userID: Buffer.from(userId.toString()),
@@ -917,9 +924,9 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       attestationType: 'none',
 
       authenticatorSelection: {
-        authenticatorAttachment: 'platform',
-        residentKey: 'required', // GYARA: required don synced passkey
-        userVerification: 'required' // GYARA: required
+        // GYARA: share authenticatorAttachment don ya yi aiki da duk device
+        residentKey: 'required', // Dole ne required don synced passkey
+        userVerification: 'required' // Dole ne required
       },
 
       supportedAlgorithmIDs: [-7, -257],
@@ -968,8 +975,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: EXPECTED_ORIGIN, // https://www.mayconnectdataplug.com.ng
+      expectedRPID: RP_ID, // mayconnectdataplug.com.ng
       requireUserVerification: true
     });
 
@@ -998,7 +1005,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     console.log('Credential ID:', credentialID.substring(0, 30) + '...');
     console.log('Counter:', counter);
 
-    // MUHIMMI: Ajiye binary kai tsaye, kada ka toString('base64url')
+    // MUHIMMI: public_key dole ne BYTEA a Postgres
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1,$2,$3,$4,$5,$6)
@@ -1006,7 +1013,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
        DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
       [
         userId,
-        credentialID, // string
+        credentialID,
         Buffer.from(credentialPublicKey), // binary Buffer -> BYTEA
         Number(counter) || 0,
         RP_ID,
