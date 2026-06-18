@@ -881,63 +881,38 @@ function getCompanyConfig() {
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
   try {
     const userId = Number(req.user?.id || 0);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const userRes = await pool.query(
-      `SELECT email, username FROM users WHERE id=$1`,
-      [userId]
-    );
-
+    const userRes = await pool.query(`SELECT email, username FROM users WHERE id=$1`, [userId]);
     const user = userRes.rows[0];
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
-    console.log('=== REGISTER START === UserID:', userId, 'Email:', user.email);
+    console.log('=== REGISTER START === UserID:', userId);
 
-    // Remove previous passkey for same RP
-    await pool.query(
-      `DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2`,
-      [userId, RP_ID]
-    );
+    await pool.query(`DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2`, [userId, RP_ID]);
 
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
-      rpID: RP_ID, // mayconnectdataplug.com.ng - BABU www
-
-      userID: Buffer.from(userId.toString()),
-
+      rpID: RP_ID, // ✅ www.mayconnectdataplug.com.ng
+      userID: userId.toString(),
       userName: user.email,
       userDisplayName: user.username || user.email,
-
       attestationType: 'none',
-
       authenticatorSelection: {
-        // GYARA: share authenticatorAttachment
         residentKey: 'required',
-        userVerification: 'required'
+        userVerification: 'required',
+        authenticatorAttachment: 'platform' // ✅ Dole a ƙara wannan don passkey
       },
-
       supportedAlgorithmIDs: [-7, -257],
-      timeout: 60000,
-      excludeCredentials: []
+      timeout: 60000
     });
 
-    // Save challenge
-    await pool.query(
-      `UPDATE users SET webauthn_challenge=$1 WHERE id=$2`,
-      [options.challenge, userId]
-    );
-
-    console.log('Register challenge saved:', options.challenge.substring(0, 20) + '...');
-
+    await pool.query(`UPDATE users SET webauthn_challenge=$1 WHERE id=$2`, [options.challenge, userId]);
+    console.log('Register challenge saved');
     return res.json(options);
 
   } catch (e) {
-    console.error('Register start error:', e.message, e.stack);
+    console.error('Register start error:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
@@ -946,23 +921,12 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const userId = Number(req.user?.id || 0);
-
-  if (!userId) {
-    return res.status(401).json({ verified: false, error: 'Unauthorized' });
-  }
-
-  console.log('=== REGISTER FINISH === UserID:', userId);
+  if (!userId) return res.status(401).json({ verified: false, error: 'Unauthorized' });
 
   try {
-    const userRes = await pool.query(
-      'SELECT webauthn_challenge FROM users WHERE id=$1',
-      [userId]
-    );
-
+    const userRes = await pool.query('SELECT webauthn_challenge FROM users WHERE id=$1', [userId]);
     const challenge = userRes.rows[0]?.webauthn_challenge;
-    if (!challenge) {
-      return res.status(400).json({ verified: false, error: 'Challenge expired' });
-    }
+    if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired' });
 
     const verification = await verifyRegistrationResponse({
       response: req.body,
@@ -972,40 +936,19 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       requireUserVerification: true
     });
 
-    console.log('Verification result:', verification.verified);
+    if (!verification.verified) return res.status(400).json({ verified: false, error: 'Verification failed' });
 
-    if (!verification.verified ||!verification.registrationInfo) {
-      return res.status(400).json({ verified: false, error: 'Backend verification failed' });
-    }
+    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
 
-    const regInfo = verification.registrationInfo;
-
-    let credentialID, credentialPublicKey, counter;
-
-    if (regInfo.credentialID) {
-      credentialID = regInfo.credentialID;
-      credentialPublicKey = regInfo.credentialPublicKey;
-      counter = regInfo.counter;
-    } else if (regInfo.credential) {
-      credentialID = regInfo.credential.id;
-      credentialPublicKey = regInfo.credential.publicKey;
-      counter = regInfo.credential.counter;
-    } else {
-      throw new Error('Cannot find credential data');
-    }
-
-    console.log('Credential ID:', credentialID.substring(0, 30) + '...');
-    console.log('Counter:', counter);
-
+    // ✅ GYARA: Save a matsayin base64url string, ba Buffer ba
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (credential_id)
-       DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
+       ON CONFLICT (credential_id) DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
       [
         userId,
-        credentialID,
-        Buffer.from(credentialPublicKey),
+        Buffer.from(credentialID).toString('base64url'), // ✅ Convert to base64url
+        Buffer.from(credentialPublicKey).toString('base64'), // ✅ Convert to base64
         Number(counter) || 0,
         RP_ID,
         'mayconnect'
@@ -1013,98 +956,51 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
-
-    console.log('SUCCESS: Credential saved for user', [userId]);
-
+    console.log('SUCCESS: Credential saved for user', userId);
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
   } catch (e) {
-    console.error('Register finish error:', e.message, e.stack);
-    return res.status(400).json({ verified: false, error: e.message || 'Registration failed' });
+    console.error('Register finish error:', e.message);
+    return res.status(400).json({ verified: false, error: e.message });
   }
 });
 
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
-
-    console.log(
-      '=== LOGIN START === Origin:',
-      req.get('origin'),
-      'RP_ID:',
-      RP_ID
-    );
+    console.log('=== LOGIN START === RP_ID:', RP_ID);
 
     const credsRes = await pool.query(
-      `
-      SELECT credential_id
-      FROM webauthn_credentials
-      WHERE rp_id = $1
-      `,
+      `SELECT credential_id FROM webauthn_credentials WHERE rp_id = $1`,
       [RP_ID]
     );
 
+    // ✅ GYARA: Convert base64url string daga DB zuwa Buffer/ArrayBuffer
     const allowCredentials = credsRes.rows.map(row => ({
-      id: String(row.credential_id).trim(),
+      id: Buffer.from(row.credential_id, 'base64url'), // ← Wannan ya gyara TypeError
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
 
     console.log('AllowCredentials found:', allowCredentials.length);
 
-    if (allowCredentials.length > 0) {
-      console.log(
-        'First cred id type:',
-        typeof allowCredentials[0].id
-      );
-
-      console.log(
-        'First cred id sample:',
-        allowCredentials[0].id.substring(0, 30)
-      );
-    }
-
     const options = await generateAuthenticationOptions({
       rpID: RP_ID,
       timeout: 60000,
       userVerification: 'preferred',
-      allowCredentials:
-        allowCredentials.length > 0
-          ? allowCredentials
-          : undefined
+      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined
     });
 
     await pool.query(
-      `
-      INSERT INTO webauthn_challenges
-      (
-        challenge,
-        expires_at
-      )
-      VALUES
-      (
-        $1,
-        NOW() + INTERVAL '5 minutes'
-      )
-      `,
+      `INSERT INTO webauthn_challenges (challenge, expires_at) VALUES ($1, NOW() + INTERVAL '5 minutes')`,
       [options.challenge]
     );
 
-    console.log(
-      'Login challenge saved:',
-      options.challenge.substring(0, 20) + '...'
-    );
-
-    // Return exactly what SimpleWebAuthn generates
-    return res.json(options);
+    console.log('Login challenge saved');
+    return res.json(options); // SimpleWebAuthn zai convert Buffer zuwa base64url ta atomatik
 
   } catch (e) {
-
     console.error('Login start error:', e);
-
-    return res.status(500).json({
-      error: 'Internal error'
-    });
-
+    return res.status(500).json({ error: 'Internal error' });
   }
 });
 
