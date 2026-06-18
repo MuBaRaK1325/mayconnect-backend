@@ -917,15 +917,34 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 });
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const userId = Number(req.user?.id || 0);
-  if (!userId) return res.status(401).json({ verified: false, error: 'Unauthorized' });
+
+  if (!userId) {
+    return res.status(401).json({
+      verified: false,
+      error: 'Unauthorized'
+    });
+  }
 
   console.log('=== REGISTER FINISH === UserID:', userId);
 
   try {
-    const userRes = await pool.query('SELECT webauthn_challenge FROM users WHERE id=$1', [userId]);
-    const challenge = userRes.rows[0]?.webauthn_challenge;
-    if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired' });
 
+    // Get saved challenge
+    const userRes = await pool.query(
+      'SELECT webauthn_challenge FROM users WHERE id=$1',
+      [userId]
+    );
+
+    const challenge = userRes.rows[0]?.webauthn_challenge;
+
+    if (!challenge) {
+      return res.status(400).json({
+        verified: false,
+        error: 'Challenge expired'
+      });
+    }
+
+    // Verify registration
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
@@ -935,41 +954,81 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     });
 
     console.log('Verification result:', verification.verified);
-    if (!verification.verified) {
-      return res.status(400).json({ verified: false, error: 'Backend verification failed' });
+
+    if (!verification.verified || !verification.registrationInfo) {
+      return res.status(400).json({
+        verified: false,
+        error: 'Backend verification failed'
+      });
     }
 
-    let credId, pubKey, counter;
-    if (verification.registrationInfo?.credential) {
-      credId = Buffer.from(verification.registrationInfo.credential.id).toString('base64url');
-      pubKey = Buffer.from(verification.registrationInfo.credential.publicKey).toString('base64url');
-      counter = verification.registrationInfo.credential.counter || 0;
-    } else {
-      const body = req.body;
-      credId = body.id || body.rawId;
-      pubKey = body.response?.attestationObject || '';
-      counter = 0;
-      if (!credId ||!pubKey) {
-        return res.status(400).json({ verified: false, error: 'No credential info from browser' });
-      }
-      if (typeof credId === 'string') credId = Buffer.from(credId, 'base64url').toString('base64url');
-      if (typeof pubKey === 'string') pubKey = Buffer.from(pubKey, 'base64').toString('base64url');
-    }
+    // Extract credential
+    const credential = verification.registrationInfo.credential;
 
+    // IMPORTANT:
+    // credential.id is already base64url string
+    const credId = credential.id;
+
+    // publicKey is Uint8Array -> convert once
+    const pubKey = Buffer
+      .from(credential.publicKey)
+      .toString('base64url');
+
+    const counter = credential.counter || 0;
+
+    console.log('Credential ID:', credId.substring(0, 30) + '...');
+    console.log('Counter:', counter);
+
+    // Save credential
     await pool.query(
-      `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (credential_id) DO UPDATE SET public_key=$3, counter=$4`,
-      [userId, credId, pubKey, counter, RP_ID, 'mayconnect']
+      `
+      INSERT INTO webauthn_credentials
+      (
+        user_id,
+        credential_id,
+        public_key,
+        counter,
+        rp_id,
+        company
+      )
+      VALUES ($1,$2,$3,$4,$5,$6)
+      ON CONFLICT (credential_id)
+      DO UPDATE SET
+        public_key = EXCLUDED.public_key,
+        counter = EXCLUDED.counter
+      `,
+      [
+        userId,
+        credId,
+        pubKey,
+        counter,
+        RP_ID,
+        'mayconnect'
+      ]
     );
 
-    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
+    // Clear challenge
+    await pool.query(
+      'UPDATE users SET webauthn_challenge=NULL WHERE id=$1',
+      [userId]
+    );
+
     console.log('SUCCESS: Credential saved for user', userId);
-    return res.json({ verified: true, message: 'Biometric registered successfully' });
+
+    return res.json({
+      verified: true,
+      message: 'Biometric registered successfully'
+    });
 
   } catch (e) {
-    console.error('Register finish error:', e.message);
-    return res.status(400).json({ verified: false, error: e.message || 'Registration failed' });
+
+    console.error('Register finish error:', e);
+    
+    return res.status(400).json({
+      verified: false,
+      error: e.message || 'Registration failed'
+    });
+
   }
 });
 
