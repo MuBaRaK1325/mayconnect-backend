@@ -1120,7 +1120,9 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       return res.status(400).json({ error: 'No credential ID' });
     }
 
-    // Find credential
+    console.log('Credential ID from browser:', credentialId.substring(0, 30));
+
+    // Find credential - Dole a bincika da base64url saboda haka browser yake aika shi
     const credRes = await pool.query(
       `SELECT user_id, credential_id, public_key, counter, rp_id
        FROM webauthn_credentials
@@ -1129,7 +1131,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     );
 
     if (!credRes.rows.length) {
-      console.log('Passkey not found in DB:', credentialId.substring(0, 30));
+      console.log('Passkey not found in DB for ID:', credentialId.substring(0, 30));
       return res.status(400).json({ error: 'Passkey not found' });
     }
 
@@ -1169,11 +1171,11 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       response: req.body,
       expectedChallenge: challenge,
       expectedOrigin: EXPECTED_ORIGIN, // 'https://www.mayconnectdataplug.com.ng'
-      expectedRPID: RP_ID, // 'www.mayconnectdataplug.com.ng' - daskare da www
+      expectedRPID: RP_ID, // 'www.mayconnectdataplug.com.ng'
 
       credential: {
-        id: cred.credential_id,
-        publicKey: Buffer.from(cred.public_key, 'base64'), // ✅ GYARA: base64 maimakon base64url
+        id: Buffer.from(cred.credential_id, 'base64url'), // ✅ GYARA: Convert base64url to Buffer
+        publicKey: Buffer.from(cred.public_key, 'base64'), // ✅ Binary daga DB
         counter: Number(cred.counter || 0),
         transports: ['internal', 'hybrid']
       },
