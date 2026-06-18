@@ -274,9 +274,9 @@ const ADMIN_EMAILS = [
 ];
 
 // HARCODE DAIDAI DA FRONTEND URL
-const RP_ID = 'mayconnectdataplug.com.ng'; // ✅ Cire www
+const RP_ID = 'www.mayconnectdataplug.com.ng';
 const RP_NAME = 'MAYCONNECT DATA PLUG';
-const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng'; // ✅ Bar shi haka da www
+const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng'; // <- Wannan shine
 // PAYMENTPOINT CONFIG
 const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE || "https://api.paymentpoint.co";
 
