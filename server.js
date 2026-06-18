@@ -970,7 +970,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       expectedChallenge: challenge,
       expectedOrigin: EXPECTED_ORIGIN,
       expectedRPID: RP_ID,
-      requireUserVerification: true // GYARA: dole ne true
+      requireUserVerification: true
     });
 
     console.log('Verification result:', verification.verified);
@@ -979,9 +979,10 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       return res.status(400).json({ verified: false, error: 'Backend verification failed' });
     }
 
+    // GYARA: simplewebauthn v9+ yana mayar da kai tsaye
     const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
 
-    console.log('Credential ID:', credentialID.substring(0, 30) + '...');
+    console.log('Credential ID:', credentialID? credentialID.substring(0, 30) + '...' : 'undefined');
     console.log('Counter:', counter);
 
     await pool.query(
@@ -991,8 +992,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
        DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
       [
         userId,
-        credentialID,
-        Buffer.from(credentialPublicKey),
+        credentialID, // base64url string
+        Buffer.from(credentialPublicKey), // binary
         counter,
         RP_ID,
         'mayconnect'
