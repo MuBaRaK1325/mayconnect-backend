@@ -893,26 +893,32 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
 
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
-      rpID: RP_ID, // ✅ www.mayconnectdataplug.com.ng
-      userID: userId.toString(),
+      rpID: RP_ID, // www.mayconnectdataplug.com.ng
+
+      userID: new Uint8Array(new TextEncoder().encode(userId.toString())), // ✅ GYARA NAN
+
       userName: user.email,
       userDisplayName: user.username || user.email,
+
       attestationType: 'none',
+
       authenticatorSelection: {
         residentKey: 'required',
         userVerification: 'required',
-        authenticatorAttachment: 'platform' // ✅ Dole a ƙara wannan don passkey
+        authenticatorAttachment: 'platform'
       },
+
       supportedAlgorithmIDs: [-7, -257],
       timeout: 60000
     });
 
     await pool.query(`UPDATE users SET webauthn_challenge=$1 WHERE id=$2`, [options.challenge, userId]);
-    console.log('Register challenge saved');
+    console.log('Register challenge saved:', options.challenge.substring(0, 20) + '...');
+
     return res.json(options);
 
   } catch (e) {
-    console.error('Register start error:', e.message);
+    console.error('Register start error:', e.message, e.stack);
     return res.status(500).json({ error: e.message });
   }
 });
