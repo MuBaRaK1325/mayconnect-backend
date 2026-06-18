@@ -929,6 +929,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   const userId = Number(req.user?.id || 0);
   if (!userId) return res.status(401).json({ verified: false, error: 'Unauthorized' });
 
+  console.log('=== REGISTER FINISH === UserID:', userId);
+
   try {
     const userRes = await pool.query('SELECT webauthn_challenge FROM users WHERE id=$1', [userId]);
     const challenge = userRes.rows[0]?.webauthn_challenge;
@@ -942,32 +944,52 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       requireUserVerification: true
     });
 
-    if (!verification.verified) return res.status(400).json({ verified: false, error: 'Verification failed' });
+    console.log('Verification result:', verification.verified);
 
-    const { credentialID, credentialPublicKey, counter } = verification.registrationInfo;
+    if (!verification.verified ||!verification.registrationInfo) {
+      return res.status(400).json({ verified: false, error: 'Backend verification failed' });
+    }
 
-    // ✅ GYARA: Save a matsayin base64url string, ba Buffer ba
+    const regInfo = verification.registrationInfo;
+
+    // ✅ GYARA: SimpleWebAuthn v8+ structure
+    const credentialID = regInfo.credentialID || regInfo.credential?.id;
+    const credentialPublicKey = regInfo.credentialPublicKey || regInfo.credential?.publicKey;
+    const counter = regInfo.counter || regInfo.credential?.counter || 0;
+
+    if (!credentialID ||!credentialPublicKey) {
+      console.error('Missing credential data:', regInfo);
+      throw new Error('Cannot find credential data from registrationInfo');
+    }
+
+    console.log('Credential ID length:', credentialID.byteLength);
+    console.log('Counter:', counter);
+
+    // ✅ GYARA: Save a matsayin base64url string
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (credential_id) DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
+       ON CONFLICT (credential_id)
+       DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
       [
         userId,
-        Buffer.from(credentialID).toString('base64url'), // ✅ Convert to base64url
-        Buffer.from(credentialPublicKey).toString('base64'), // ✅ Convert to base64
-        Number(counter) || 0,
+        Buffer.from(credentialID).toString('base64url'), // ✅ Convert Buffer → base64url
+        Buffer.from(credentialPublicKey).toString('base64'), // ✅ Convert Buffer → base64
+        Number(counter),
         RP_ID,
         'mayconnect'
       ]
     );
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
+
     console.log('SUCCESS: Credential saved for user', userId);
+
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
   } catch (e) {
-    console.error('Register finish error:', e.message);
-    return res.status(400).json({ verified: false, error: e.message });
+    console.error('Register finish error:', e.message, e.stack);
+    return res.status(400).json({ verified: false, error: e.message || 'Registration failed' });
   }
 });
 
