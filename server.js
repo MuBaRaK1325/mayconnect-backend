@@ -895,7 +895,7 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       rpName: RP_NAME,
       rpID: RP_ID, // www.mayconnectdataplug.com.ng
 
-      userID: new Uint8Array(new TextEncoder().encode(userId.toString())), // ✅ GYARA NAN
+      userID: new Uint8Array(new TextEncoder().encode(userId.toString())),
 
       userName: user.email,
       userDisplayName: user.username || user.email,
@@ -903,9 +903,9 @@ app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
       attestationType: 'none',
 
       authenticatorSelection: {
-        residentKey: 'required',
+        residentKey: 'preferred', // ✅ GYARA NAN: 'required' → 'preferred' kamar Maitama/Arrahuz
         userVerification: 'required',
-        authenticatorAttachment: 'platform'
+        authenticatorAttachment: 'platform' // platform = fingerprint/FaceID na waya
       },
 
       supportedAlgorithmIDs: [-7, -257],
@@ -939,8 +939,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: EXPECTED_ORIGIN, // 'https://www.mayconnectdataplug.com.ng'
+      expectedRPID: RP_ID, // 'www.mayconnectdataplug.com.ng'
       requireUserVerification: true
     });
 
@@ -952,7 +952,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
     const regInfo = verification.registrationInfo;
 
-    // ✅ GYARA: SimpleWebAuthn v8+ structure
     const credentialID = regInfo.credentialID || regInfo.credential?.id;
     const credentialPublicKey = regInfo.credentialPublicKey || regInfo.credential?.publicKey;
     const counter = regInfo.counter || regInfo.credential?.counter || 0;
@@ -965,7 +964,6 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     console.log('Credential ID length:', credentialID.byteLength);
     console.log('Counter:', counter);
 
-    // ✅ GYARA: Save a matsayin base64url string
     await pool.query(
       `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
        VALUES ($1,$2,$3,$4,$5,$6)
@@ -973,8 +971,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
        DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
       [
         userId,
-        Buffer.from(credentialID).toString('base64url'), // ✅ Convert Buffer → base64url
-        Buffer.from(credentialPublicKey).toString('base64'), // ✅ Convert Buffer → base64
+        Buffer.from(credentialID).toString('base64url'), // Save as base64url
+        Buffer.from(credentialPublicKey).toString('base64'), // Save as base64
         Number(counter),
         RP_ID,
         'mayconnect'
@@ -993,6 +991,8 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
   }
 });
 
+/* ================= WEBAUTHN LOGIN START ================= */
+
 app.post('/api/auth/webauthn/login-start', async (req, res) => {
   try {
     console.log('=== LOGIN START === RP_ID:', RP_ID);
@@ -1002,9 +1002,8 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       [RP_ID]
     );
 
-    // ✅ GYARA: Bar shi string base64url, kada ka yi Buffer.from
     const allowCredentials = credsRes.rows.map(row => ({
-      id: row.credential_id, // ← Kai tsaye string daga DB
+      id: row.credential_id, // base64url string daga DB
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
@@ -1018,7 +1017,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
       rpID: RP_ID,
       timeout: 60000,
       userVerification: 'preferred',
-      allowCredentials: allowCredentials.length > 0 ? allowCredentials : undefined
+      allowCredentials: allowCredentials.length > 0? allowCredentials : undefined
     });
 
     await pool.query(
@@ -1035,6 +1034,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
   }
 });
 
+/* ================= WEBAUTHN LOGIN FINISH ================= */
 
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
@@ -1042,14 +1042,12 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     console.log('RP_ID:', RP_ID, 'EXPECTED_ORIGIN:', EXPECTED_ORIGIN);
 
     const credentialId = req.body.id;
-
     if (!credentialId) {
       return res.status(400).json({ error: 'No credential ID' });
     }
 
     console.log('Credential ID from browser:', credentialId.substring(0, 30));
 
-    // Find credential - Dole a bincika da base64url saboda haka browser yake aika shi
     const credRes = await pool.query(
       `SELECT user_id, credential_id, public_key, counter, rp_id
        FROM webauthn_credentials
@@ -1063,9 +1061,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     }
 
     const cred = credRes.rows[0];
-    console.log('Credential found for user:', cred.user_id, 'RP_ID in DB:', cred.rp_id);
+    console.log('Credential found for user:', cred.user_id);
 
-    // Get latest challenge
     const challengeRes = await pool.query(
       `SELECT challenge FROM webauthn_challenges
        WHERE expires_at > NOW()
@@ -1077,11 +1074,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     }
 
     const challenge = challengeRes.rows[0].challenge;
-
-    // Remove used challenge
     await pool.query('DELETE FROM webauthn_challenges WHERE challenge=$1', [challenge]);
 
-    // Find user
     const userRes = await pool.query(
       `SELECT id, username, email FROM users WHERE id=$1`,
       [cred.user_id]
@@ -1092,21 +1086,17 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       return res.status(400).json({ error: 'User not found' });
     }
 
-    console.log('Verifying with RP_ID:', RP_ID, 'Origin:', EXPECTED_ORIGIN);
-
     const verification = await verifyAuthenticationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN, // 'https://www.mayconnectdataplug.com.ng'
-      expectedRPID: RP_ID, // 'www.mayconnectdataplug.com.ng'
-
+      expectedOrigin: EXPECTED_ORIGIN,
+      expectedRPID: RP_ID,
       credential: {
-        id: Buffer.from(cred.credential_id, 'base64url'), // ✅ GYARA: Convert base64url to Buffer
-        publicKey: Buffer.from(cred.public_key, 'base64'), // ✅ Binary daga DB
+        id: Buffer.from(cred.credential_id, 'base64url'), // Convert base64url → Buffer
+        publicKey: Buffer.from(cred.public_key, 'base64'), // Convert base64 → Buffer
         counter: Number(cred.counter || 0),
         transports: ['internal', 'hybrid']
       },
-
       requireUserVerification: true
     });
 
@@ -1115,7 +1105,6 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       return res.status(400).json({ verified: false, error: 'Authentication failed' });
     }
 
-    // Update counter
     await pool.query(
       `UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2`,
       [verification.authenticationInfo.newCounter, cred.credential_id]
