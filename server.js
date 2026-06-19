@@ -939,12 +939,13 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: req.body,
       expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN, // 'https://www.mayconnectdataplug.com.ng'
-      expectedRPID: RP_ID, // 'www.mayconnectdataplug.com.ng'
+      expectedOrigin: EXPECTED_ORIGIN,
+      expectedRPID: RP_ID,
       requireUserVerification: true
     });
 
     console.log('Verification result:', verification.verified);
+    console.log('Full regInfo:', JSON.stringify(verification.registrationInfo, null, 2)); // DEBUG
 
     if (!verification.verified ||!verification.registrationInfo) {
       return res.status(400).json({ verified: false, error: 'Backend verification failed' });
@@ -952,16 +953,17 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
     const regInfo = verification.registrationInfo;
 
-    const credentialID = regInfo.credentialID || regInfo.credential?.id;
-    const credentialPublicKey = regInfo.credentialPublicKey || regInfo.credential?.publicKey;
-    const counter = regInfo.counter || regInfo.credential?.counter || 0;
+    // ✅ GYARA 100%: SimpleWebAuthn v8+ structure daidai
+    const credentialID = regInfo.credential?.id; // ← NAN ASIRIN
+    const credentialPublicKey = regInfo.credential?.publicKey;
+    const counter = regInfo.credential?.counter || 0;
 
     if (!credentialID ||!credentialPublicKey) {
-      console.error('Missing credential data:', regInfo);
-      throw new Error('Cannot find credential data from registrationInfo');
+      console.error('Missing credential data. Full regInfo:', regInfo);
+      throw new Error('Cannot find credential data from registrationInfo.credential.id');
     }
 
-    console.log('Credential ID length:', credentialID.byteLength);
+    console.log('Credential ID length:', credentialID.byteLength); // Yanzu dole ya buga 32+
     console.log('Counter:', counter);
 
     await pool.query(
@@ -972,7 +974,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
       [
         userId,
         Buffer.from(credentialID).toString('base64url'), // Save as base64url
-        Buffer.from(credentialPublicKey).toString('base64'), // Save as base64
+        Buffer.from(credentialPublicKey).toString('base64'),
         Number(counter),
         RP_ID,
         'mayconnect'
@@ -981,7 +983,7 @@ app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
 
     await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
 
-    console.log('SUCCESS: Credential saved for user', userId);
+    console.log('SUCCESS: Credential saved for user', userId, 'ID length:', credentialID.byteLength);
 
     return res.json({ verified: true, message: 'Biometric registered successfully' });
 
