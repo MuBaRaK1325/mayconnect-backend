@@ -879,118 +879,206 @@ function getCompanyConfig() {
 /* ================= WEBAUTHN REGISTER START ================= */
 
 app.post('/api/auth/webauthn/register-start', auth, async (req, res) => {
-  try {
-    const userId = Number(req.user?.id || 0);
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+try {
+const userId = Number(req.user?.id || 0);
 
-    const userRes = await pool.query(`SELECT email, username FROM users WHERE id=$1`, [userId]);
-    const user = userRes.rows[0];
-    if (!user) return res.status(404).json({ error: 'User not found' });
+if (!userId) {
+  return res.status(401).json({
+    error: 'Unauthorized'
+  });
+}
 
-    console.log('=== REGISTER START === UserID:', userId);
+const userRes = await pool.query(
+  'SELECT email, username FROM users WHERE id=$1',
+  [userId]
+);
 
-    await pool.query(`DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2`, [userId, RP_ID]);
+const user = userRes.rows[0];
 
-    const options = await generateRegistrationOptions({
-      rpName: RP_NAME,
-      rpID: RP_ID, // www.mayconnectdataplug.com.ng
+if (!user) {
+  return res.status(404).json({
+    error: 'User not found'
+  });
+}
 
-      userID: new Uint8Array(new TextEncoder().encode(userId.toString())),
+console.log('=== REGISTER START === UserID:', userId);
 
-      userName: user.email,
-      userDisplayName: user.username || user.email,
+await pool.query(
+  'DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
+  [userId, RP_ID]
+);
 
-      attestationType: 'none',
+const options = await generateRegistrationOptions({
+  rpName: RP_NAME,
+  rpID: RP_ID,
 
-      authenticatorSelection: {
-        residentKey: 'preferred', // ✅ GYARA NAN: 'required' → 'preferred' kamar Maitama/Arrahuz
-        userVerification: 'required',
-        authenticatorAttachment: 'platform' // platform = fingerprint/FaceID na waya
-      },
+  // SimpleWebAuthn v13 requires Uint8Array
+  userID: new TextEncoder().encode(userId.toString()),
 
-      supportedAlgorithmIDs: [-7, -257],
-      timeout: 60000
-    });
+  userName: user.email,
+  userDisplayName: user.username || user.email,
 
-    await pool.query(`UPDATE users SET webauthn_challenge=$1 WHERE id=$2`, [options.challenge, userId]);
-    console.log('Register challenge saved:', options.challenge.substring(0, 20) + '...');
+  attestationType: 'none',
 
-    return res.json(options);
+  authenticatorSelection: {
+    authenticatorAttachment: 'platform',
+    residentKey: 'preferred',
+    userVerification: 'required'
+  },
 
-  } catch (e) {
-    console.error('Register start error:', e.message, e.stack);
-    return res.status(500).json({ error: e.message });
-  }
+  supportedAlgorithmIDs: [-7, -257],
+
+  timeout: 60000
+});
+
+await pool.query(
+  'UPDATE users SET webauthn_challenge=$1 WHERE id=$2',
+  [options.challenge, userId]
+);
+
+console.log(
+  'Register challenge saved:',
+  options.challenge.substring(0, 20) + '...'
+);
+
+return res.json(options);
+
+} catch (e) {
+
+console.error('Register start error:', e);
+
+return res.status(500).json({
+  error: e.message
+});
+
+}
 });
 
 /* ================= WEBAUTHN REGISTER FINISH ================= */
 
 app.post('/api/auth/webauthn/register-finish', auth, async (req, res) => {
-  const userId = Number(req.user?.id || 0);
-  if (!userId) return res.status(401).json({ verified: false, error: 'Unauthorized' });
 
-  console.log('=== REGISTER FINISH === UserID:', userId);
+const userId = Number(req.user?.id || 0);
 
-  try {
-    const userRes = await pool.query('SELECT webauthn_challenge FROM users WHERE id=$1', [userId]);
-    const challenge = userRes.rows[0]?.webauthn_challenge;
-    if (!challenge) return res.status(400).json({ verified: false, error: 'Challenge expired' });
+if (!userId) {
+return res.status(401).json({
+verified: false,
+error: 'Unauthorized'
+});
+}
 
-    const verification = await verifyRegistrationResponse({
-      response: req.body,
-      expectedChallenge: challenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
-      requireUserVerification: true
-    });
+console.log('=== REGISTER FINISH === UserID:', userId);
 
-    console.log('Verification result:', verification.verified);
-    console.log('Full regInfo:', JSON.stringify(verification.registrationInfo, null, 2)); // DEBUG
+try {
 
-    if (!verification.verified ||!verification.registrationInfo) {
-      return res.status(400).json({ verified: false, error: 'Backend verification failed' });
-    }
+const userRes = await pool.query(
+  'SELECT webauthn_challenge FROM users WHERE id=$1',
+  [userId]
+);
 
-    const regInfo = verification.registrationInfo;
+const challenge = userRes.rows[0]?.webauthn_challenge;
 
-    // ✅ GYARA 100%: SimpleWebAuthn v8+ structure daidai
-    const credentialID = regInfo.credential?.id; // ← NAN ASIRIN
-    const credentialPublicKey = regInfo.credential?.publicKey;
-    const counter = regInfo.credential?.counter || 0;
+if (!challenge) {
+  return res.status(400).json({
+    verified: false,
+    error: 'Challenge expired'
+  });
+}
 
-    if (!credentialID ||!credentialPublicKey) {
-      console.error('Missing credential data. Full regInfo:', regInfo);
-      throw new Error('Cannot find credential data from registrationInfo.credential.id');
-    }
+const verification = await verifyRegistrationResponse({
+  response: req.body,
+  expectedChallenge: challenge,
+  expectedOrigin: EXPECTED_ORIGIN,
+  expectedRPID: RP_ID,
+  requireUserVerification: true
+});
 
-    console.log('Credential ID length:', credentialID.byteLength); // Yanzu dole ya buga 32+
-    console.log('Counter:', counter);
+console.log('Verification result:', verification.verified);
 
-    await pool.query(
-      `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter, rp_id, company)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (credential_id)
-       DO UPDATE SET public_key = EXCLUDED.public_key, counter = EXCLUDED.counter`,
-      [
-        userId,
-        Buffer.from(credentialID).toString('base64url'), // Save as base64url
-        Buffer.from(credentialPublicKey).toString('base64'),
-        Number(counter),
-        RP_ID,
-        'mayconnect'
-      ]
-    );
+if (
+  !verification.verified ||
+  !verification.registrationInfo
+) {
+  return res.status(400).json({
+    verified: false,
+    error: 'Backend verification failed'
+  });
+}
 
-    await pool.query('UPDATE users SET webauthn_challenge=NULL WHERE id=$1', [userId]);
+const regInfo = verification.registrationInfo;
 
-    console.log('SUCCESS: Credential saved for user', userId, 'ID length:', credentialID.byteLength);
+const credentialID = regInfo.credential.id;
+const credentialPublicKey = regInfo.credential.publicKey;
+const counter = Number(regInfo.credential.counter || 0);
 
-    return res.json({ verified: true, message: 'Biometric registered successfully' });
+if (!credentialID || !credentialPublicKey) {
+  throw new Error('Credential data missing');
+}
 
-  } catch (e) {
-    console.error('Register finish error:', e.message, e.stack);
-    return res.status(400).json({ verified: false, error: e.message || 'Registration failed' });
-  }
+console.log(
+  'Credential ID sample:',
+  credentialID.substring(0, 30)
+);
+
+console.log('Counter:', counter);
+
+await pool.query(
+  `
+  INSERT INTO webauthn_credentials
+  (
+    user_id,
+    credential_id,
+    public_key,
+    counter,
+    rp_id,
+    company
+  )
+  VALUES ($1,$2,$3,$4,$5,$6)
+  ON CONFLICT (credential_id)
+  DO UPDATE SET
+    public_key = EXCLUDED.public_key,
+    counter = EXCLUDED.counter
+  `,
+  [
+    userId,
+    credentialID,
+    Buffer.from(credentialPublicKey).toString('base64url'),
+    counter,
+    RP_ID,
+    'mayconnect'
+  ]
+);
+
+await pool.query(
+  'UPDATE users SET webauthn_challenge=NULL WHERE id=$1',
+  [userId]
+);
+
+console.log(
+  'SUCCESS: Credential saved for user',
+  userId
+);
+
+return res.json({
+  verified: true,
+  message: 'Biometric registered successfully'
+});
+
+} catch (e) {
+
+console.error(
+  'Register finish error:',
+  e.message,
+  e.stack
+);
+
+return res.status(400).json({
+  verified: false,
+  error: e.message || 'Registration failed'
+});
+
+}
+
 });
 
 /* ================= WEBAUTHN LOGIN START ================= */
