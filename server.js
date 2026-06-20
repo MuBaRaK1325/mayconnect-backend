@@ -1,85 +1,67 @@
-// 1. Start
-app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
-  try {
-    const credRes = await pool.query(`
-      SELECT credential_id, public_key, counter 
-      FROM webauthn_credentials 
-      WHERE user_id = $1
-    `, [req.user.id]);
+const express = require("express");
+const path = require('path');
+const cors = require("cors");
+const helmet = require("helmet");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { Pool } = require("pg");
+const http = require("http");
+const WebSocket = require("ws");
+const { v4: uuidv4 } = require("uuid");
+const axios = require("axios");
+const crypto = require("crypto");
+const rateLimit = require("express-rate-limit");
+const webpush = require("web-push");
+const session = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
 
-    if (credRes.rows.length === 0) {
-      return res.status(400).json({ error: 'No biometric setup. Enable fingerprint in Profile first' });
-    }
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} = require('@simplewebauthn/server');
 
-    const allowCredentials = credRes.rows.map(c => ({
-      id: c.credential_id,
-      type: 'public-key',
-      transports: ['internal']
-    }));
+const app = express(); // <-- App ya zo nan, kafin duk app.post
 
-    const options = await generateAuthenticationOptions({
-      rpID: req.hostname,
-      allowCredentials,
-      userVerification: 'discouraged',
-      timeout: 60000
-    });
+// 1. Middleware
+app.use(express.json());
+app.use(cors());
+app.use(helmet());
 
-    req.session.webauthnChallenge = options.challenge;
-    req.session.save();
-    res.json(options);
-  } catch (e) {
-    console.error('Verify purchase start error:', e);
-    res.status(500).json({ error: e.message });
+// 2. Session - Dole ne ya zo kafin routes
+app.use(session({
+  store: new pgSession({
+    pool: pool,
+    tableName: 'session'
+  }),
+  secret: process.env.SESSION_SECRET || 'change-this-to-random-string-123',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    maxAge: 24 * 60 * 60 * 1000,
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    sameSite: 'lax'
   }
+}));
+
+// 3. Pool na Postgres
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// 2. Finish
-app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => {
-  try {
-    const expectedChallenge = req.session.webauthnChallenge;
-    if (!expectedChallenge) {
-      return res.json({ verified: false, error: 'Session expired. Try again' });
-    }
+// 4. Auth middleware ɗinka - idan yana wani file, import shi. Idan nan ne, bar shi
+const auth = (req, res, next) => {
+  // JWT verify logic ɗinka nan
+  // misali: req.user = decoded;
+  next();
+};
 
-    const credRes = await pool.query(`
-      SELECT credential_id, public_key, counter 
-      FROM webauthn_credentials 
-      WHERE user_id = $1 AND credential_id = $2
-    `, [req.user.id, req.body.id]);
+// 5. Sauran routes ɗinka da ke nan...
 
-    const cred = credRes.rows[0];
-    if (!cred) return res.json({ verified: false, error: 'Credential not found' });
-
-    const verification = await verifyAuthenticationResponse({
-      response: req.body,
-      expectedChallenge,
-      expectedOrigin: req.headers.origin,
-      expectedRPID: req.hostname,
-      credential: {
-        id: cred.credential_id,
-        publicKey: cred.public_key,
-        counter: cred.counter
-      }
-    });
-
-    if (verification.verified) {
-      await pool.query(
-        `UPDATE webauthn_credentials SET counter=$1 WHERE credential_id=$2`,
-        [verification.authenticationInfo.newCounter, cred.credential_id]
-      );
-
-      req.session.webauthnChallenge = null;
-      req.session.save();
-      res.json({ verified: true });
-    } else {
-      res.json({ verified: false });
-    }
-  } catch (e) {
-    console.error('Verify purchase error:', e);
-    res.json({ verified: false, error: e.message });
-  }
-});
-// 1. Start purchase verification
+// 6. WebAuthn Purchase Routes - Saka su BAYAN app, session, pool, auth
 app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
   try {
     const credRes = await pool.query(`
@@ -114,7 +96,6 @@ app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
   }
 });
 
-// 2. Finish purchase verification
 app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => {
   try {
     const expectedChallenge = req.session.webauthnChallenge;
@@ -163,6 +144,8 @@ app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => 
     res.json({ verified: false, error: e.message });
   }
 });
+
+
 
 /* ================= SECURITY ================= */
 app.use(helmet());
@@ -1040,7 +1023,6 @@ function adminOnly(req, res, next) {
   }
   next();
 }
-
 
 
 
