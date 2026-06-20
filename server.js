@@ -1481,46 +1481,80 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 // Saka wannan a server.js
 app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
   try {
+    const userRes = await pool.query(
+      'SELECT webauthn_credential_id FROM users WHERE id=$1',
+      [req.user.id]
+    );
+
+    const credentialId = userRes.rows[0]?.webauthn_credential_id;
+    if (!credentialId) {
+      return res.status(400).json({ error: 'No biometric setup. Enable fingerprint in Profile first' });
+    }
+
     const options = await generateAuthenticationOptions({
       rpID: req.hostname,
-      allowCredentials: [],
+      allowCredentials: [{
+        id: credentialId,
+        type: 'public-key',
+        transports: ['internal']
+      }],
       userVerification: 'discouraged',
       timeout: 60000
     });
-    
+
     req.session.webauthnChallenge = options.challenge;
     res.json(options);
   } catch (e) {
+    console.error('Verify purchase start error:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
 app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => {
   try {
-    const { id, rawId, response, type } = req.body;
     const expectedChallenge = req.session.webauthnChallenge;
-    
-    // Duba credential ɗin user
-    const userRes = await pool.query('SELECT webauthn_credential_id FROM users WHERE id=$1', [req.user.id]);
-    const credentialId = userRes.rows[0]?.webauthn_credential_id;
-    
-    if (!credentialId) return res.json({ verified: false });
-    
+    if (!expectedChallenge) {
+      return res.json({ verified: false, error: 'Session expired. Try again' });
+    }
+
+    const userRes = await pool.query(
+      'SELECT webauthn_credential_id, webauthn_public_key, webauthn_counter FROM users WHERE id=$1',
+      [req.user.id]
+    );
+    const user = userRes.rows[0];
+
+    if (!user?.webauthn_credential_id ||!user?.webauthn_public_key) {
+      return res.json({ verified: false });
+    }
+
     const verification = await verifyAuthenticationResponse({
-      response: { id, rawId, response, type },
+      response: req.body,
       expectedChallenge,
       expectedOrigin: req.headers.origin,
       expectedRPID: req.hostname,
       credential: {
-        id: credentialId,
-        publicKey: userRes.rows[0].webauthn_public_key
+        id: user.webauthn_credential_id,
+        publicKey: user.webauthn_public_key,
+        counter: user.webauthn_counter || 0
       }
     });
-    
-    res.json({ verified: verification.verified });
+
+    if (verification.verified) {
+      // Update counter don hana replay attack
+      await pool.query(
+        'UPDATE users SET webauthn_counter=$1 WHERE id=$2',
+        [verification.authenticationInfo.newCounter, req.user.id]
+      );
+
+      // Share session ɗin
+      req.session.webauthnChallenge = null;
+      res.json({ verified: true });
+    } else {
+      res.json({ verified: false });
+    }
   } catch (e) {
     console.error('Verify purchase error:', e);
-    res.json({ verified: false });
+    res.json({ verified: false, error: e.message });
   }
 });
 
