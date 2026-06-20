@@ -1460,16 +1460,21 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
 
 app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   try {
+    const config = getCompanyConfig(req.headers.origin);
     const userId = Number(req.user?.id || 0);
+    
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    console.log('=== CHECK ENABLED === User:', userId, 'RP:', config.rpID);
 
     const result = await pool.query(
       'SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2 LIMIT 1',
-      [userId, RP_ID]
+      [userId, config.rpID]
     );
 
     res.json({ enabled: result.rows.length > 0 });
   } catch (e) {
+    console.error('Check enabled error:', e);
     res.status(500).json({ error: 'Server error' });
   }
 });
