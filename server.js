@@ -29,16 +29,17 @@ app.use(express.json());
 app.use(cors());
 app.use(helmet());
 
-// 2. Pool - IDAN KANA DA SHI A SAMA TO SHARE WANNAN. Amfani da pool ɗinka da ke wanzu
+// 2. Pool - Yi amfani da pool ɗinka da ke wanzu. KADA KA SAKE DECLARE SHI
+// Idan ba ka da pool tukuna, sai ka uncomment wannan:
 // const pool = new Pool({
 //   connectionString: process.env.DATABASE_URL,
 //   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 // });
 
-// 3. Session - amfani da pool ɗinka da ke wanzu
+// 3. Session - yana amfani da pool ɗinka na sama
 app.use(session({
   store: new pgSession({
-    pool: pool, // <-- yana amfani da pool ɗinka na sama
+    pool: pool,
     tableName: 'session'
   }),
   secret: process.env.SESSION_SECRET || 'change-this-to-random-string-123',
@@ -52,15 +53,13 @@ app.use(session({
   }
 }));
 
-// 4. Auth middleware ɗinka
-const auth = (req, res, next) => {
-  // JWT verify logic ɗinka nan
-  next();
-};
+// 4. Auth middleware - Yi amfani da auth ɗinka da ke wanzu
+// Idan ba ka da shi tukuna, sai ka rubuta naka:
+// const auth = (req, res, next) => { next(); }
 
-// 5. Sauran routes ɗinka...
+// 5. Sauran routes ɗinka da ke nan...
 
-// 6. WebAuthn Purchase Routes - 2 kawai, babu duplicate
+// 6. WebAuthn Purchase Routes - 2 kawai
 app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
   try {
     const credRes = await pool.query(`
@@ -143,6 +142,10 @@ app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => 
     res.json({ verified: false, error: e.message });
   }
 });
+
+// 7. Server listen
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
 
 
