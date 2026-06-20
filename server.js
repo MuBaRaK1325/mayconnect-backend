@@ -79,6 +79,90 @@ app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => 
     res.json({ verified: false, error: e.message });
   }
 });
+// 1. Start purchase verification
+app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
+  try {
+    const credRes = await pool.query(`
+      SELECT credential_id, public_key, counter 
+      FROM webauthn_credentials 
+      WHERE user_id = $1
+    `, [req.user.id]);
+
+    if (credRes.rows.length === 0) {
+      return res.status(400).json({ error: 'No biometric setup. Enable fingerprint in Profile first' });
+    }
+
+    const allowCredentials = credRes.rows.map(c => ({
+      id: c.credential_id,
+      type: 'public-key',
+      transports: ['internal', 'usb', 'nfc', 'ble']
+    }));
+
+    const options = await generateAuthenticationOptions({
+      rpID: req.hostname,
+      allowCredentials,
+      userVerification: 'discouraged',
+      timeout: 60000
+    });
+
+    req.session.webauthnChallenge = options.challenge;
+    await new Promise(resolve => req.session.save(resolve));
+    res.json(options);
+  } catch (e) {
+    console.error('Verify purchase start error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 2. Finish purchase verification
+app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => {
+  try {
+    const expectedChallenge = req.session.webauthnChallenge;
+    if (!expectedChallenge) {
+      return res.json({ verified: false, error: 'Session expired. Try again' });
+    }
+
+    const credRes = await pool.query(`
+      SELECT credential_id, public_key, counter 
+      FROM webauthn_credentials 
+      WHERE user_id = $1 AND credential_id = $2
+    `, [req.user.id, req.body.id]);
+
+    const cred = credRes.rows[0];
+    if (!cred) {
+      return res.json({ verified: false, error: 'Credential not found for this user' });
+    }
+
+    const verification = await verifyAuthenticationResponse({
+      response: req.body,
+      expectedChallenge,
+      expectedOrigin: req.headers.origin,
+      expectedRPID: req.hostname,
+      credential: {
+        id: cred.credential_id,
+        publicKey: cred.public_key,
+        counter: cred.counter
+      }
+    });
+
+    if (verification.verified) {
+      await pool.query(`
+        UPDATE webauthn_credentials 
+        SET counter = $1 
+        WHERE credential_id = $2
+      `, [verification.authenticationInfo.newCounter, cred.credential_id]);
+
+      req.session.webauthnChallenge = null;
+      await new Promise(resolve => req.session.save(resolve));
+      res.json({ verified: true });
+    } else {
+      res.json({ verified: false });
+    }
+  } catch (e) {
+    console.error('Verify purchase error:', e);
+    res.json({ verified: false, error: e.message });
+  }
+});
 
 /* ================= SECURITY ================= */
 app.use(helmet());
@@ -957,90 +1041,7 @@ function adminOnly(req, res, next) {
   next();
 }
 
-// 1. Start purchase verification
-app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
-  try {
-    const credRes = await pool.query(`
-      SELECT credential_id, public_key, counter 
-      FROM webauthn_credentials 
-      WHERE user_id = $1
-    `, [req.user.id]);
 
-    if (credRes.rows.length === 0) {
-      return res.status(400).json({ error: 'No biometric setup. Enable fingerprint in Profile first' });
-    }
-
-    const allowCredentials = credRes.rows.map(c => ({
-      id: c.credential_id,
-      type: 'public-key',
-      transports: ['internal', 'usb', 'nfc', 'ble']
-    }));
-
-    const options = await generateAuthenticationOptions({
-      rpID: req.hostname,
-      allowCredentials,
-      userVerification: 'discouraged',
-      timeout: 60000
-    });
-
-    req.session.webauthnChallenge = options.challenge;
-    await new Promise(resolve => req.session.save(resolve));
-    res.json(options);
-  } catch (e) {
-    console.error('Verify purchase start error:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// 2. Finish purchase verification
-app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => {
-  try {
-    const expectedChallenge = req.session.webauthnChallenge;
-    if (!expectedChallenge) {
-      return res.json({ verified: false, error: 'Session expired. Try again' });
-    }
-
-    const credRes = await pool.query(`
-      SELECT credential_id, public_key, counter 
-      FROM webauthn_credentials 
-      WHERE user_id = $1 AND credential_id = $2
-    `, [req.user.id, req.body.id]);
-
-    const cred = credRes.rows[0];
-    if (!cred) {
-      return res.json({ verified: false, error: 'Credential not found for this user' });
-    }
-
-    const verification = await verifyAuthenticationResponse({
-      response: req.body,
-      expectedChallenge,
-      expectedOrigin: req.headers.origin,
-      expectedRPID: req.hostname,
-      credential: {
-        id: cred.credential_id,
-        publicKey: cred.public_key,
-        counter: cred.counter
-      }
-    });
-
-    if (verification.verified) {
-      await pool.query(`
-        UPDATE webauthn_credentials 
-        SET counter = $1 
-        WHERE credential_id = $2
-      `, [verification.authenticationInfo.newCounter, cred.credential_id]);
-
-      req.session.webauthnChallenge = null;
-      await new Promise(resolve => req.session.save(resolve));
-      res.json({ verified: true });
-    } else {
-      res.json({ verified: false });
-    }
-  } catch (e) {
-    console.error('Verify purchase error:', e);
-    res.json({ verified: false, error: e.message });
-  }
-});
 
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - PASSWORDLESS 100% ================= */
