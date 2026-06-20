@@ -273,10 +273,45 @@ const ADMIN_EMAILS = [
   "Sadeeqtukur765@gmail.com"
 ];
 
-// HARCODE DAIDAI DA FRONTEND URL
-const RP_ID = 'www.mayconnectdataplug.com.ng';
-const RP_NAME = 'MAYCONNECT DATA PLUG';
-const EXPECTED_ORIGIN = 'https://www.mayconnectdataplug.com.ng'; // <- Wannan shine
+/* ================= MULTI COMPANY WEBAUTHN CONFIG ================= */
+
+const RP_CONFIG = {
+'https://www.mayconnectdataplug.com.ng': {
+rpID: 'www.mayconnectdataplug.com.ng',
+rpName: 'MAYCONNECT DATA PLUG'
+},
+
+'https://www.sadeeqdatahub.com.ng': {
+rpID: 'www.sadeeqdatahub.com.ng',
+rpName: 'SADEEQ DATA HUB'
+},
+
+'https://teevershdataplug.com.ng': {
+rpID: 'teevershdataplug.com.ng',
+rpName: 'TEEVERSH DATA PLUG'
+},
+
+'https://bnhabeebdatahub.com.ng': {
+rpID: 'bnhabeebdatahub.com.ng',
+rpName: 'BN HABEEB DATA HUB'
+}
+};
+
+function getWebAuthnConfig(req) {
+const origin = req.get('origin');
+
+const config = RP_CONFIG[origin];
+
+if (!config) {
+throw new Error("Unsupported origin: ${origin}");
+}
+
+return {
+RP_ID: config.rpID,
+RP_NAME: config.rpName,
+EXPECTED_ORIGIN: origin
+};
+}
 // PAYMENTPOINT CONFIG
 const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE || "https://api.paymentpoint.co";
 
@@ -868,12 +903,33 @@ function adminOnly(req, res, next) {
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - PASSWORDLESS 100% ================= */
 
-function getCompanyConfig() {
-  return {
-    name: RP_NAME,
-    icon: 'https://www.mayconnectdataplug.com.ng/images/logo.png',
-    short: 'mayconnect'
+function getCompanyConfig(req) {
+  const origin = req.get('origin') || req.headers.origin;
+
+  const configs = {
+    'https://www.mayconnectdataplug.com.ng': {
+      name: 'MAYCONNECT DATA PLUG',
+      icon: 'https://www.mayconnectdataplug.com.ng/images/logo.png',
+      short: 'mayconnect'
+    },
+    'https://www.sadeeqdatahub.com.ng': {
+      name: 'SADEEQ DATA HUB',
+      icon: 'https://www.sadeeqdatahub.com.ng/images/logo.png',
+      short: 'sadeeq'
+    },
+    'https://teevershdataplug.com.ng': {
+      name: 'TEEVERSH DATA PLUG',
+      icon: 'https://teevershdataplug.com.ng/images/logo.png',
+      short: 'teeversh'
+    },
+    'https://bnhabeebdatahub.com.ng': {
+      name: 'BN HABEEB DATA HUB',
+      icon: 'https://bnhabeebdatahub.com.ng/images/logo.png',
+      short: 'bnhabeeb'
+    }
   };
+
+  return configs[origin] || configs['https://www.mayconnectdataplug.com.ng'];
 }
 
 /* ================= WEBAUTHN REGISTER START ================= */
@@ -901,7 +957,9 @@ if (!user) {
   });
 }
 
-console.log('=== REGISTER START === UserID:', userId);
+const company = getCompanyConfig(req);
+
+console.log('=== REGISTER START === UserID:', userId, 'Company:', company.short);
 
 await pool.query(
   'DELETE FROM webauthn_credentials WHERE user_id=$1 AND rp_id=$2',
@@ -909,10 +967,9 @@ await pool.query(
 );
 
 const options = await generateRegistrationOptions({
-  rpName: RP_NAME,
+  rpName: company.name,
   rpID: RP_ID,
 
-  // SimpleWebAuthn v13 requires Uint8Array
   userID: new TextEncoder().encode(userId.toString()),
 
   userName: user.email,
@@ -967,7 +1024,9 @@ error: 'Unauthorized'
 });
 }
 
-console.log('=== REGISTER FINISH === UserID:', userId);
+const company = getCompanyConfig(req);
+
+console.log('=== REGISTER FINISH === UserID:', userId, 'Company:', company.short);
 
 try {
 
@@ -996,8 +1055,8 @@ const verification = await verifyRegistrationResponse({
 console.log('Verification result:', verification.verified);
 
 if (
-  !verification.verified ||
-  !verification.registrationInfo
+!verification.verified ||
+!verification.registrationInfo
 ) {
   return res.status(400).json({
     verified: false,
@@ -1011,7 +1070,7 @@ const credentialID = regInfo.credential.id;
 const credentialPublicKey = regInfo.credential.publicKey;
 const counter = Number(regInfo.credential.counter || 0);
 
-if (!credentialID || !credentialPublicKey) {
+if (!credentialID ||!credentialPublicKey) {
   throw new Error('Credential data missing');
 }
 
@@ -1045,7 +1104,7 @@ await pool.query(
     Buffer.from(credentialPublicKey).toString('base64url'),
     counter,
     RP_ID,
-    'mayconnect'
+    company.short
   ]
 );
 
@@ -1093,7 +1152,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
     );
 
     const allowCredentials = credsRes.rows.map(row => ({
-      id: row.credential_id, // base64url string daga DB
+      id: row.credential_id,
       type: 'public-key',
       transports: ['internal', 'hybrid']
     }));
@@ -1146,7 +1205,6 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       credentialId.substring(0, 30) + '...'
     );
 
-    // Find credential
     const credRes = await pool.query(
       `
       SELECT
@@ -1176,7 +1234,6 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       cred.credential_id.substring(0, 30) + '...'
     );
 
-    // Latest challenge
     const challengeRes = await pool.query(
       `
       SELECT challenge
@@ -1195,7 +1252,6 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
 
     const challenge = challengeRes.rows[0].challenge;
 
-    // Find user
     const userRes = await pool.query(
       `
       SELECT
@@ -1226,36 +1282,21 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       });
     }
 
-    // Verify passkey
     const verification = await verifyAuthenticationResponse({
       response: req.body,
-
       expectedChallenge: challenge,
       expectedOrigin: EXPECTED_ORIGIN,
       expectedRPID: RP_ID,
-
       credential: {
         id: cred.credential_id,
-
-        publicKey: Buffer.from(
-          cred.public_key,
-          'base64url'
-        ),
-
+        publicKey: Buffer.from(cred.public_key, 'base64url'),
         counter: Number(cred.counter || 0),
-
-        transports:
-          cred.transports ||
-          ['internal', 'hybrid']
+        transports: cred.transports || ['internal', 'hybrid']
       },
-
       requireUserVerification: true
     });
 
-    console.log(
-      'Verification result:',
-      verification.verified
-    );
+    console.log('Verification result:', verification.verified);
 
     if (!verification.verified) {
       return res.status(400).json({
@@ -1264,7 +1305,6 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       });
     }
 
-    // Update counter
     await pool.query(
       `
       UPDATE webauthn_credentials
@@ -1278,23 +1318,19 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       ]
     );
 
-    // Delete challenge
     await pool.query(
-      `
-      DELETE FROM webauthn_challenges
-      WHERE challenge = $1
-      `,
+      `DELETE FROM webauthn_challenges WHERE challenge = $1`,
       [challenge]
     );
 
-    // IMPORTANT:
-    // SAME PAYLOAD AS PASSWORD LOGIN
+    // IMPORTANT: SAME PAYLOAD AS PASSWORD LOGIN - EMAIL ADDED
     const token = jwt.sign(
       {
         id: user.id,
         username: user.username,
+        email: user.email,
         is_admin: user.is_admin,
-        role: user.is_admin ? 'admin' : 'user',
+        role: user.is_admin? 'admin' : 'user',
         company: user.company
       },
       process.env.JWT_SECRET,
