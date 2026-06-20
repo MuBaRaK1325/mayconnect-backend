@@ -22,17 +22,23 @@ const {
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
 
-const app = express(); // <-- App ya zo nan, kafin duk app.post
+const app = express();
 
 // 1. Middleware
 app.use(express.json());
 app.use(cors());
 app.use(helmet());
 
-// 2. Session - Dole ne ya zo kafin routes
+// 2. Pool - IDAN KANA DA SHI A SAMA TO SHARE WANNAN. Amfani da pool ɗinka da ke wanzu
+// const pool = new Pool({
+//   connectionString: process.env.DATABASE_URL,
+//   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+// });
+
+// 3. Session - amfani da pool ɗinka da ke wanzu
 app.use(session({
   store: new pgSession({
-    pool: pool,
+    pool: pool, // <-- yana amfani da pool ɗinka na sama
     tableName: 'session'
   }),
   secret: process.env.SESSION_SECRET || 'change-this-to-random-string-123',
@@ -46,22 +52,15 @@ app.use(session({
   }
 }));
 
-// 3. Pool na Postgres
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
-
-// 4. Auth middleware ɗinka - idan yana wani file, import shi. Idan nan ne, bar shi
+// 4. Auth middleware ɗinka
 const auth = (req, res, next) => {
   // JWT verify logic ɗinka nan
-  // misali: req.user = decoded;
   next();
 };
 
-// 5. Sauran routes ɗinka da ke nan...
+// 5. Sauran routes ɗinka...
 
-// 6. WebAuthn Purchase Routes - Saka su BAYAN app, session, pool, auth
+// 6. WebAuthn Purchase Routes - 2 kawai, babu duplicate
 app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
   try {
     const credRes = await pool.query(`
