@@ -1128,6 +1128,7 @@ app.post('/api/auth/webauthn/login-start', async (req, res) => {
 
 app.post('/api/auth/webauthn/login-finish', async (req, res) => {
   try {
+
     console.log('=== LOGIN FINISH START ===');
     console.log('RP_ID:', RP_ID);
     console.log('EXPECTED_ORIGIN:', EXPECTED_ORIGIN);
@@ -1162,6 +1163,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
 
     if (!credRes.rows.length) {
       console.log('Passkey not found');
+
       return res.status(400).json({
         error: 'Passkey not found'
       });
@@ -1174,7 +1176,7 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       cred.credential_id.substring(0, 30) + '...'
     );
 
-    // Get latest challenge
+    // Latest challenge
     const challengeRes = await pool.query(
       `
       SELECT challenge
@@ -1196,7 +1198,14 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     // Find user
     const userRes = await pool.query(
       `
-      SELECT id, username, email
+      SELECT
+        id,
+        username,
+        email,
+        company,
+        is_admin,
+        wallet_balance,
+        status
       FROM users
       WHERE id = $1
       `,
@@ -1211,7 +1220,13 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
 
     const user = userRes.rows[0];
 
-    // VERIFY
+    if (user.status === 'blocked') {
+      return res.status(403).json({
+        error: 'Account blocked'
+      });
+    }
+
+    // Verify passkey
     const verification = await verifyAuthenticationResponse({
       response: req.body,
 
@@ -1220,10 +1235,8 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       expectedRPID: RP_ID,
 
       credential: {
-        // IMPORTANT: string, NOT Buffer
         id: cred.credential_id,
 
-        // IMPORTANT: public_key stored as base64url string
         publicKey: Buffer.from(
           cred.public_key,
           'base64url'
@@ -1265,16 +1278,24 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
       ]
     );
 
-    // Remove used challenge
+    // Delete challenge
     await pool.query(
-      `DELETE FROM webauthn_challenges WHERE challenge = $1`,
+      `
+      DELETE FROM webauthn_challenges
+      WHERE challenge = $1
+      `,
       [challenge]
     );
 
+    // IMPORTANT:
+    // SAME PAYLOAD AS PASSWORD LOGIN
     const token = jwt.sign(
       {
         id: user.id,
-        username: user.username
+        username: user.username,
+        is_admin: user.is_admin,
+        role: user.is_admin ? 'admin' : 'user',
+        company: user.company
       },
       process.env.JWT_SECRET,
       {
@@ -1290,18 +1311,20 @@ app.post('/api/auth/webauthn/login-finish', async (req, res) => {
     return res.json({
       verified: true,
       token,
+
       user: {
         id: user.id,
-        username: user.username
+        username: user.username,
+        email: user.email,
+        company: user.company,
+        is_admin: user.is_admin,
+        wallet_balance: user.wallet_balance
       }
     });
 
   } catch (e) {
 
-    console.error(
-      '=== LOGIN FINISH ERROR ==='
-    );
-
+    console.error('=== LOGIN FINISH ERROR ===');
     console.error(e);
 
     return res.status(400).json({
