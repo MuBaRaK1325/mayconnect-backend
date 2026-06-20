@@ -1,147 +1,143 @@
-const express = require("express");
-const path = require('path');
-const cors = require("cors");
-const helmet = require("helmet");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const { Pool } = require("pg");
-const http = require("http");
-const WebSocket = require("ws");
-const { v4: uuidv4 } = require("uuid");
-const axios = require("axios");
-const crypto = require("crypto");
-const rateLimit = require("express-rate-limit");
-const webpush = require("web-push");
+const express = require('express');
+const cors = require('cors');
+const cors = require('cors');
+const helmet = require('helmet');
 const session = require('express-session');
 const pgSession = require('connect-pg-simple')(session);
-
-const {
-  generateRegistrationOptions,
-  verifyRegistrationResponse,
-  generateAuthenticationOptions,
-  verifyAuthenticationResponse,
-} = require('@simplewebauthn/server');
+const { Pool } = require('pg');
+const { auth } = require('./auth'); // idan auth naka a wani file
 
 const app = express();
 
-// 1. Middleware
-app.use(express.json());
-app.use(cors());
+// 1. Middleware na asali
 app.use(helmet());
+app.use(cors({ origin: process.env.FRONTEND_URL, credentials: true }));
+app.use(express.json());
 
-// 2. Pool - Yi amfani da pool ɗinka da ke wanzu. KADA KA SAKE DECLARE SHI
-// Idan ba ka da pool tukuna, sai ka uncomment wannan:
-// const pool = new Pool({
-//   connectionString: process.env.DATABASE_URL,
-//   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-// });
-
-// 3. Session - yana amfani da pool ɗinka na sama
+// 2. Session - amfani da pool dinka da ya wanzu
 app.use(session({
   store: new pgSession({
-    pool: pool,
+    pool: pool, // <-- amfani da pool dinka
     tableName: 'session'
   }),
-  secret: process.env.SESSION_SECRET || 'change-this-to-random-string-123',
+  secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: {
-    maxAge: 24 * 60 * 60 * 1000,
-    secure: process.env.NODE_ENV === 'production',
+  cookie: { 
+    maxAge: 30 * 24 * 60 * 60 * 1000,
     httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax'
   }
 }));
 
-// 4. Auth middleware - Yi amfani da auth ɗinka da ke wanzu
-// Idan ba ka da shi tukuna, sai ka rubuta naka:
-// const auth = (req, res, next) => { next(); }
+// 3. Sauran routes dinka...
+app.use('/api/auth', auth);
 
-// 5. Sauran routes ɗinka da ke nan...
-
-// 6. WebAuthn Purchase Routes - 2 kawai
-app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
+// 4. WebAuthn routes - amfani da pool dinka da auth dinka
+app.post('/api/auth/webauthn/register-options', async (req, res) => {
   try {
-    const credRes = await pool.query(`
-      SELECT credential_id, public_key, counter 
-      FROM webauthn_credentials 
-      WHERE user_id = $1
-    `, [req.user.id]);
-
-    if (credRes.rows.length === 0) {
-      return res.status(400).json({ error: 'No biometric setup. Enable fingerprint in Profile first' });
-    }
-
-    const allowCredentials = credRes.rows.map(c => ({
-      id: c.credential_id,
-      type: 'public-key',
-      transports: ['internal', 'usb', 'nfc', 'ble']
-    }));
-
-    const options = await generateAuthenticationOptions({
+    const userId = req.user.id;
+    const user = await pool.query('SELECT id, email, name FROM users WHERE id = $1', [userId]);
+    
+    const options = await generateRegistrationOptions({
+      rpName: 'Your App Name',
       rpID: req.hostname,
-      allowCredentials,
-      userVerification: 'discouraged',
-      timeout: 60000
+      userID: user.rows[0].id,
+      userName: user.rows[0].email,
+      userDisplayName: user.rows[0].name,
+      attestationType: 'none',
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        userVerification: 'preferred'
+      }
     });
-
-    req.session.webauthnChallenge = options.challenge;
-    await new Promise(resolve => req.session.save(resolve));
+    
+    req.session.challenge = options.challenge;
     res.json(options);
-  } catch (e) {
-    console.error('Verify purchase start error:', e);
-    res.status(500).json({ error: e.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => {
+app.post('/api/auth/webauthn/register-verify', async (req, res) => {
   try {
-    const expectedChallenge = req.session.webauthnChallenge;
-    if (!expectedChallenge) {
-      return res.json({ verified: false, error: 'Session expired. Try again' });
-    }
-
-    const credRes = await pool.query(`
-      SELECT credential_id, public_key, counter 
-      FROM webauthn_credentials 
-      WHERE user_id = $1 AND credential_id = $2
-    `, [req.user.id, req.body.id]);
-
-    const cred = credRes.rows[0];
-    if (!cred) {
-      return res.json({ verified: false, error: 'Credential not found for this user' });
-    }
-
-    const verification = await verifyAuthenticationResponse({
-      response: req.body,
+    const { id, rawId, response, type } = req.body;
+    const expectedChallenge = req.session.challenge;
+    
+    const verification = await verifyRegistrationResponse({
+      response,
       expectedChallenge,
+      expectedOrigin: req.headers.origin,
+      expectedRPID: req.hostname
+    });
+    
+    if (verification.verified) {
+      await pool.query(
+        'INSERT INTO webauthn_credentials (user_id, credential_id, public_key, counter) VALUES ($1, $2, $3, $4)',
+        [req.user.id, id, verification.registrationInfo.credential.publicKey, verification.registrationInfo.credential.counter]
+      );
+      res.json({ verified: true });
+    } else {
+      res.status(400).json({ verified: false });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/webauthn/auth-options', async (req, res) => {
+  try {
+    const credentials = await pool.query('SELECT credential_id FROM webauthn_credentials WHERE user_id = $1', [req.user.id]);
+    
+    const options = await generateAuthenticationOptions({
+      rpID: req.hostname,
+      allowCredentials: credentials.rows.map(c => ({
+        id: c.credential_id,
+        type: 'public-key',
+        transports: ['internal']
+      })),
+      userVerification: 'preferred'
+    });
+    
+    req.session.challenge = options.challenge;
+    res.json(options);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/webauthn/auth-verify', async (req, res) => {
+  try {
+    const { id, rawId, response, type } = req.body;
+    const cred = await pool.query('SELECT * FROM webauthn_credentials WHERE credential_id = $1', [id]);
+    
+    if (!cred.rows[0]) return res.status(404).json({ error: 'Credential not found' });
+    
+    const verification = await verifyAuthenticationResponse({
+      response,
+      expectedChallenge: req.session.challenge,
       expectedOrigin: req.headers.origin,
       expectedRPID: req.hostname,
       credential: {
-        id: cred.credential_id,
-        publicKey: cred.public_key,
-        counter: cred.counter
+        id: cred.rows[0].credential_id,
+        publicKey: cred.rows[0].public_key,
+        counter: cred.rows[0].counter
       }
     });
-
+    
     if (verification.verified) {
-      await pool.query(`
-        UPDATE webauthn_credentials 
-        SET counter = $1 
-        WHERE credential_id = $2
-      `, [verification.authenticationInfo.newCounter, cred.credential_id]);
-
-      req.session.webauthnChallenge = null;
-      await new Promise(resolve => req.session.save(resolve));
+      await pool.query('UPDATE webauthn_credentials SET counter = $1 WHERE credential_id = $2', [verification.authenticationInfo.newCounter, id]);
       res.json({ verified: true });
     } else {
-      res.json({ verified: false });
+      res.status(400).json({ verified: false });
     }
-  } catch (e) {
-    console.error('Verify purchase error:', e);
-    res.json({ verified: false, error: e.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
+
+
 
 
 
