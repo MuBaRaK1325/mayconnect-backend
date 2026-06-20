@@ -27,21 +27,7 @@ const app = express();
 /* ================= SECURITY ================= */
 app.use(helmet());
 app.set('trust proxy', 1);
-app.use(session({
-  store: new pgSession({
-    pool: pool, // yana amfani da pool ɗinka da ke wanzu
-    tableName: 'session'
-  }),
-  secret: process.env.SESSION_SECRET || 'change-this-random-string',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    maxAge: 24 * 60 * 60 * 1000,
-    secure: process.env.NODE_ENV === 'production',
-    httpOnly: true,
-    sameSite: 'lax'
-  }
-}));
+
 
 /* ================= PAYMENTPOINT WEBHOOK - MUST BE FIRST, BEFORE ANY BODY PARSERS ================= */
 app.post("/api/paymentpoint/webhook",
@@ -226,6 +212,21 @@ pool.connect((err, client, release) => {
     release();
   }
 });
+app.use(session({
+  store: new pgSession({
+    pool: pool, // yana amfani da pool ɗinka da ke wanzu
+    tableName: 'session'
+  }),
+  secret: process.env.SESSION_SECRET || 'change-this-random-string',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    maxAge: 24 * 60 * 60 * 1000,
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    sameSite: 'lax'
+  }
+}));
 
 app.use(cors({
   origin: [
