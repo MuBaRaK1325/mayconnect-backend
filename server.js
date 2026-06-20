@@ -1478,32 +1478,30 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-// Saka wannan a server.js
+// 1. Start purchase verification
 app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
   try {
-    const userRes = await pool.query(`
-      SELECT id, email, webauthn_enabled, webauthn_credential_id, webauthn_public_key, webauthn_counter
-      FROM users WHERE id=$1
+    // Karba duk credentials ɗin user
+    const credRes = await pool.query(`
+      SELECT credential_id, public_key, counter 
+      FROM webauthn_credentials 
+      WHERE user_id = $1
     `, [req.user.id]);
 
-    const user = userRes.rows[0];
-    console.log('Biometric check:', user.email, 'enabled:', user.webauthn_enabled, 'cred_id:',!!user.webauthn_credential_id);
-
-    // Duba idan enabled = true KUMA credential_id yana nan
-    if (!user.webauthn_enabled ||!user.webauthn_credential_id) {
-      return res.status(400).json({
-        error: 'No biometric setup. Enable fingerprint in Profile first',
-        debug: `enabled=${user.webauthn_enabled}, cred_id=${!!user.webauthn_credential_id}`
-      });
+    if (credRes.rows.length === 0) {
+      return res.status(400).json({ error: 'No biometric setup. Enable fingerprint in Profile first' });
     }
+
+    // SimpleWebAuthn yana karbar array na duk credentials
+    const allowCredentials = credRes.rows.map(c => ({
+      id: c.credential_id,
+      type: 'public-key',
+      transports: ['internal', 'usb', 'nfc', 'ble']
+    }));
 
     const options = await generateAuthenticationOptions({
       rpID: req.hostname,
-      allowCredentials: [{
-        id: user.webauthn_credential_id,
-        type: 'public-key',
-        transports: ['internal']
-      }],
+      allowCredentials: allowCredentials,
       userVerification: 'discouraged',
       timeout: 60000
     });
@@ -1516,6 +1514,7 @@ app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
   }
 });
 
+// 2. Finish purchase verification
 app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => {
   try {
     const expectedChallenge = req.session.webauthnChallenge;
@@ -1523,14 +1522,16 @@ app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => 
       return res.json({ verified: false, error: 'Session expired. Try again' });
     }
 
-    const userRes = await pool.query(
-      'SELECT webauthn_credential_id, webauthn_public_key, webauthn_counter FROM users WHERE id=$1',
-      [req.user.id]
-    );
-    const user = userRes.rows[0];
+    // Nemo credential ɗin da browser ya aika
+    const credRes = await pool.query(`
+      SELECT credential_id, public_key, counter 
+      FROM webauthn_credentials 
+      WHERE user_id = $1 AND credential_id = $2
+    `, [req.user.id, req.body.id]);
 
-    if (!user?.webauthn_credential_id ||!user?.webauthn_public_key) {
-      return res.json({ verified: false, error: 'No biometric setup' });
+    const cred = credRes.rows[0];
+    if (!cred) {
+      return res.json({ verified: false, error: 'Credential not found for this user' });
     }
 
     const verification = await verifyAuthenticationResponse({
@@ -1539,17 +1540,19 @@ app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => 
       expectedOrigin: req.headers.origin,
       expectedRPID: req.hostname,
       credential: {
-        id: user.webauthn_credential_id,
-        publicKey: user.webauthn_public_key,
-        counter: user.webauthn_counter || 0
+        id: cred.credential_id,
+        publicKey: cred.public_key,
+        counter: cred.counter
       }
     });
 
     if (verification.verified) {
-      await pool.query(
-        'UPDATE users SET webauthn_counter=$1 WHERE id=$2',
-        [verification.authenticationInfo.newCounter, req.user.id]
-      );
+      // Update counter don hana replay attack
+      await pool.query(`
+        UPDATE webauthn_credentials 
+        SET counter = $1 
+        WHERE credential_id = $2
+      `, [verification.authenticationInfo.newCounter, cred.credential_id]);
 
       req.session.webauthnChallenge = null;
       res.json({ verified: true });
