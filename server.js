@@ -1478,6 +1478,51 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+// Saka wannan a server.js
+app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
+  try {
+    const options = await generateAuthenticationOptions({
+      rpID: req.hostname,
+      allowCredentials: [],
+      userVerification: 'discouraged',
+      timeout: 60000
+    });
+    
+    req.session.webauthnChallenge = options.challenge;
+    res.json(options);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => {
+  try {
+    const { id, rawId, response, type } = req.body;
+    const expectedChallenge = req.session.webauthnChallenge;
+    
+    // Duba credential ɗin user
+    const userRes = await pool.query('SELECT webauthn_credential_id FROM users WHERE id=$1', [req.user.id]);
+    const credentialId = userRes.rows[0]?.webauthn_credential_id;
+    
+    if (!credentialId) return res.json({ verified: false });
+    
+    const verification = await verifyAuthenticationResponse({
+      response: { id, rawId, response, type },
+      expectedChallenge,
+      expectedOrigin: req.headers.origin,
+      expectedRPID: req.hostname,
+      credential: {
+        id: credentialId,
+        publicKey: userRes.rows[0].webauthn_public_key
+      }
+    });
+    
+    res.json({ verified: verification.verified });
+  } catch (e) {
+    console.error('Verify purchase error:', e);
+    res.json({ verified: false });
+  }
+});
 
 app.get('/api/ping', (req, res) => res.send('pong'));
 
