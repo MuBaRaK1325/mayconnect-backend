@@ -1481,20 +1481,26 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
 // Saka wannan a server.js
 app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
   try {
-    const userRes = await pool.query(
-      'SELECT webauthn_credential_id FROM users WHERE id=$1',
-      [req.user.id]
-    );
+    const userRes = await pool.query(`
+      SELECT id, email, webauthn_enabled, webauthn_credential_id, webauthn_public_key, webauthn_counter
+      FROM users WHERE id=$1
+    `, [req.user.id]);
 
-    const credentialId = userRes.rows[0]?.webauthn_credential_id;
-    if (!credentialId) {
-      return res.status(400).json({ error: 'No biometric setup. Enable fingerprint in Profile first' });
+    const user = userRes.rows[0];
+    console.log('Biometric check:', user.email, 'enabled:', user.webauthn_enabled, 'cred_id:',!!user.webauthn_credential_id);
+
+    // Duba idan enabled = true KUMA credential_id yana nan
+    if (!user.webauthn_enabled ||!user.webauthn_credential_id) {
+      return res.status(400).json({
+        error: 'No biometric setup. Enable fingerprint in Profile first',
+        debug: `enabled=${user.webauthn_enabled}, cred_id=${!!user.webauthn_credential_id}`
+      });
     }
 
     const options = await generateAuthenticationOptions({
       rpID: req.hostname,
       allowCredentials: [{
-        id: credentialId,
+        id: user.webauthn_credential_id,
         type: 'public-key',
         transports: ['internal']
       }],
@@ -1524,7 +1530,7 @@ app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => 
     const user = userRes.rows[0];
 
     if (!user?.webauthn_credential_id ||!user?.webauthn_public_key) {
-      return res.json({ verified: false });
+      return res.json({ verified: false, error: 'No biometric setup' });
     }
 
     const verification = await verifyAuthenticationResponse({
@@ -1540,13 +1546,11 @@ app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => 
     });
 
     if (verification.verified) {
-      // Update counter don hana replay attack
       await pool.query(
         'UPDATE users SET webauthn_counter=$1 WHERE id=$2',
         [verification.authenticationInfo.newCounter, req.user.id]
       );
 
-      // Share session ɗin
       req.session.webauthnChallenge = null;
       res.json({ verified: true });
     } else {
