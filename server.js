@@ -916,79 +916,7 @@ function adminOnly(req, res, next) {
   }
   next();
 }
-app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
-  try {
-    const credRes = await pool.query(
-      `SELECT credential_id, public_key, counter FROM webauthn_credentials WHERE user_id = $1`,
-      [req.user.id]
-    );
-    
-    if (credRes.rows.length === 0) {
-      return res.status(400).json({ error: 'No biometric setup found' });
-    }
 
-    const options = await generateAuthenticationOptions({
-      rpID: req.hostname,
-      allowCredentials: credRes.rows.map(c => ({
-        id: c.credential_id,
-        type: 'public-key',
-        transports: ['internal']
-      })),
-      userVerification: 'discouraged'
-    });
-
-    req.session.webauthnChallenge = options.challenge;
-    await new Promise(resolve => req.session.save(resolve));
-    
-    res.json(options);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => {
-  try {
-    const expectedChallenge = req.session.webauthnChallenge;
-    if (!expectedChallenge) {
-      return res.json({ verified: false, error: 'No challenge in session' });
-    }
-
-    const cred = (await pool.query(
-      `SELECT * FROM webauthn_credentials WHERE user_id = $1 AND credential_id = $2`,
-      [req.user.id, req.body.id]
-    )).rows[0];
-
-    if (!cred) return res.json({ verified: false, error: 'Credential not found' });
-
-    const verification = await verifyAuthenticationResponse({
-      response: req.body,
-      expectedChallenge: expectedChallenge,
-      expectedOrigin: req.headers.origin,
-      expectedRPID: req.hostname,
-      credential: {
-        id: cred.credential_id,
-        publicKey: cred.public_key,
-        counter: cred.counter
-      }
-    });
-
-    if (verification.verified) {
-      await pool.query(
-        `UPDATE webauthn_credentials SET counter = $1 WHERE credential_id = $2`,
-        [verification.authenticationInfo.newCounter, cred.credential_id]
-      );
-      
-      req.session.webauthnChallenge = null;
-      await new Promise(resolve => req.session.save(resolve));
-      
-      res.json({ verified: true });
-    } else {
-      res.json({ verified: false });
-    }
-  } catch (e) {
-    res.json({ verified: false, error: e.message });
-  }
-});
 
 
 /* ================= WEBAUTHN - BIOMETRIC PASSKEYS - PASSWORDLESS 100% ================= */
@@ -1569,7 +1497,83 @@ app.get('/api/auth/webauthn/check-enabled', auth, async (req, res) => {
   }
 });
 
+app.post("/api/auth/webauthn/verify-purchase", auth, async (req, res) => {
+  try {
+    const credRes = await pool.query(
+      `SELECT credential_id, public_key, counter FROM webauthn_credentials WHERE user_id = $1`,
+      [req.user.id]
+    );
+    
+    if (credRes.rows.length === 0) {
+      return res.status(400).json({ error: 'No biometric setup found' });
+    }
 
+    const rpID = process.env.RP_ID || req.hostname.replace(/^www\./, '');
+    const options = await generateAuthenticationOptions({
+      rpID: rpID,
+      allowCredentials: credRes.rows.map(c => ({
+        id: c.credential_id,
+        type: 'public-key',
+        transports: ['internal']
+      })),
+      userVerification: 'discouraged'
+    });
+
+    req.session.webauthnChallenge = options.challenge;
+    await new Promise(resolve => req.session.save(resolve));
+    
+    res.json(options);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/auth/webauthn/verify-purchase-finish", auth, async (req, res) => {
+  try {
+    const expectedChallenge = req.session.webauthnChallenge;
+    if (!expectedChallenge) {
+      return res.json({ verified: false, error: 'No challenge in session' });
+    }
+
+    const cred = (await pool.query(
+      `SELECT * FROM webauthn_credentials WHERE user_id = $1 AND credential_id = $2`,
+      [req.user.id, req.body.id]
+    )).rows[0];
+
+    if (!cred) return res.json({ verified: false, error: 'Credential not found' });
+
+    const rpID = process.env.RP_ID || req.hostname.replace(/^www\./, '');
+    const origin = process.env.ORIGIN || `${req.protocol}://${req.get('host')}`;
+
+    const verification = await verifyAuthenticationResponse({
+      response: req.body,
+      expectedChallenge: expectedChallenge,
+      expectedOrigin: origin,
+      expectedRPID: rpID,
+      credential: {
+        id: cred.credential_id,
+        publicKey: cred.public_key,
+        counter: cred.counter
+      }
+    });
+
+    if (verification.verified) {
+      await pool.query(
+        `UPDATE webauthn_credentials SET counter = $1 WHERE credential_id = $2`,
+        [verification.authenticationInfo.newCounter, cred.credential_id]
+      );
+      
+      req.session.webauthnChallenge = null;
+      await new Promise(resolve => req.session.save(resolve));
+      
+      res.json({ verified: true });
+    } else {
+      res.json({ verified: false });
+    }
+  } catch (e) {
+    res.json({ verified: false, error: e.message });
+  }
+});
 app.get('/api/ping', (req, res) => res.send('pong'));
 
 /* ================= FUND INIT ================= */
