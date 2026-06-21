@@ -2299,10 +2299,32 @@ app.post("/api/generate-account", auth, async (req, res) => {
 
 /* ================= TRANSACTIONS ================= */
 app.get("/api/transactions", auth, async (req, res) => {
-  const tx = await pool.query("SELECT * FROM transactions WHERE user_id=$1 ORDER BY id DESC LIMIT 100", [req.user.id]);
-  res.json(tx.rows);
-});
+  try {
+    console.log("User ID:", req.user.id);
 
+    const tx = await pool.query(
+      `
+      SELECT *
+      FROM transactions
+      WHERE user_id = $1
+      ORDER BY id DESC
+      LIMIT 100
+      `,
+      [req.user.id]
+    );
+
+    console.log("Transactions found:", tx.rows.length);
+
+    // Show latest transaction in terminal
+    console.log(tx.rows[0]);
+
+    res.json(tx.rows);
+
+  } catch (err) {
+    console.error("TRANSACTION ERROR:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 /* ================= PLANS - Company isolated with 3 tiers ================= */
 app.get("/api/plans", auth, async (req, res) => {
   try {
