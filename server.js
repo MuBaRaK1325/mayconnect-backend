@@ -229,23 +229,8 @@ app.use(session({
 }));
 
 app.use(cors({
-  origin: [
-    'https://teevershdataplug.com.ng',
-    'https://www.teevershdataplug.com.ng',
-    'https://sadeeqdatahub.com.ng',
-    'https://www.sadeeqdatahub.com.ng',
-    'https://bnhabeebdatahub.com.ng',
-    'https://www.bnhabeebdatahub.com.ng',
-    'https://mayconnectdataplug.com.ng',
-    'https://www.mayconnectdataplug.com.ng',
-    'https://teeversh-frontend.onrender.com',
-    'https://mayconnect-frontend.onrender.com',
-    'https://sadeeq-frontend.onrender.com',
-    'https://bnhabeeb-frontend.onrender.com',
-    'http://localhost:3000',
-    'http://localhost:5173'
-  ],
-  credentials: true,
+  origin: '*', // Allow everything including mobile apps
+  credentials: false, // Must be false if origin is '*'
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
