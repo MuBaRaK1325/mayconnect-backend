@@ -273,11 +273,11 @@ const ADMIN_EMAILS = [
   "mayconnectofficial@gmail.com",
   "bashirahmadt11696@gmail.com",
   "abdullahihabibudanalhaji@gmail.com",
-  "Sadeeqtukur765@gmail.com"
+  "Sadeeqtukur765@gmail.com",
+  "msdatasub1@gmail.com"
 ];
 
 /* ================= MULTI COMPANY WEBAUTHN CONFIG ================= */
-
 const RP_CONFIG = {
 'https://www.mayconnectdataplug.com.ng': {
 rpID: 'www.mayconnectdataplug.com.ng',
@@ -297,6 +297,11 @@ rpName: 'TEEVERSH DATA PLUG'
 'https://bnhabeebdatahub.com.ng': {
 rpID: 'bnhabeebdatahub.com.ng',
 rpName: 'BN HABEEB DATA HUB'
+},
+
+'https://www.msdatasub.com.ng': {
+rpID: 'www.msdatasub.com.ng',
+rpName: 'MSDATASUB'
 }
 };
 
@@ -306,7 +311,7 @@ const origin = req.get('origin');
 const config = RP_CONFIG[origin];
 
 if (!config) {
-throw new Error("Unsupported origin: ${origin}");
+throw new Error(`Unsupported origin: ${origin}`);
 }
 
 return {
@@ -318,7 +323,7 @@ EXPECTED_ORIGIN: origin
 // PAYMENTPOINT CONFIG
 const PAYMENTPOINT_BASE = process.env.PAYMENTPOINT_BASE || "https://api.paymentpoint.co";
 
-console.log("[PAYMENTPOINT] Config loaded for:", ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"]);
+console.log("[PAYMENTPOINT] Config loaded for:", ["teeversh", "sadeeq", "bnhabeeb", "mayconnect", "msdatasub"]);
 
 const VTU_PROVIDERS = {
   maitama: {
@@ -327,7 +332,9 @@ const VTU_PROVIDERS = {
       mayconnect: process.env.MAITAMA_TOKEN_MAYCONNECT,
       teeversh: process.env.MAITAMA_TOKEN_TEEVERSH,
       sadeeq: process.env.MAITAMA_TOKEN_SADEEQ,
-      bnhabeeb: process.env.MAITAMA_TOKEN_BNHABEEB
+      bnhabeeb: process.env.MAITAMA_TOKEN_BNHABEEB,
+      msdatasub: process.env.MAITAMA_TOKEN_MSDATASUB
+
     }
   },
   cheapdatahub: {
@@ -340,7 +347,8 @@ const VTU_PROVIDERS = {
       mayconnect: process.env.SUBPADI_TOKEN_MAYCONNECT,
       teeversh: process.env.SUBPADI_TOKEN_TEEVERSH,
       sadeeq: process.env.SUBPADI_TOKEN_SADEEQ,
-      bnhabeeb: process.env.SUBPADI_TOKEN_BNHABEEB
+      bnhabeeb: process.env.SUBPADI_TOKEN_BNHABEEB,
+      msdatasub: process.env.SUBPADI_TOKEN_MSDATASUB
     }
   },
   arrahuz: {
@@ -349,7 +357,8 @@ const VTU_PROVIDERS = {
       mayconnect: process.env.ARRAHUZ_TOKEN_MAYCONNECT,
       teeversh: process.env.ARRAHUZ_TOKEN_TEEVERSH,
       sadeeq: process.env.ARRAHUZ_TOKEN_SADEEQ,
-      bnhabeeb: process.env.ARRAHUZ_TOKEN_BNHABEEB
+      bnhabeeb: process.env.ARRAHUZ_TOKEN_BNHABEEB,
+      msdatasub: process.env.ARRAHUZ_TOKEN_MSDATASUB
     }
   }
 };
@@ -948,6 +957,16 @@ function getCompanyConfig(origin) {
         expectedOrigin: 'https://bnhabeebdatahub.com.ng',
         company: 'bnhabeeb',
         icon: 'https://bnhabeebdatahub.com.ng/images/logo.png'
+      };
+
+    case 'https://www.msdatasub.com.ng':
+    case 'https://msdatasub.com.ng':
+      return {
+        rpID: 'www.msdatasub.com.ng',
+        rpName: 'MSDATASUB',
+        expectedOrigin: 'https://www.msdatasub.com.ng',
+        company: 'msdatasub',
+        icon: 'https://www.msdatasub.com.ng/images/ms.png'
       };
 
     default:
@@ -1748,7 +1767,6 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
   const userId = req.user.id;
   const lockKey = `gen_dva_${userId}`;
 
-  // 1. Prevent double clicks - 90s lock
   if (generatingUsers.has(lockKey)) {
     return res.status(429).json({
       success: false,
@@ -1765,7 +1783,6 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
 
-    // 2. Already has account
     if (user.account_number && user.paymentmethod === "paymentpoint") {
       generatingUsers.delete(lockKey);
       return res.status(200).json({
@@ -1777,7 +1794,6 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       });
     }
 
-    // 3. Validate required DB fields
     if (!user.phone || String(user.phone).trim().length < 10) {
       generatingUsers.delete(lockKey);
       return res.status(400).json({
@@ -1804,7 +1820,6 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
 
     const { bvn, nin } = req.body;
 
-    // 4. Require BVN or NIN
     if (!bvn &&!nin) {
       generatingUsers.delete(lockKey);
       return res.status(422).json({
@@ -1822,11 +1837,9 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       });
     }
 
-    // 5. CRITICAL: Wait 20s BEFORE first PaymentPoint call
     console.log(`[User ${userId}] Waiting 20s for PaymentPoint warmup...`);
     await sleep(20000);
 
-    // 6. Call helper with retry logic
     const creds = getPaymentPointCreds(user.company);
     let attempts = 0;
     const maxAttempts = 3;
@@ -1841,12 +1854,10 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
         ppResponse = await createPaymentPointAccount(user, { bvn, nin });
         console.log('[DVA Route] PP Response:', JSON.stringify(ppResponse));
 
-        // If we got accounts, break
         if (ppResponse.status === "success" && ppResponse.bankAccounts?.length > 0) {
           break;
         }
 
-        // If success but no accounts, wait and refetch
         if (ppResponse.status === "success" && (!ppResponse.bankAccounts || ppResponse.bankAccounts.length === 0)) {
           const errorString = ppResponse.errors?.join(" ").toLowerCase() || "";
 
@@ -1884,19 +1895,16 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
         console.error(`[User ${userId}] Attempt ${attempts} failed:`, err.message);
         lastError = err.message;
 
-        // Don't retry on validation errors
         if (err.message.includes('BVN') || err.message.includes('NIN') || err.message.includes('Phone')) {
           break;
         }
       }
 
-      // Wait 10s before next retry
       if (attempts < maxAttempts) {
         await sleep(10000);
       }
     }
 
-    // 7. Final check after all retries
     if (!ppResponse?.bankAccounts || ppResponse.bankAccounts.length === 0) {
       generatingUsers.delete(lockKey);
       const errorString = ppResponse?.errors?.join(" ").toLowerCase() || "";
@@ -1922,7 +1930,6 @@ app.post('/api/wallet/create-dva', auth, async (req, res) => {
       });
     }
 
-    // 8. Success - save to DB
     const account = ppResponse.bankAccounts[0];
     if (!account?.accountNumber) {
       generatingUsers.delete(lockKey);
@@ -2005,7 +2012,7 @@ app.post("/api/signup", async (req, res) => {
     );
 
     try {
-      const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
+      const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect", "msdatasub"];
       if (paymentpointCompanies.includes(userCompany.toLowerCase())) {
         const ppResponse = await createPaymentPointAccount(user.rows[0]);
         if (ppResponse.status === "success" && ppResponse.bankAccounts?.length > 0) {
@@ -2065,7 +2072,7 @@ app.post("/api/signup", async (req, res) => {
     );
 
     try {
-      const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
+      const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect", "msdatasub"];
       if (paymentpointCompanies.includes(userCompany.toLowerCase())) {
         const ppResponse = await createPaymentPointAccount(user.rows[0]);
         if (ppResponse.status === "success" && ppResponse.bankAccounts?.length > 0) {
@@ -2113,7 +2120,6 @@ app.post("/api/login", loginLimiter, async (req, res) => {
   try {
     const { username, email, password, login } = req.body;
 
-    // Accept 'login' field ko 'username' ko 'email' don compatibility
     const loginIdentifier = login || username || email;
 
     if (!loginIdentifier ||!password) {
@@ -2125,7 +2131,6 @@ app.post("/api/login", loginLimiter, async (req, res) => {
 
     const trimmedLogin = loginIdentifier.trim().toLowerCase();
 
-    // Nemo user da username KO email - case insensitive
     const userRes = await pool.query(
       "SELECT * FROM users WHERE LOWER(username) = $1 OR LOWER(email) = $1",
       [trimmedLogin]
@@ -2141,7 +2146,6 @@ app.post("/api/login", loginLimiter, async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Check idan account din blocked
     if (user.status === 'blocked') {
       return res.status(403).json({ message: "Account blocked. Contact support." });
     }
@@ -2185,7 +2189,7 @@ app.get("/api/me", auth, async (req, res) => {
     let user = await getUser(req.user.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
+    const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect", "msdatasub"];
     if (!user.account_number && paymentpointCompanies.includes(user.company?.toLowerCase()) && user.phone) {
       try {
         const ppResponse = await createPaymentPointAccount(user);
@@ -2236,7 +2240,7 @@ app.post("/api/generate-account", auth, async (req, res) => {
       return res.status(400).json({ message: "Please update your phone number in profile first" });
     }
 
-    const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect"];
+    const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect", "msdatasub"];
     if (!paymentpointCompanies.includes(user.company.toLowerCase())) {
       return res.status(400).json({ message: "Account creation not supported for this company" });
     }
