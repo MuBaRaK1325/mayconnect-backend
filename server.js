@@ -2681,6 +2681,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     const price = isTopUser? (plan.top_price || plan.price) : plan.price;
     const balanceNum = Number(user.wallet_balance);
     const priceNum = Number(price);
+    const cost = Number(plan.cost);
 
     if (balanceNum < priceNum) {
       await client.query("ROLLBACK");
@@ -2690,14 +2691,16 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     }
 
     const balanceBefore = Number(balanceNum);
+    const balanceAfterDeduct = Number(balanceBefore) - Number(priceNum); // DEDUCT FIRST
     const ref = "DATA-" + uuidv4();
-    const cost = Number(plan.cost);
 
-    // 1. INSERT PENDING TRANSACTION - KADA KA DEBIT TUKUNA
+    // 1. DEBIT WALLET FIRST + INSERT PENDING TRANSACTION
+    await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [balanceAfterDeduct, user.id]);
+
     const txRes = await client.query(
       `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name,provider,balance_before,balance_after)
        VALUES($1,$2,'DATA',$3::numeric,$4::numeric,$5,$6,$7,'PENDING',$8,$9,$10::numeric,$11::numeric) RETURNING *`,
-      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name, plan.provider, balanceBefore, balanceBefore]
+      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name, plan.provider, balanceBefore, balanceAfterDeduct]
     );
     const txId = txRes.rows[0].id;
     await client.query("COMMIT");
@@ -2726,7 +2729,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         responseMsg = 'Transaction successful';
       } else if (apiResponse.status === 'pending' || apiResponse.Status?.toLowerCase() === 'pending') {
         finalStatus = 'PENDING';
-        responseMsg = 'Transaction pending';
+        responseMsg = 'Transaction pending. Will be delivered shortly.';
       } else {
         finalStatus = 'FAILED';
         responseMsg = apiResponse.message || apiResponse.api_response || 'Provider rejected transaction';
@@ -2749,16 +2752,18 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       }
     }
 
-    // 3. UPDATE TRANSACTION + DEBIT WALLET IDAN SUCCESS KAWAI
-    let balanceAfter = Number(balanceBefore);
-
+    // 3. UPDATE TRANSACTION + HANDLE REFUND IF FAILED
     await client.query("BEGIN");
+    let finalBalance = balanceAfterDeduct;
 
+    if (finalStatus === 'FAILED') {
+      // REFUND WALLET
+      finalBalance = Number(balanceBefore);
+      await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [finalBalance, user.id]);
+    }
+
+    // ADMIN PROFIT ONLY ON SUCCESS
     if (finalStatus === 'SUCCESS') {
-      balanceAfter = Number(balanceBefore) - Number(priceNum);
-      await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [balanceAfter, user.id]);
-
-      // Profit
       const adminId = await getCompanyAdmin(user.company);
       const profit = Number(priceNum) - Number(cost);
       if (adminId && profit > 0) {
@@ -2776,20 +2781,21 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW(),
           balance_after = $5::numeric
       WHERE id = $4
-    `, [finalStatus, responseMsg, JSON.stringify(apiResponse), txId, Number(balanceAfter)]);
+    `, [finalStatus, responseMsg, JSON.stringify(apiResponse), txId, Number(finalBalance)]);
 
     await client.query("COMMIT");
 
-    // 4. HANDLE FAILED
+    sendWalletUpdate(user.id, finalBalance);
+
+    // 4. RETURN RESPONSE
     if (finalStatus === 'FAILED') {
-      sendWalletUpdate(user.id, balanceBefore);
       return res.status(400).json({
         success: false,
         message: responseMsg,
         reference: ref,
         status: 'FAILED',
         balance_before: Number(balanceBefore),
-        balance_after: Number(balanceBefore),
+        balance_after: Number(finalBalance),
         phone: phone,
         network: plan.network,
         plan_name: plan.name,
@@ -2797,8 +2803,6 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         created_at: new Date().toISOString()
       });
     }
-
-    sendWalletUpdate(user.id, balanceAfter);
 
     await sendPushNotification(user.company, user.id, {
       title: `${user.company.toUpperCase()} - Data Purchase`,
@@ -2810,9 +2814,9 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       success: true,
       reference: ref,
       status: finalStatus,
-      balance: Number(balanceAfter),
+      balance: Number(finalBalance),
       balance_before: Number(balanceBefore),
-      balance_after: Number(balanceAfter),
+      balance_after: Number(finalBalance),
       tier: isTopUser? 'top' : 'default',
       phone: phone,
       network: plan.network,
