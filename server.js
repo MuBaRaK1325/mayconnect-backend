@@ -334,7 +334,6 @@ const VTU_PROVIDERS = {
       sadeeq: process.env.MAITAMA_TOKEN_SADEEQ,
       bnhabeeb: process.env.MAITAMA_TOKEN_BNHABEEB,
       msdatasub: process.env.MAITAMA_TOKEN_MSDATASUB
-
     }
   },
   cheapdatahub: {
@@ -360,6 +359,10 @@ const VTU_PROVIDERS = {
       bnhabeeb: process.env.ARRAHUZ_TOKEN_BNHABEEB,
       msdatasub: process.env.ARRAHUZ_TOKEN_MSDATASUB
     }
+  },
+  danmalama: {
+    base_url: process.env.DANMALAMA_BASE_URL,
+    api_key: process.env.DANMALAMA_API_KEY
   }
 };
 
@@ -572,7 +575,7 @@ app.post('/api/test-push', async (req, res) => {
   res.json({sent: true});
 });
 
-/* ================= VTU API CALLS - MAITAMA CLEAN ================= */
+/* ================= VTU API CALLS - MAITAMA CLEAN + DANMALAMA ================= */
 // MAITAMA NETWORK MAP: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
 const MAITAMA_NETWORK_MAP_NAME_TO_ID = {
   'mtn': 1,
@@ -584,14 +587,14 @@ const MAITAMA_NETWORK_MAP_NAME_TO_ID = {
 const MAITAMA_NETWORK_MAP_ID_TO_NAME = {
   1: 'mtn',
   2: 'airtel',
-  3: 'glo',
-  4: '9mobile'
+ 3: 'glo',
+ 4: '9mobile'
 };
 
 // ARRAHUZ NETWORK MAP: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL
 const ARRAHUZ_NETWORK_MAP_ID_TO_NAME = {
-  1: 'mtn',
-  2: 'glo',
+ 1: 'mtn',
+ 2: 'glo',
   3: '9mobile',
   4: 'airtel'
 };
@@ -601,6 +604,14 @@ const ARRAHUZ_NETWORK_MAP_NAME_TO_ID = {
   'glo': 2,
   '9mobile': 3,
   'airtel': 4,
+};
+
+// DANMALAMA NETWORK MAP: 1=MTN, 2=GLO, 3=AIRTEL, 4=9MOBILE
+const DANMALAMA_NETWORK_MAP_ID_TO_NAME = {
+ 1: 'MTN',
+ 2: 'GLO',
+ 3: 'AIRTEL',
+ 4: '9MOBILE'
 };
 
 function getMaitamaNetworkId(networkName) {
@@ -619,6 +630,11 @@ function getArrahuzNetworkId(networkName) {
 function getArrahuzNetworkName(networkId) {
   const id = Number(networkId);
   return ARRAHUZ_NETWORK_MAP_ID_TO_NAME[id] || null;
+}
+
+function getDanmalamaNetworkName(networkId) {
+  const id = Number(networkId);
+  return DANMALAMA_NETWORK_MAP_ID_TO_NAME[id] || null;
 }
 
 function formatPhoneForMaitama(phone) {
@@ -883,6 +899,47 @@ async function callArrahuzAirtime(phone, network_id, amount, company) {
   }
 
   return res.data || { status: "success", message: "Request sent to Arrahuz" };
+}
+
+// DANMALAMA DATA - Uses network ID: 1=MTN, 2=GLO, 3=AIRTEL, 4=9MOBILE
+async function callDanmalamaData(phone, network_id, planId) {
+  const { base_url, api_key } = VTU_PROVIDERS.danmalama;
+  if (!api_key) throw new Error("No Danmalama API key configured");
+
+  const network = getDanmalamaNetworkName(network_id);
+  if (!network) throw new Error(`Invalid network_id: ${network_id}. Must be 1-4`);
+
+  const formattedPhone = formatPhoneForMaitama(phone);
+
+  const payload = {
+    network,
+    phone: formattedPhone,
+    planId: String(planId)
+  };
+
+  console.log('DANMALAMA DATA REQUEST:', { payload });
+
+  const res = await axios.post(
+    `${base_url}/api/v1/purchase`,
+    payload,
+    {
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": api_key
+      },
+      timeout: 60000
+    }
+  );
+
+  if (res.data.status === true) {
+    return {
+      status: 'success',
+      reference: res.data.data?.reference || res.data.reference,
+     ...res.data
+    };
+  } else {
+    throw new Error(res.data.message || "Danmalama purchase failed");
+  }
 }
 /* ================= AUTH MIDDLEWARE ================= */
 function auth(req, res, next) {
@@ -2602,7 +2659,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     client.release();
   }
 });
-/* ================= BUY DATA - Multi-provider + BIOMETRIC ================= */
+/* ================= BUY DATA - Multi-provider + BIOMETRIC + DANMALAMA ================= */
 app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -2719,6 +2776,8 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         apiResponse = await callSubPadiData(phone, plan.api_plan_id, user.company);
       } else if (plan.provider === "arrahuz") {
         apiResponse = await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
+      } else if (plan.provider === "danmalama") {
+        apiResponse = await callDanmalamaData(phone, plan.network_id, plan.api_plan_id);
       } else {
         throw new Error("Unknown provider");
       }
