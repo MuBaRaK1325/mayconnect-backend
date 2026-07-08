@@ -926,19 +926,25 @@ async function callArrahuzAirtime(phone, network_id, amount, company) {
 
 // DANMALAMA DATA - Uses network ID: 1=MTN, 2=GLO, 3=AIRTEL, 4=9MOBILE
 async function callDanmalamaData(phone, network_id, planId) {
-  const { base_url, api_key } = VTU_PROVIDERS.danmalama;
+  const { base_url, api_key } = VTU_PROVIDERS.DANMALAMA; // FIXED: ALL CAPS
   if (!api_key) throw new Error("No Danmalama API key configured");
+  if (!base_url) throw new Error("No Danmalama BASE_URL configured");
 
   const network = getDanmalamaNetworkName(network_id);
   if (!network) throw new Error(`Invalid network_id: ${network_id}. Must be 1-4`);
 
-  const formattedPhone = formatPhoneForMaitama(phone);
+  const formattedPhone = formatPhoneForDanmalama(phone); // You had formatPhoneForMaitama here
 
   const payload = {
     network,
     phone: formattedPhone,
-    planId: String(planId)
+    planId: String(planId),
+    api_key // most providers need this in payload too
   };
+
+  const res = await axios.post(`${base_url}/data`, payload, { timeout: 60000 });
+  return res.data;
+}
 
   console.log('DANMALAMA DATA REQUEST:', { payload });
 
