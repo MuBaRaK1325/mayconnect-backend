@@ -365,7 +365,7 @@ const VTU_PROVIDERS = {
     api_key: process.env.DANMALAMA_API_KEY
   },
   jjdatasub: {
-    base_url: "https://jjdatasub.com",
+    base_url: "https://jjdatasub.com/api",
     tokens: {
       mayconnect: process.env.JJDATASUB_TOKEN_MAYCONNECT,
       teeversh: process.env.JJDATASUB_TOKEN_TEEVERSH,
