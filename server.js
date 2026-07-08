@@ -944,7 +944,7 @@ async function callDanmalamaData(phone, network_id, planId) {
 
   const res = await axios.post(`${base_url}/data`, payload, { timeout: 60000 });
   return res.data;
-}
+
 
   console.log('DANMALAMA DATA REQUEST:', { payload });
 
