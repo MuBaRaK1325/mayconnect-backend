@@ -363,6 +363,16 @@ const VTU_PROVIDERS = {
   danmalama: {
     base_url: process.env.DANMALAMA_BASE_URL,
     api_key: process.env.DANMALAMA_API_KEY
+  },
+  jjdatasub: {
+    base_url: "https://jjdatasub.com",
+    tokens: {
+      mayconnect: process.env.JJDATASUB_TOKEN_MAYCONNECT,
+      teeversh: process.env.JJDATASUB_TOKEN_TEEVERSH,
+      sadeeq: process.env.JJDATASUB_TOKEN_SADEEQ,
+      bnhabeeb: process.env.JJDATASUB_TOKEN_BNHABEEB,
+      msdatasub: process.env.JJDATASUB_TOKEN_MSDATASUB
+    }
   }
 };
 
@@ -575,7 +585,7 @@ app.post('/api/test-push', async (req, res) => {
   res.json({sent: true});
 });
 
-/* ================= VTU API CALLS - MAITAMA CLEAN + DANMALAMA ================= */
+/* ================= VTU API CALLS - MAITAMA CLEAN + DANMALAMA + JJDATASUB ================= */
 // MAITAMA NETWORK MAP: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
 const MAITAMA_NETWORK_MAP_NAME_TO_ID = {
   'mtn': 1,
@@ -596,7 +606,7 @@ const ARRAHUZ_NETWORK_MAP_ID_TO_NAME = {
  1: 'mtn',
  2: 'glo',
   3: '9mobile',
-  4: 'airtel'
+ 4: 'airtel'
 };
 
 const ARRAHUZ_NETWORK_MAP_NAME_TO_ID = {
@@ -612,6 +622,14 @@ const DANMALAMA_NETWORK_MAP_ID_TO_NAME = {
  2: 'GLO',
  3: 'AIRTEL',
  4: '9MOBILE'
+};
+
+// JJDATASUB NETWORK MAP: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+const JJDATASUB_NETWORK_MAP_ID_TO_NAME = {
+ 1: 'mtn',
+ 2: 'airtel',
+ 3: 'glo',
+ 4: '9mobile'
 };
 
 function getMaitamaNetworkId(networkName) {
@@ -635,6 +653,11 @@ function getArrahuzNetworkName(networkId) {
 function getDanmalamaNetworkName(networkId) {
   const id = Number(networkId);
   return DANMALAMA_NETWORK_MAP_ID_TO_NAME[id] || null;
+}
+
+function getJJDataSubNetworkName(networkId) {
+  const id = Number(networkId);
+  return JJDATASUB_NETWORK_MAP_ID_TO_NAME[id] || null;
 }
 
 function formatPhoneForMaitama(phone) {
@@ -935,11 +958,76 @@ async function callDanmalamaData(phone, network_id, planId) {
     return {
       status: 'success',
       reference: res.data.data?.reference || res.data.reference,
-     ...res.data
+    ...res.data
     };
   } else {
     throw new Error(res.data.message || "Danmalama purchase failed");
   }
+}
+
+// JJDATASUB DATA - Uses network ID: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+async function callJJDataSubData(phone, network_id, api_plan_id, company) {
+  const { base_url, tokens } = VTU_PROVIDERS.jjdatasub;
+  const token = tokens[company];
+  if (!token) throw new Error(`No JJDataSub token configured for ${company}`);
+
+  const payload = {
+    mobile_number: formatPhoneForMaitama(phone),
+    network: Number(network_id), // 1=MTN, 2=Airtel, 3=Glo, 4=9mobile
+    plan: Number(api_plan_id),
+    Ported_number: true
+  };
+
+  console.log('JJDATASUB DATA REQUEST:', { payload, company });
+
+  const res = await axios.post(
+    `${base_url}/api/data/`,
+    payload,
+    {
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Token ${token}`
+      },
+      timeout: 60000
+    }
+  );
+
+  const status = res.data?.Status || res.data?.status;
+  if (!["success", "successful", "pending"].includes(status?.toLowerCase())) {
+    throw new Error(res.data.api_response || res.data.message || "JJDataSub purchase failed");
+  }
+  return res.data;
+}
+
+// JJDATASUB AIRTIME
+async function callJJDataSubAirtime(phone, network_id, amount, company) {
+  const { base_url, tokens } = VTU_PROVIDERS.jjdatasub;
+  const token = tokens[company];
+  if (!token) throw new Error(`No JJDataSub token configured for ${company}`);
+
+  const payload = {
+    mobile_number: formatPhoneForMaitama(phone),
+    network: Number(network_id),
+    amount: Number(amount)
+  };
+
+  const res = await axios.post(
+    `${base_url}/api/topup/`,
+    payload,
+    {
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Token ${token}`
+      },
+      timeout: 60000
+    }
+  );
+
+  const status = res.data?.Status || res.data?.status;
+  if (!["success", "successful", "pending"].includes(status?.toLowerCase())) {
+    throw new Error(res.data.api_response || res.data.message || "JJDataSub airtime failed");
+  }
+  return res.data;
 }
 /* ================= AUTH MIDDLEWARE ================= */
 function auth(req, res, next) {
@@ -2659,7 +2747,7 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     client.release();
   }
 });
-/* ================= BUY DATA - Multi-provider + BIOMETRIC + DANMALAMA ================= */
+/* ================= BUY DATA - Multi-provider + BIOMETRIC + DANMALAMA + JJDATASUB ================= */
 app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -2778,6 +2866,8 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         apiResponse = await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
       } else if (plan.provider === "danmalama") {
         apiResponse = await callDanmalamaData(phone, plan.network_id, plan.api_plan_id);
+      } else if (plan.provider === "jjdatasub") {
+        apiResponse = await callJJDataSubData(phone, plan.network_id, plan.api_plan_id, user.company);
       } else {
         throw new Error("Unknown provider");
       }
