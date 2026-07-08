@@ -360,7 +360,7 @@ const VTU_PROVIDERS = {
       msdatasub: process.env.ARRAHUZ_TOKEN_MSDATASUB
     }
   },
-  danmalama: {
+  DANMALAMA: {
     base_url: process.env.DANMALAMA_BASE_URL,
     api_key: process.env.DANMALAMA_API_KEY
   },
@@ -2864,7 +2864,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         apiResponse = await callSubPadiData(phone, plan.api_plan_id, user.company);
       } else if (plan.provider === "arrahuz") {
         apiResponse = await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else if (plan.provider === "danmalama") {
+      } else if (plan.provider === "DANMALAMA") {
         apiResponse = await callDanmalamaData(phone, plan.network_id, plan.api_plan_id);
       } else if (plan.provider === "jjdatasub") {
         apiResponse = await callJJDataSubData(phone, plan.network_id, plan.api_plan_id, user.company);
