@@ -933,42 +933,17 @@ async function callDanmalamaData(phone, network_id, planId) {
   const network = getDanmalamaNetworkName(network_id);
   if (!network) throw new Error(`Invalid network_id: ${network_id}. Must be 1-4`);
 
-  const formattedPhone = formatPhoneForDanmalama(phone); // You had formatPhoneForMaitama here
+  const formattedPhone = formatPhoneForDanmalama(phone);
 
   const payload = {
     network,
     phone: formattedPhone,
     planId: String(planId),
-    api_key // most providers need this in payload too
+    api_key
   };
 
   const res = await axios.post(`${base_url}/data`, payload, { timeout: 60000 });
   return res.data;
-
-
-  console.log('DANMALAMA DATA REQUEST:', { payload });
-
-  const res = await axios.post(
-    `${base_url}/api/v1/purchase`,
-    payload,
-    {
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": api_key
-      },
-      timeout: 60000
-    }
-  );
-
-  if (res.data.status === true) {
-    return {
-      status: 'success',
-      reference: res.data.data?.reference || res.data.reference,
-    ...res.data
-    };
-  } else {
-    throw new Error(res.data.message || "Danmalama purchase failed");
-  }
 }
 
 // JJDATASUB DATA - Uses network ID: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
