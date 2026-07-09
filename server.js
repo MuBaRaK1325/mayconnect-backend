@@ -595,8 +595,8 @@ const MAITAMA_NETWORK_MAP_NAME_TO_ID = {
 };
 
 const MAITAMA_NETWORK_MAP_ID_TO_NAME = {
-  1: 'mtn',
-  2: 'airtel',
+ 1: 'mtn',
+ 2: 'airtel',
  3: 'glo',
  4: '9mobile'
 };
@@ -605,7 +605,7 @@ const MAITAMA_NETWORK_MAP_ID_TO_NAME = {
 const ARRAHUZ_NETWORK_MAP_ID_TO_NAME = {
  1: 'mtn',
  2: 'glo',
-  3: '9mobile',
+ 3: '9mobile',
  4: 'airtel'
 };
 
@@ -653,6 +653,13 @@ function getArrahuzNetworkName(networkId) {
 function getDanmalamaNetworkName(networkId) {
   const id = Number(networkId);
   return DANMALAMA_NETWORK_MAP_ID_TO_NAME[id] || null;
+}
+
+function formatPhoneForDanmalama(phone) {
+  let p = String(phone).replace(/\s+/g, '').trim();
+  if (p.startsWith('0')) p = '234' + p.slice(1);
+  if (p.startsWith('+234')) p = p.slice(1);
+  return p;
 }
 
 function getJJDataSubNetworkName(networkId) {
