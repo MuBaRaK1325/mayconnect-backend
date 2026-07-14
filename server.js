@@ -333,7 +333,7 @@ const VTU_PROVIDERS = {
       teeversh: process.env.MAITAMA_TOKEN_TEEVERSH,
       sadeeq: process.env.MAITAMA_TOKEN_SADEEQ,
       bnhabeeb: process.env.MAITAMA_TOKEN_BNHABEEB,
-      msdatasub: process.env.MAITAMA_TOKEN_MSDATASUB
+      MSDATASUB: process.env.MAITAMA_TOKEN_MSDATASUB
     }
   },
   cheapdatahub: {
@@ -2186,67 +2186,7 @@ app.post("/api/signup", async (req, res) => {
   }
 });
 
-/* ================= SIGNUP ================= */
-app.post("/api/signup", async (req, res) => {
-  try {
-    const { username, email, password, pin, phone, company } = req.body;
-    if (!username ||!email ||!password ||!pin ||!phone)
-      return res.status(400).json({ message: "All fields required including phone" });
 
-    const userCompany = company || "mayconnect";
-    const hash = await bcrypt.hash(password, 10);
-    const pinHash = await bcrypt.hash(pin, 10);
-    const isAdmin = ADMIN_EMAILS.includes(email);
-
-    const user = await pool.query(
-      `INSERT INTO users(username,email,password,pin,phone,is_admin,company)
-       VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [username, email, hash, pinHash, phone, isAdmin, userCompany]
-    );
-
-    try {
-      const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect", "msdatasub"];
-      if (paymentpointCompanies.includes(userCompany.toLowerCase())) {
-        const ppResponse = await createPaymentPointAccount(user.rows[0]);
-        if (ppResponse.status === "success" && ppResponse.bankAccounts?.length > 0) {
-          const account = ppResponse.bankAccounts[0];
-          await pool.query(
-            `UPDATE users SET
-              account_number = $1,
-              account_name = $2,
-              bank_name = $3,
-              paymentmethod = 'paymentpoint',
-              customer_id = $4
-             WHERE id = $5`,
-            [
-              account.accountNumber,
-              account.accountName,
-              account.bankName,
-              ppResponse.customer?.customer_id || null,
-              user.rows[0].id
-            ]
-          );
-        } else if (ppResponse.errors?.some(e => e.toLowerCase().includes('reserved account'))) {
-          console.log("SIGNUP: DVA not enabled for company", userCompany);
-        }
-      }
-    } catch (e) {
-      console.log("ACCOUNT CREATE ERROR ON SIGNUP - continuing anyway:", e.message);
-    }
-
-    const updatedUser = await getUser(user.rows[0].id);
-    const token = jwt.sign(
-      { id: updatedUser.id, username: updatedUser.username, is_admin: updatedUser.is_admin, company: updatedUser.company },
-      process.env.JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-    res.json({ token, message: "Signup successful" });
-  } catch (e) {
-    console.log("SIGNUP ERROR:", e.message);
-    if (e.code === "23505") return res.status(400).json({ message: "Username or email already exists" });
-    res.status(500).json({ message: "Signup failed" });
-  }
-});
 
 /* ================= LOGIN - USERNAME OR EMAIL ================= */
 app.post("/api/login", loginLimiter, async (req, res) => {
