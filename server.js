@@ -347,7 +347,7 @@ const VTU_PROVIDERS = {
       teeversh: process.env.SUBPADI_TOKEN_TEEVERSH,
       sadeeq: process.env.SUBPADI_TOKEN_SADEEQ,
       bnhabeeb: process.env.SUBPADI_TOKEN_BNHABEEB,
-      msdatasub: process.env.SUBPADI_TOKEN_MSDATASUB
+      MSDATASUB: process.env.SUBPADI_TOKEN_MSDATASUB
     }
   },
   arrahuz: {
@@ -357,7 +357,7 @@ const VTU_PROVIDERS = {
       teeversh: process.env.ARRAHUZ_TOKEN_TEEVERSH,
       sadeeq: process.env.ARRAHUZ_TOKEN_SADEEQ,
       bnhabeeb: process.env.ARRAHUZ_TOKEN_BNHABEEB,
-      msdatasub: process.env.ARRAHUZ_TOKEN_MSDATASUB
+      MSDATASUB: process.env.ARRAHUZ_TOKEN_MSDATASUB
     }
   },
   DANMALAMA: {
@@ -2418,7 +2418,7 @@ app.get("/api/plans", auth, async (req, res) => {
          regular_price,
          top_price
        FROM plans
-       WHERE company = $1
+       WHERE company ILIKE $1
          AND is_active = true
          AND (restricted = false OR $2 = 'top')
        ORDER BY network ASC, price ASC`,
@@ -3428,7 +3428,7 @@ app.get("/admin/plans", auth, adminOnly, async (req, res) => {
   try {
     res.set("Cache-Control", "no-store");
     const plans = await pool.query(
-      "SELECT * FROM plans WHERE company = $1 ORDER BY network, price",
+      "SELECT * FROM plans WHERE company ILIKE $1 ORDER BY network, price",
       [req.user.company]
     );
     res.json(plans.rows);
@@ -3460,7 +3460,7 @@ app.post("/admin/plans", auth, adminOnly, async (req, res) => {
   try {
     const result = await pool.query(
       `INSERT INTO plans(plan_id, company, network, name, price, regular_price, top_price, user_price, cost, validity, restricted, is_active, provider, network_id, api_plan_id)
-       VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE, $12, $13, $14) RETURNING *`,
+       VALUES($1, UPPER($2), $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE, $12, $13, $14) RETURNING *`,
       [
         plan_id, req.user.company, network, name,
         Number(price),
@@ -3490,7 +3490,6 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
     const value = req.body[key];
     if (value === undefined) continue;
 
-    // Handle numeric fields - only convert empty/null/undefined to null
     if (['price', 'regular_price', 'top_price', 'user_price', 'cost', 'network_id'].includes(key)) {
       if (value === '' || value === null || value === undefined) {
         updates[key] = null;
@@ -3502,7 +3501,6 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
         updates[key] = numValue;
       }
     }
-    // Handle validity separately to parse "30 Days" -> 30
     else if (key === 'validity') {
       if (value === '' || value === null || value === undefined) {
         updates[key] = null;
@@ -3527,7 +3525,7 @@ app.put("/admin/plans/:id", auth, adminOnly, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `UPDATE plans SET ${set} WHERE id = $${values.length - 1} AND company = $${values.length} RETURNING *`,
+      `UPDATE plans SET ${set} WHERE id = $${values.length - 1} AND company ILIKE $${values.length} RETURNING *`,
       values
     );
     if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
@@ -3542,7 +3540,7 @@ app.delete("/admin/plans/:id", auth, adminOnly, async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      "UPDATE plans SET is_active = FALSE WHERE id = $1 AND company = $2 RETURNING id",
+      "UPDATE plans SET is_active = FALSE WHERE id = $1 AND company ILIKE $2 RETURNING id",
       [id, req.user.company]
     );
     if (!result.rows.length) return res.status(404).json({ message: "Plan not found" });
