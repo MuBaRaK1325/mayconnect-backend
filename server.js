@@ -2262,21 +2262,21 @@ app.get("/api/me", auth, async (req, res) => {
     let user = await getUser(req.user.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
+    // DON'T AWAIT THIS - Let it run in background
     const paymentpointCompanies = ["teeversh", "sadeeq", "bnhabeeb", "mayconnect", "msdatasub"];
     if (!user.account_number && paymentpointCompanies.includes(user.company?.toLowerCase()) && user.phone) {
-      try {
-        const ppResponse = await createPaymentPointAccount(user);
+      createPaymentPointAccount(user).then(async (ppResponse) => {
         if (ppResponse.status === "success" && ppResponse.bankAccounts?.length > 0) {
           const account = ppResponse.bankAccounts[0];
           await pool.query(
             `UPDATE users SET account_number=$1, account_name=$2, bank_name=$3, paymentmethod='paymentpoint', customer_id=$4 WHERE id=$5`,
             [account.accountNumber, account.accountName, account.bankName, ppResponse.customer?.customer_id || null, user.id]
           );
-          user = await getUser(req.user.id);
+          console.log('[BG] PaymentPoint account created for user', user.id);
         }
-      } catch (e) {
+      }).catch(e => {
         console.log("Account creation failed on /me:", e.message);
-      }
+      });
     }
 
     const [topCheck] = await Promise.all([pool.query("SELECT 1 FROM top_users WHERE id=$1", [req.user.id])]);
@@ -2285,7 +2285,8 @@ app.get("/api/me", auth, async (req, res) => {
     userData.user_tier = userData.is_top_user? 'top' : 'default';
     delete userData.password;
     delete userData.pin;
-    res.json(userData);
+
+    res.json(userData); // SEND IMMEDIATELY - don't wait for PP
   } catch (err) {
     console.error('/api/me error:', err);
     res.status(500).json({ message: "Failed to fetch user" });
