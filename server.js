@@ -2981,7 +2981,7 @@ app.post('/api/admin/create-reset-link', async (req, res) => {
 
   // Whitelist your domains
   const allowedDomains = [
-    'mayconnect.com.ng',
+    'mayconnectdataplug.com.ng',
     'teevershdataplug.com.ng',
     'sadeeqdatahub.com.ng',
     'bnhabeebdatahub.com.ng',
@@ -2990,7 +2990,7 @@ app.post('/api/admin/create-reset-link', async (req, res) => {
 
   const targetDomain = domain && allowedDomains.includes(domain)
    ? domain
-    : 'mayconnect.com.ng'; // default fallback
+    : 'mayconnectdataplug.com.ng'; // default fallback
 
   try {
     const result = await pool.query(
