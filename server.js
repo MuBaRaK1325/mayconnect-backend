@@ -2984,7 +2984,8 @@ app.post('/api/admin/create-reset-link', async (req, res) => {
     'mayconnect.com.ng',
     'teevershdataplug.com.ng',
     'sadeeqdatahub.com.ng',
-    'bnhabeebdatahub.com.ng'
+    'bnhabeebdatahub.com.ng',
+    'msdatadatahub.com.ng'
   ];
 
   const targetDomain = domain && allowedDomains.includes(domain)
