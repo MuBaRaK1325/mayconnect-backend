@@ -2495,7 +2495,7 @@ app.get("/api/transactions", auth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-/* ================= PLANS - Company isolated with 3 tiers ================= */
+/* ================= PLANS - Grouped by plan_type: SME, SME2, GIFTING ================= */
 app.get("/api/plans", auth, async (req, res) => {
   try {
     const userRes = await pool.query("SELECT company FROM users WHERE id = $1", [req.user.id]);
@@ -2513,27 +2513,36 @@ app.get("/api/plans", auth, async (req, res) => {
     if (topCheck.rows.length > 0) userTier = 'top';
     else if (regularCheck.rows.length > 0) userTier = 'regular';
 
-    const plans = await pool.query(
-      `SELECT
-         id, company, network, provider, name, validity,
-         api_plan_id, network_id, cost, is_active, restricted,
-         CASE
-           WHEN $2 = 'top' THEN COALESCE(top_price, regular_price, price)
-           WHEN $2 = 'regular' THEN COALESCE(regular_price, price)
-           ELSE price
-         END as price,
-         price as default_price,
-         regular_price,
-         top_price
-       FROM plans
-       WHERE company ILIKE $1
-         AND is_active = true
-         AND (restricted = false OR $2 = 'top')
-       ORDER BY network ASC, price ASC`,
-      [company, userTier]
-    );
+    // 1. Force these 3 tabs
+    const planTypes = ['SME', 'SME2', 'GIFTING'];
 
-    res.json(plans.rows);
+    // 2. Get plans grouped by plan_type
+    const groupedPlans = {};
+    for (let type of planTypes) {
+      const plansResult = await pool.query(
+        `SELECT
+           id, company, network, provider, name, validity, plan_type,
+           api_plan_id, network_id, cost, is_active, restricted,
+           CASE
+             WHEN $3 = 'top' THEN COALESCE(top_price, regular_price, price)
+             WHEN $3 = 'regular' THEN COALESCE(regular_price, price)
+             ELSE price
+           END as price,
+           price as default_price,
+           regular_price,
+           top_price
+         FROM plans
+         WHERE company ILIKE $1
+           AND plan_type = $2
+           AND is_active = true
+           AND (restricted = false OR $3 = 'top')
+         ORDER BY price ASC`,
+        [company, type, userTier]
+      );
+      groupedPlans[type] = plansResult.rows; // will be [] if no plans
+    }
+
+    res.json({ success: true, data: groupedPlans, planTypes });
   } catch (err) {
     console.error("Plans error:", err);
     res.status(500).json({ message: "Failed to fetch plans" });
