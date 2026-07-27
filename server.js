@@ -360,11 +360,9 @@ const VTU_PROVIDERS = {
       MSDATASUB: process.env.ARRAHUZ_TOKEN_MSDATASUB
     }
   },
-  DANMALAMA: {
-    base_url: process.env.DANMALAMA_BASE_URL,
-    api_key: process.env.DANMALAMA_API_KEY
-  },
-  jjdatasub: {
+
+ 
+jjdatasub: {
     base_url: "https://jjdatasub.com/api",
     tokens: {
       mayconnect: process.env.JJDATASUB_TOKEN_MAYCONNECT,
@@ -373,8 +371,18 @@ const VTU_PROVIDERS = {
       bnhabeeb: process.env.JJDATASUB_TOKEN_BNHABEEB,
       msdatasub: process.env.JJDATASUB_TOKEN_MSDATASUB
     }
+  }, // <-- ADD COMMA HERE
+  alihsandatasub: {
+    base_url: "https://alihsandatasub.com.ng",
+    tokens: {
+      mayconnect: process.env.ALIHSAN_TOKEN_MAYCONNECT,
+      teeversh: process.env.ALIHSAN_TOKEN_TEEVERSH,
+      sadeeq: process.env.ALIHSAN_TOKEN_SADEEQ,
+      bnhabeeb: process.env.ALIHSAN_TOKEN_BNHABEEB,
+      MSDATASUB: process.env.ALIHSAN_TOKEN_MSDATASUB
+    }
   }
-};
+}; // <-- ONLY ONE CLOSING }; AT THE VERY END OF VTU_PROVIDERS
 
 /* ================= HELPERS ================= */
 const getCompanyAdmin = async (company) => {
@@ -1016,6 +1024,105 @@ async function callJJDataSubAirtime(phone, network_id, amount, company) {
     throw new Error(res.data.api_response || res.data.message || "JJDataSub airtime failed");
   }
   return res.data;
+}
+/* ================= ALIHSANDATASUB NETWORK MAP ================= */
+// ALIHSANDATASUB NETWORK MAP: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE
+const ALIHSANDATA_NETWORK_MAP_ID_TO_NAME = {
+ 1: 'mtn',
+ 2: 'airtel',
+ 3: '9mobile',
+ 4: 'Glo'
+};
+
+function getAlihsanNetworkName(networkId) {
+  const id = Number(networkId);
+  return ALIHSANDATA_NETWORK_MAP_ID_TO_NAME[id] || null;
+}
+
+// ALIHSANDATASUB DATA - Direct Topup
+async function callAlihsanData(phone, network_id, api_plan_id, company) {
+  const { base_url, tokens } = VTU_PROVIDERS.alihsandatasub;
+  const token = tokens[company];
+  if (!token) throw new Error(`No AlihsanDataSub token configured for ${company}`);
+  if (!api_plan_id) throw new Error("No Alihsan plan_id configured for this plan");
+
+  const payload = {
+    network: String(network_id), // 1=MTN, 2=Airtel, 4=Glo, 3=9mobile
+    plan_id: String(api_plan_id),
+    mobile_number: String(phone), // 11 digits
+    request_id: "BH" + Date.now() + Math.floor(Math.random()*1000) // unique
+  };
+
+  console.log('ALIHSANDATASUB DATA REQUEST:', { payload, company });
+
+  const res = await axios.post(
+    `${base_url}/api/v1/data.php`,
+    payload,
+    {
+      headers: {
+        "Authorization": token, // NOT Bearer
+        "Content-Type": "application/json"
+      },
+      timeout: 60000
+    }
+  );
+
+  if (res.data?.success!== "true") {
+    throw new Error(res.data?.desc || "AlihsanDataSub purchase failed");
+  }
+
+  return {
+    status: res.data.info?.status?.toLowerCase() || "success",
+    trans_id: res.data.info?.trans_id,
+    previous_balance: res.data.info?.previous_balance,
+    new_balance: res.data.info?.new_balance,
+    amount_deducted: res.data.info?.amount_deducted,
+    plan: res.data.info?.plan,
+    raw: res.data
+  };
+}
+
+// ALIHSANDATASUB DATACARD / CG DATA
+async function callAlihsanDataCard(phone, network_id, api_plan_id, company, quantity = 1) {
+  const { base_url, tokens } = VTU_PROVIDERS.alihsandatasub;
+  const token = tokens[company];
+  if (!token) throw new Error(`No AlihsanDataSub token configured for ${company}`);
+  if (!api_plan_id) throw new Error("No Alihsan plan_id configured for this plan");
+
+  const payload = {
+    network: String(network_id), // 1=MTN, 2=Airtel, 4=Glo, 3=9mobile
+    plan_id: String(api_plan_id),
+    amount: String(quantity), // quantity of cards
+    request_id: "BHC" + Date.now() + Math.floor(Math.random()*1000) // unique
+  };
+
+  console.log('ALIHSANDATASUB DATACARD REQUEST:', { payload, company });
+
+  const res = await axios.post(
+    `${base_url}/api/v1/datacard.php`,
+    payload,
+    {
+      headers: {
+        "Authorization": token, // NOT Bearer
+        "Content-Type": "application/json"
+      },
+      timeout: 60000
+    }
+  );
+
+  if (res.data?.success!== "true") {
+    throw new Error(res.data?.desc || "AlihsanDataSub datacard failed");
+  }
+
+  return {
+    status: res.data.info?.status?.toLowerCase() || "success",
+    trans_id: res.data.info?.trans_id,
+    previous_balance: res.data.info?.previous_balance,
+    new_balance: res.data.info?.new_balance,
+    amount_deducted: res.data.info?.amount_deducted,
+    plan: res.data.info?.plan,
+    raw: res.data
+  };
 }
 /* ================= AUTH MIDDLEWARE ================= */
 function auth(req, res, next) {
@@ -2793,10 +2900,10 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         apiResponse = await callSubPadiData(phone, plan.api_plan_id, user.company);
       } else if (plan.provider === "arrahuz") {
         apiResponse = await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else if (plan.provider === "DANMALAMA") {
-        apiResponse = await callDanmalamaData(phone, plan.network_id, plan.api_plan_id);
-      } else if (plan.provider === "jjdatasub") {
+    } else if (plan.provider === "jjdatasub") {
         apiResponse = await callJJDataSubData(phone, plan.network_id, plan.api_plan_id, user.company);
+      } else if (plan.provider === "alihsandatasub") {
+        apiResponse = await callAlihsanData(phone, plan.network_id, plan.api_plan_id, user.company);
       } else {
         throw new Error("Unknown provider");
       }
