@@ -3087,6 +3087,37 @@ app.post("/api/change-pin", auth, buyDataLimiter, async (req, res) => {
   }
 });
 
+/* ================= FORGOT PIN ================= */
+app.post("/api/reset-pin", auth, buyDataLimiter, async (req, res) => {
+  try {
+    const { password, newPin } = req.body;
+
+    if (!password) {
+      return res.status(400).json({ message: "Enter your login password" });
+    }
+    if (!newPin || String(newPin).length!== 4 || isNaN(newPin)) {
+      return res.status(400).json({ message: "New PIN must be exactly 4 digits" });
+    }
+
+    const userRes = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
+    const user = userRes.rows[0];
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Verify login password instead of old PIN
+    const validPassword = await bcrypt.compare(String(password), String(user.password));
+    if (!validPassword) {
+      return res.status(400).json({ message: "Wrong login password" });
+    }
+
+    // Hash and save new PIN
+    const hash = await bcrypt.hash(String(newPin), 10);
+    await pool.query("UPDATE users SET pin=$1 WHERE id=$2", [hash, user.id]);
+    res.json({ message: "PIN reset successfully" });
+  } catch (e) {
+    console.error("RESET PIN ERROR:", e);
+    res.status(500).json({ message: "Failed to reset PIN" });
+  }
+});
 // 1. ADMIN: Create reset link for a user - multi-domain support
 app.post('/api/admin/create-reset-link', async (req, res) => {
   const { username, domain } = req.body;
