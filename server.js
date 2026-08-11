@@ -2495,7 +2495,7 @@ app.get("/api/transactions", auth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-/* ================= PLANS - Grouped by plan_type: SME, SME2, GIFTING ================= */
+/* ================= PLANS - Grouped by plan_type: SME, SME2, GIFTING, CORPORATE_GIFTING ================= */
 app.get("/api/plans", auth, async (req, res) => {
   try {
     const userRes = await pool.query("SELECT company FROM users WHERE id = $1", [req.user.id]);
@@ -2513,8 +2513,8 @@ app.get("/api/plans", auth, async (req, res) => {
     if (topCheck.rows.length > 0) userTier = 'top';
     else if (regularCheck.rows.length > 0) userTier = 'regular';
 
-    // 1. Force these 3 tabs
-    const planTypes = ['SME', 'SME2', 'GIFTING'];
+    // 1. Force these 4 tabs - ADDED GIFTING BACK
+    const planTypes = ['SME', 'SME2', 'GIFTING', 'CORPORATE_GIFTING'];
 
     // 2. Get plans grouped by plan_type
     const groupedPlans = {};
