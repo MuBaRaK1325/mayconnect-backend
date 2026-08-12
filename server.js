@@ -2595,6 +2595,8 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   const payload = { network: networkId, amount: amountNum, mobile_number: formattedPhone };
   let endpoint = uniqueRef? `${base_url}/api/topup/${uniqueRef}` : `${base_url}/api/topup`;
 
+  console.log(`MAITAMA AIRTIME REQUEST:`, { payload, company });
+
   try {
     const res = await axios.post(endpoint, payload, {
       headers: {
@@ -2603,7 +2605,7 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
         "Authorization": `Bearer ${api_token}`,
         "User-Agent": "MUSTYKNK/1.0"
       },
-      timeout: 60000,
+      timeout: 180000, // CHANGED: 3 minutes
     });
 
     const status = res.data?.data?.Status || res.data?.Status;
@@ -2618,7 +2620,7 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
     throw new Error(api_response || "Maitama airtime failed");
   } catch (err) {
     if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
-      throw new Error('TIMEOUT_POSSIBLE_SUCCESS');
+      throw new Error('TIMEOUT_FAILED'); // CHANGED
     }
     throw err;
   }
@@ -2682,13 +2684,13 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
     const ref = "AIRTIME-" + uuidv4();
     const cost = Number(amt) * 0.98;
 
-    // 1. INSERT PENDING - KADA KA DEBIT TUKUNA
+    // 1. INSERT PENDING - NO DEBIT YET
     const txRes = await client.query(
       `INSERT INTO transactions(
         user_id, type, amount, cost, phone, network,
         reference, status, provider, gateway, balance_before, balance_after
-      ) VALUES($1,'AIRTIME',$2::numeric,$3::numeric,$4,$5,$6,'PENDING','maitama','maitama',$7::numeric,$8::numeric) RETURNING *`,
-      [user.id, amt, cost, formattedPhone, networkKey, ref, balanceBefore, balanceBefore]
+      ) VALUES($1,'AIRTIME',$2::numeric,$3::numeric,$4,$5,$6,'PENDING','maitama','maitama',$7::numeric,$7::numeric) RETURNING *`,
+      [user.id, amt, cost, formattedPhone, networkKey, ref, balanceBefore]
     );
     const txId = txRes.rows[0].id;
     await client.query("COMMIT");
@@ -2703,17 +2705,18 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       finalStatus = maitamaRes?._pending? 'PENDING' : 'SUCCESS';
       responseMsg = finalStatus === 'SUCCESS'? 'Airtime delivered' : 'Processing';
     } catch (vtuErr) {
-      finalStatus = 'FAILED';
+      finalStatus = 'FAILED'; // Default to FAILED
       responseMsg = vtuErr.response?.data?.data?.api_response || vtuErr.response?.data?.message || vtuErr.message || 'API error';
       maitamaRes = vtuErr.response?.data || { error: vtuErr.message };
 
-      if (vtuErr.message === 'TIMEOUT_POSSIBLE_SUCCESS') {
-        finalStatus = 'PENDING';
-        responseMsg = 'Request submitted. Delivery pending.';
+      // CRITICAL FIX: Timeout = FAILED, not PENDING
+      if (vtuErr.message === 'TIMEOUT_FAILED') {
+        finalStatus = 'FAILED';
+        responseMsg = 'Network timeout. Amount not deducted. Please try again.';
       }
     }
 
-    // 3. UPDATE + DEBIT IDAN SUCCESS KAWAI
+    // 3. UPDATE + DEBIT ONLY IF SUCCESS
     let balanceAfter = Number(balanceBefore);
 
     await client.query("BEGIN");
