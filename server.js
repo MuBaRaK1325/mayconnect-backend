@@ -2881,7 +2881,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     }
 
     const balanceBefore = Number(balanceNum);
-    const balanceAfterDeduct = Number(balanceBefore) - Number(priceNum); // DEDUCT FIRST
+    const balanceAfterDeduct = Number(balanceBefore) - Number(priceNum);
     const ref = "DATA-" + uuidv4();
 
     // 1. DEBIT WALLET FIRST + INSERT PENDING TRANSACTION
@@ -2901,6 +2901,8 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     let responseMsg = 'Unknown error';
 
     try {
+      console.log(`MAITAMA DATA REQUEST:`, { plan: plan.api_plan_id, mobile_number: phone, network: plan.network_id, company: user.company });
+
       if (plan.provider === "maitama") {
         apiResponse = await callMaitamaData(phone, plan.network_id, plan.api_plan_id, user.company);
       } else if (plan.provider === "cheapdatahub") {
@@ -2909,7 +2911,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         apiResponse = await callSubPadiData(phone, plan.api_plan_id, user.company);
       } else if (plan.provider === "arrahuz") {
         apiResponse = await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
-    } else if (plan.provider === "jjdatasub") {
+      } else if (plan.provider === "jjdatasub") {
         apiResponse = await callJJDataSubData(phone, plan.network_id, plan.api_plan_id, user.company);
       } else if (plan.provider === "alihsandatasub") {
         apiResponse = await callAlihsanData(phone, plan.network_id, plan.api_plan_id, user.company);
@@ -2929,7 +2931,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         responseMsg = apiResponse.message || apiResponse.api_response || 'Provider rejected transaction';
       }
     } catch (vtuErr) {
-      finalStatus = 'FAILED';
+      finalStatus = 'FAILED'; // CHANGED: Was PENDING
       responseMsg = vtuErr.response?.data?.message || vtuErr.response?.data?.api_response || vtuErr.message || 'API timeout';
       apiResponse = vtuErr.response?.data || { error: vtuErr.message };
 
@@ -2940,9 +2942,10 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         else if (errs.mobile_number) responseMsg = `Phone error: ${errs.mobile_number[0]}`;
       }
 
-      if (vtuErr.message === 'TIMEOUT_POSSIBLE_SUCCESS' || vtuErr.code === 'ECONNABORTED') {
-        finalStatus = 'PENDING';
-        responseMsg = 'Request submitted. Delivery pending.';
+      // CRITICAL FIX: Timeout should be FAILED + REFUND, not PENDING
+      if (vtuErr.code === 'ECONNABORTED' || vtuErr.message.includes('timeout')) {
+        finalStatus = 'FAILED';
+        responseMsg = 'Network timeout. Amount refunded. Please try again.';
       }
     }
 
