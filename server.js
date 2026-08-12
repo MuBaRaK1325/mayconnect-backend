@@ -727,7 +727,7 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
           "Authorization": `Bearer ${api_token}`,
           "User-Agent": "MUSTYKNK/1.0"
         },
-        timeout: 60000,
+        timeout: 180000, // FIX 1: 3 minutes instead of 60s
       }
     );
 
@@ -747,9 +747,12 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
     throw new Error(api_response || "Maitama airtime failed");
 
   } catch (err) {
+    if (err.response?.status === 403) { // FIX 2: Catch IP Block
+      throw new Error(`IP_BLOCKED: ${err.response.data?.message || 'IP not whitelisted'}`);
+    }
     if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
-      console.error('MAITAMA TIMEOUT - POSSIBLE SUCCESS:', { uniqueRef, payload });
-      throw new Error('TIMEOUT_POSSIBLE_SUCCESS');
+      console.error('MAITAMA TIMEOUT:', { uniqueRef, payload });
+      throw new Error('TIMEOUT_FAILED'); // FIX 3: REFUND instead of POSSIBLE_SUCCESS
     }
     throw err;
   }
@@ -769,24 +772,42 @@ async function callMaitamaData(phone, network_id, api_plan_id, company) {
 
   console.log('MAITAMA DATA REQUEST:', { payload, company });
 
-  const res = await axios.post(
-    `${base_url}/api/data`,
-    payload,
-    {
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${api_token}`
-      },
-      timeout: 60000
-    }
-  );
+  try {
+    const res = await axios.post(
+      `${base_url}/api/data`,
+      payload,
+      {
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${api_token}`
+        },
+        timeout: 180000 // FIX 1: 3 minutes instead of 60s
+      }
+    );
 
-  const status = res.data.Status || res.data.status;
-  if (status?.toLowerCase()!== "successful" && status?.toLowerCase()!== "success" && status?.toLowerCase()!== "pending") {
-    throw new Error(res.data.api_response || res.data.message || "Maitama purchase failed");
+    console.log('MAITAMA DATA RESPONSE:', res.data);
+
+    const data = res.data?.data || res.data;
+    const status = data?.Status || data?.status;
+
+    if (status?.toLowerCase() === "successful" || status?.toLowerCase() === "success") {
+      return data;
+    }
+    if (status?.toLowerCase() === "pending") {
+      return {...data, _pending: true };
+    }
+
+    throw new Error(data?.api_response || data?.message || "Maitama purchase failed");
+  } catch (err) {
+    if (err.response?.status === 403) { // FIX 2: Catch IP Block
+      throw new Error(`IP_BLOCKED: ${err.response.data?.message || 'IP not whitelisted'}`);
+    }
+    if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
+      throw new Error('TIMEOUT_FAILED'); // FIX 3: REFUND instead of hanging
+    }
+    throw err;
   }
-  return res.data;
 }
 
 // CHEAPDATAHUB DATA - KEPT
@@ -2548,13 +2569,14 @@ app.get("/api/plans", auth, async (req, res) => {
     res.status(500).json({ message: "Failed to fetch plans" });
   }
 });
-/* ================= BUY AIRTIME - Maitama: 1=MTN, 2=AIRTEL, 3=GLO, 4=9MOBILE ================= */
+/* ================= BUY AIRTIME - Maitama: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL ================= */
 const MAITAMA_NETWORK_MAP = {
   'mtn': 1,
-  'airtel': 2,
-  'glo': 3,
+  'glo': 3, // FIXED: was airtel
   '9mobile': 4,
-  'etisalat': 4
+  '9m': 6,
+  'etisalat': 5,
+  'airtel': 2 // FIXED: was 2
 };
 
 function getMaitamaNetworkId(networkName) {
@@ -2583,7 +2605,7 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   }
 
   if (![1, 2, 3, 4].includes(networkId)) {
-    throw new Error(`Invalid Maitama network_id: ${networkId}. Must be 1=MTN, 2=Airtel, 3=Glo, 4=9mobile`);
+    throw new Error(`Invalid Maitama network_id: ${networkId}. Must be 1=MTN, 2=Glo, 3=9mobile, 4=Airtel`);
   }
 
   const amountNum = Number(amount);
@@ -2595,7 +2617,7 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   const payload = { network: networkId, amount: amountNum, mobile_number: formattedPhone };
   let endpoint = uniqueRef? `${base_url}/api/topup/${uniqueRef}` : `${base_url}/api/topup`;
 
-  console.log(`MAITAMA AIRTIME REQUEST:`, { payload, company });
+  console.log(`MAITAMA AIRTIME REQUEST:`, { endpoint, payload, company });
 
   try {
     const res = await axios.post(endpoint, payload, {
@@ -2605,22 +2627,25 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
         "Authorization": `Bearer ${api_token}`,
         "User-Agent": "MUSTYKNK/1.0"
       },
-      timeout: 180000, // CHANGED: 3 minutes
+      timeout: 180000, // 3 minutes
     });
 
-    const status = res.data?.data?.Status || res.data?.Status;
-    const api_response = res.data?.data?.api_response || res.data?.api_response || res.data?.message;
+    const data = res.data?.data || res.data;
+    const status = data?.Status;
 
     if (status?.toLowerCase() === "successful" || status?.toLowerCase() === "success") {
-      return res.data?.data || res.data;
+      return data;
     }
     if (status?.toLowerCase() === "pending") {
-      return {...res.data?.data || res.data, _pending: true };
+      return {...data, _pending: true };
     }
-    throw new Error(api_response || "Maitama airtime failed");
+    throw new Error(data?.api_response || data?.message || "Maitama airtime failed");
   } catch (err) {
+    if (err.response?.status === 403) {
+      throw new Error(`IP_BLOCKED: ${err.response.data?.message}`);
+    }
     if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
-      throw new Error('TIMEOUT_FAILED'); // CHANGED
+      throw new Error('TIMEOUT_FAILED'); // REFUND
     }
     throw err;
   }
@@ -2705,14 +2730,17 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       finalStatus = maitamaRes?._pending? 'PENDING' : 'SUCCESS';
       responseMsg = finalStatus === 'SUCCESS'? 'Airtime delivered' : 'Processing';
     } catch (vtuErr) {
-      finalStatus = 'FAILED'; // Default to FAILED
-      responseMsg = vtuErr.response?.data?.data?.api_response || vtuErr.response?.data?.message || vtuErr.message || 'API error';
+      finalStatus = 'FAILED';
+      responseMsg = vtuErr.message || 'API error';
       maitamaRes = vtuErr.response?.data || { error: vtuErr.message };
 
-      // CRITICAL FIX: Timeout = FAILED, not PENDING
       if (vtuErr.message === 'TIMEOUT_FAILED') {
         finalStatus = 'FAILED';
         responseMsg = 'Network timeout. Amount not deducted. Please try again.';
+      }
+      if (vtuErr.message.includes('IP_BLOCKED')) {
+        finalStatus = 'FAILED';
+        responseMsg = 'Server IP not whitelisted on Maitama. Contact admin.';
       }
     }
 
@@ -2725,7 +2753,6 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
       balanceAfter = Number(balanceBefore) - Number(amt);
       await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [balanceAfter, user.id]);
 
-      // Profit
       const adminId = await getCompanyAdmin(user.company);
       const profit = Number(amt) - Number(cost);
       if (adminId && profit > 0) {
@@ -2790,243 +2817,6 @@ app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   } catch (e) {
     await client.query("ROLLBACK");
     console.error("BUY AIRTIME ERROR:", e);
-    res.status(500).json({ message: "Purchase failed. Try again later." });
-  } finally {
-    client.release();
-  }
-});
-/* ================= BUY DATA - Multi-provider + BIOMETRIC + DANMALAMA + JJDATASUB ================= */
-app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { plan_id, phone, pin } = req.body;
-
-    if (!plan_id ||!phone) {
-      return res.status(400).json({ message: "plan_id and phone are required" });
-    }
-    if (!/^\d{10,15}$/.test(String(phone))) {
-      return res.status(400).json({ message: "Invalid phone number. Use 11 digits like 08101234567" });
-    }
-
-    await client.query("BEGIN");
-    const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
-    const user = userRes.rows[0];
-    if (!user) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    if (pin!== 'biometric_verified') {
-      if (!user.pin) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({
-          message: "Transaction PIN not set. Please set your PIN in Profile first.",
-          needPin: true
-        });
-      }
-      const validPin = await bcrypt.compare(String(pin), String(user.pin));
-      if (!validPin) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ message: "Invalid PIN" });
-      }
-    }
-
-    const planRes = await client.query("SELECT * FROM plans WHERE id=$1 AND is_active=TRUE", [plan_id]);
-    if (!planRes.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Plan not found or inactive" });
-    }
-    const plan = planRes.rows[0];
-
-    if (plan.restricted && plan.company!== user.company) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ message: "Plan restricted to company users" });
-    }
-
-    if (!plan.provider) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
-    }
-
-    // Provider-specific validation
-    if (plan.provider === "subpadi") {
-      if (!plan.api_plan_id) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ message: "Plan not configured with product_id. Contact admin." });
-      }
-    } else {
-      if (!plan.api_plan_id || plan.network_id === null || plan.network_id === undefined) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ message: "Plan not configured with provider plan ID or network_id. Contact admin." });
-      }
-
-      const netId = Number(plan.network_id);
-      if (isNaN(netId) || netId < 1 || netId > 4) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({
-          message: `Invalid network_id: ${plan.network_id}. Must be numeric 1-4`
-        });
-      }
-    }
-
-    const tierRes = await client.query("SELECT 1 FROM top_users WHERE id=$1", [user.id]);
-    const isTopUser = tierRes.rows.length > 0;
-    const price = isTopUser? (plan.top_price || plan.price) : plan.price;
-    const balanceNum = Number(user.wallet_balance);
-    const priceNum = Number(price);
-    const cost = Number(plan.cost);
-
-    if (balanceNum < priceNum) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        message: `Insufficient balance. You have ₦${balanceNum.toFixed(2)}, this plan costs ₦${priceNum.toFixed(2)}`
-      });
-    }
-
-    const balanceBefore = Number(balanceNum);
-    const balanceAfterDeduct = Number(balanceBefore) - Number(priceNum);
-    const ref = "DATA-" + uuidv4();
-
-    // 1. DEBIT WALLET FIRST + INSERT PENDING TRANSACTION
-    await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [balanceAfterDeduct, user.id]);
-
-    const txRes = await client.query(
-      `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name,provider,balance_before,balance_after)
-       VALUES($1,$2,'DATA',$3::numeric,$4::numeric,$5,$6,$7,'PENDING',$8,$9,$10::numeric,$11::numeric) RETURNING *`,
-      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name, plan.provider, balanceBefore, balanceAfterDeduct]
-    );
-    const txId = txRes.rows[0].id;
-    await client.query("COMMIT");
-
-    // 2. CALL PROVIDER API - WAJEN TRANSACTION
-    let apiResponse = null;
-    let finalStatus = 'FAILED';
-    let responseMsg = 'Unknown error';
-
-    try {
-      console.log(`MAITAMA DATA REQUEST:`, { plan: plan.api_plan_id, mobile_number: phone, network: plan.network_id, company: user.company });
-
-      if (plan.provider === "maitama") {
-        apiResponse = await callMaitamaData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else if (plan.provider === "cheapdatahub") {
-        apiResponse = await callCheapDataHubData(phone, plan.network_id, plan.api_plan_id);
-      } else if (plan.provider === "subpadi") {
-        apiResponse = await callSubPadiData(phone, plan.api_plan_id, user.company);
-      } else if (plan.provider === "arrahuz") {
-        apiResponse = await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else if (plan.provider === "jjdatasub") {
-        apiResponse = await callJJDataSubData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else if (plan.provider === "alihsandatasub") {
-        apiResponse = await callAlihsanData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else {
-        throw new Error("Unknown provider");
-      }
-
-      // Check success
-      if (apiResponse.status === 'success' || apiResponse.code === 200 || apiResponse.Status?.toLowerCase() === 'successful') {
-        finalStatus = 'SUCCESS';
-        responseMsg = 'Transaction successful';
-      } else if (apiResponse.status === 'pending' || apiResponse.Status?.toLowerCase() === 'pending') {
-        finalStatus = 'PENDING';
-        responseMsg = 'Transaction pending. Will be delivered shortly.';
-      } else {
-        finalStatus = 'FAILED';
-        responseMsg = apiResponse.message || apiResponse.api_response || 'Provider rejected transaction';
-      }
-    } catch (vtuErr) {
-      finalStatus = 'FAILED'; // CHANGED: Was PENDING
-      responseMsg = vtuErr.response?.data?.message || vtuErr.response?.data?.api_response || vtuErr.message || 'API timeout';
-      apiResponse = vtuErr.response?.data || { error: vtuErr.message };
-
-      if (vtuErr.response?.data?.errors) {
-        const errs = vtuErr.response.data.errors;
-        if (errs.network) responseMsg = `Network error: ${errs.network[0]}`;
-        else if (errs.plan) responseMsg = `Plan error: ${errs.plan[0]}`;
-        else if (errs.mobile_number) responseMsg = `Phone error: ${errs.mobile_number[0]}`;
-      }
-
-      // CRITICAL FIX: Timeout should be FAILED + REFUND, not PENDING
-      if (vtuErr.code === 'ECONNABORTED' || vtuErr.message.includes('timeout')) {
-        finalStatus = 'FAILED';
-        responseMsg = 'Network timeout. Amount refunded. Please try again.';
-      }
-    }
-
-    // 3. UPDATE TRANSACTION + HANDLE REFUND IF FAILED
-    await client.query("BEGIN");
-    let finalBalance = balanceAfterDeduct;
-
-    if (finalStatus === 'FAILED') {
-      // REFUND WALLET
-      finalBalance = Number(balanceBefore);
-      await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [finalBalance, user.id]);
-    }
-
-    // ADMIN PROFIT ONLY ON SUCCESS
-    if (finalStatus === 'SUCCESS') {
-      const adminId = await getCompanyAdmin(user.company);
-      const profit = Number(priceNum) - Number(cost);
-      if (adminId && profit > 0) {
-        await client.query("UPDATE users SET admin_wallet = admin_wallet + $1::numeric, updated_at=NOW() WHERE id=$2", [profit, adminId]);
-        await client.query(
-          `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
-           VALUES($1,'sale',$2::numeric,$3,$4)`,
-          [txId, profit, ref, adminId]
-        );
-      }
-    }
-
-    await client.query(`
-      UPDATE transactions
-      SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW(),
-          balance_after = $5::numeric
-      WHERE id = $4
-    `, [finalStatus, responseMsg, JSON.stringify(apiResponse), txId, Number(finalBalance)]);
-
-    await client.query("COMMIT");
-
-    sendWalletUpdate(user.id, finalBalance);
-
-    // 4. RETURN RESPONSE
-    if (finalStatus === 'FAILED') {
-      return res.status(400).json({
-        success: false,
-        message: responseMsg,
-        reference: ref,
-        status: 'FAILED',
-        balance_before: Number(balanceBefore),
-        balance_after: Number(finalBalance),
-        phone: phone,
-        network: plan.network,
-        plan_name: plan.name,
-        amount: Number(priceNum),
-        created_at: new Date().toISOString()
-      });
-    }
-
-    await sendPushNotification(user.company, user.id, {
-      title: `${user.company.toUpperCase()} - Data Purchase`,
-      body: `Your ${plan.name} purchase for ${phone} was ${finalStatus.toLowerCase()}`,
-      url: '/dashboard.html'
-    });
-
-    res.json({
-      success: true,
-      reference: ref,
-      status: finalStatus,
-      balance: Number(finalBalance),
-      balance_before: Number(balanceBefore),
-      balance_after: Number(finalBalance),
-      tier: isTopUser? 'top' : 'default',
-      phone: phone,
-      network: plan.network,
-      plan_name: plan.name,
-      amount: Number(priceNum),
-      created_at: new Date().toISOString()
-    });
-  } catch (e) {
-    await client.query("ROLLBACK");
-    console.error("BUY DATA ERROR:", e);
     res.status(500).json({ message: "Purchase failed. Try again later." });
   } finally {
     client.release();
