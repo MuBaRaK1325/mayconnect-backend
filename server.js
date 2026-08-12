@@ -3496,6 +3496,50 @@ app.delete("/admin/plans/:id", auth, adminOnly, async (req, res) => {
   }
 });
 
+app.get('/test-maitama', async (req, res) => {
+    const axios = require('axios');
+    
+    let result = {
+        server_time: new Date().toISOString(),
+        tests: {}
+    };
+
+    // Test 1: DNS
+    try {
+        const dns = require('dns').promises;
+        const addresses = await dns.lookup('app.maitamadatahub.com');
+        result.tests.dns = `Resolved to: ${addresses.address} ✅`;
+    } catch(e) {
+        result.tests.dns = `DNS Failed: ${e.message} ❌`;
+    }
+
+    // Test 2: Real API Call to Maitama
+    try {
+        const response = await axios.post(
+            'https://app.maitamadatahub.com/api/topup',
+            {
+                amount: 10,
+                mobile_number: "07047457735",
+                network: 1
+            },
+            {
+                headers: {
+                    'Authorization': 'Bearer k5KGdQ5wPXHzur0Uq12xtvpe2RSglFxEmuFEy6qV',
+                    'Content-Type': 'application/json'
+                },
+                timeout: 15000
+            }
+        );
+        result.tests.api_call = `SUCCESS: ${JSON.stringify(response.data)}`;
+    } catch(error) {
+        result.tests.api_call = `ERROR: ${error.code} - ${error.message}`;
+        if(error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+            result.tests.api_call += ' ❌ Maitama is blocking Render IP';
+        }
+    }
+
+    res.json(result);
+});
 
 
 
