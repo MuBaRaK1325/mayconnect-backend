@@ -3039,6 +3039,29 @@ app.get("/api/test-maitama-connection", async (req, res) => {
   }
 });
 
+app.get("/api/test-maitama-dns", async (req, res) => {
+  try {
+    const dns = require("dns").promises;
+
+    const result = await dns.lookup("app.maitamadatahub.com", {
+      family: 4
+    });
+
+    res.json({
+      success: true,
+      hostname: "app.maitamadatahub.com",
+      address: result.address,
+      family: result.family
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      code: error.code || null,
+      message: error.message
+    });
+  }
+});
+
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
