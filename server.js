@@ -2886,6 +2886,27 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   }
 }
 
+app.get("/api/test-maitama", async (req, res) => {
+  try {
+    const response = await axios.get("https://app.maitamadatahub.com", {
+      timeout: 15000,
+      validateStatus: () => true
+    });
+
+    res.json({
+      success: true,
+      status: response.status,
+      message: "Render can connect to Maitama"
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      code: error.code,
+      message: error.message
+    });
+  }
+});
+
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
