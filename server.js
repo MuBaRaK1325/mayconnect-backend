@@ -2993,6 +2993,29 @@ app.get("/api/test-maitama-tcp", async (req, res) => {
   });
 });
 
+app.get("/api/test-external-https", async (req, res) => {
+  try {
+    const start = Date.now();
+
+    const response = await axios.get("https://example.com", {
+      timeout: 15000
+    });
+
+    res.json({
+      success: true,
+      status: response.status,
+      elapsed_ms: Date.now() - start
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      code: error.code || null,
+      message: error.message
+    });
+  }
+});
+
+
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
