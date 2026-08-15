@@ -2907,6 +2907,25 @@ app.get("/api/test-maitama", async (req, res) => {
   }
 });
 
+app.get("/api/test-outbound-ip", async (req, res) => {
+  try {
+    const response = await axios.get("https://api.ipify.org?format=json", {
+      timeout: 10000
+    });
+
+    res.json({
+      success: true,
+      render_outbound_ip: response.data.ip
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      code: error.code,
+      message: error.message
+    });
+  }
+});
+
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
