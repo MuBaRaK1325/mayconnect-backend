@@ -3015,6 +3015,29 @@ app.get("/api/test-external-https", async (req, res) => {
   }
 });
 
+app.get("/api/test-maitama-connection", async (req, res) => {
+  try {
+    const start = Date.now();
+
+    const response = await axios.get("https://app.maitamadatahub.com", {
+      timeout: 15000,
+      validateStatus: () => true
+    });
+
+    res.json({
+      success: true,
+      status: response.status,
+      elapsed_ms: Date.now() - start
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      code: error.code || null,
+      errno: error.errno || null,
+      message: error.message
+    });
+  }
+});
 
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
