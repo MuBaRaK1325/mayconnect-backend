@@ -2926,6 +2926,34 @@ app.get("/api/test-outbound-ip", async (req, res) => {
   }
 });
 
+app.get("/api/test-maitama-ip", async (req, res) => {
+  try {
+    const response = await axios.get("https://46.202.128.25", {
+      timeout: 15000,
+      validateStatus: () => true,
+      httpsAgent: new (require("https").Agent)({
+        rejectUnauthorized: false
+      }),
+      headers: {
+        Host: "app.maitamadatahub.com"
+      }
+    });
+
+    res.json({
+      success: true,
+      status: response.status,
+      message: "Render reached Maitama IP"
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      code: error.code,
+      errno: error.errno || null,
+      message: error.message
+    });
+  }
+});
+
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
