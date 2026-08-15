@@ -2954,6 +2954,45 @@ app.get("/api/test-maitama-ip", async (req, res) => {
   }
 });
 
+app.get("/api/test-maitama-tcp", async (req, res) => {
+  const net = require("net");
+
+  const socket = new net.Socket();
+
+  const timeout = setTimeout(() => {
+    socket.destroy();
+    res.json({
+      success: false,
+      stage: "TCP",
+      message: "TCP connection to 46.202.128.25:443 timed out"
+    });
+  }, 15000);
+
+  socket.connect(443, "46.202.128.25", () => {
+    clearTimeout(timeout);
+    socket.destroy();
+
+    res.json({
+      success: true,
+      stage: "TCP",
+      message: "TCP connection to 46.202.128.25:443 succeeded"
+    });
+  });
+
+  socket.on("error", (error) => {
+    clearTimeout(timeout);
+
+    if (!res.headersSent) {
+      res.json({
+        success: false,
+        stage: "TCP",
+        code: error.code || null,
+        message: error.message
+      });
+    }
+  });
+});
+
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
