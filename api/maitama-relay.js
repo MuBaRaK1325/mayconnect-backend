@@ -70,6 +70,32 @@ module.exports = async (req, res) => {
     let endpoint;
     let payload;
 
+    // ================= CONNECTION TEST =================
+if (type === "test") {
+  const testUrl = `${baseUrl}/`;
+
+  console.log("MAITAMA CONNECTION TEST:", {
+    company: companyKey,
+    endpoint: testUrl
+  });
+
+  const testResponse = await axios.get(testUrl, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "MAYCONNECT-RELAY/1.0"
+    },
+    timeout: 30000,
+    validateStatus: () => true
+  });
+
+  return res.status(200).json({
+    success: true,
+    stage: "VERCEL_TO_MAITAMA",
+    maitama_status: testResponse.status,
+    message: "Vercel successfully reached Maitama",
+    elapsed: true
+  });
+}
     // ================= AIRTIME =================
     if (type === "airtime") {
       if (!phone || !network || !amount) {
