@@ -758,56 +758,150 @@ async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = n
   }
 }
 
-// MAITAMA DATA - Uses network ID - WORKING VERSION
+// ================= MAITAMA DATA VIA VERCEL RELAY =================
+
 async function callMaitamaData(phone, network_id, api_plan_id, company) {
-  const { base_url, tokens } = VTU_PROVIDERS.maitama;
-  const api_token = tokens[company];
-  if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
+const relayUrl =
+process.env.MAITAMA_RELAY_URL ||
+"https://mayconnect-maitama-test.vercel.app/api/maitama-relay";
 
-  const payload = {
-    plan: Number(api_plan_id),
-    mobile_number: formatPhoneForMaitama(phone),
-    network: Number(network_id) // Uses ID as per working version
-  };
+const relaySecret = process.env.MAITAMA_RELAY_SECRET;
 
-  console.log('MAITAMA DATA REQUEST:', { payload, company });
+if (!relaySecret) {
+throw new Error("MAITAMA_RELAY_SECRET is not configured");
+}
 
-  try {
-    const res = await axios.post(
-      `${base_url}/api/data`,
-      payload,
-      {
-        headers: {
-          "Accept": "application/json",
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${api_token}`
-        },
-        timeout: 180000 // FIX 1: 3 minutes instead of 60s
-      }
-    );
+const companyKey = String(company || "").toLowerCase().trim();
 
-    console.log('MAITAMA DATA RESPONSE:', res.data);
+const allowedCompanies = [
+"mayconnect",
+"teeversh",
+"bnhabeeb",
+"sadeeq",
+"msdatasub"
+];
 
-    const data = res.data?.data || res.data;
-    const status = data?.Status || data?.status;
+if (!allowedCompanies.includes(companyKey)) {
+throw new Error("Invalid company: ${companyKey}");
+}
 
-    if (status?.toLowerCase() === "successful" || status?.toLowerCase() === "success") {
-      return data;
-    }
-    if (status?.toLowerCase() === "pending") {
-      return {...data, _pending: true };
-    }
+const networkId = Number(network_id);
+const planId = Number(api_plan_id);
 
-    throw new Error(data?.api_response || data?.message || "Maitama purchase failed");
-  } catch (err) {
-    if (err.response?.status === 403) { // FIX 2: Catch IP Block
-      throw new Error(`IP_BLOCKED: ${err.response.data?.message || 'IP not whitelisted'}`);
-    }
-    if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
-      throw new Error('TIMEOUT_FAILED'); // FIX 3: REFUND instead of hanging
-    }
-    throw err;
+if (!Number.isInteger(networkId) || ![1, 2, 3, 4].includes(networkId)) {
+throw new Error("Invalid Maitama network ID: ${network_id}");
+}
+
+if (!Number.isInteger(planId) || planId <= 0) {
+throw new Error("Invalid Maitama plan ID: ${api_plan_id}");
+}
+
+const formattedPhone = formatPhoneForMaitama(phone);
+
+if (!/^0\d{10}$/.test(formattedPhone)) {
+throw new Error("Invalid Nigerian phone number");
+}
+
+const payload = {
+company: companyKey,
+type: "data",
+phone: formattedPhone,
+network: networkId,
+plan_id: planId
+};
+
+console.log("MAITAMA DATA RELAY REQUEST:", {
+relayUrl,
+company: companyKey,
+payload
+});
+
+try {
+const response = await axios.post(
+relayUrl,
+payload,
+{
+headers: {
+Accept: "application/json",
+"Content-Type": "application/json",
+"x-relay-secret": relaySecret,
+"User-Agent": "MAYCONNECT-BACKEND/1.0"
+},
+timeout: 60000,
+validateStatus: () => true
+}
+);
+
+console.log("MAITAMA DATA RELAY RESPONSE:", {
+  status: response.status,
+  data: response.data
+});
+
+if (response.status < 200 || response.status >= 300) {
+  const message =
+    response.data?.message ||
+    response.data?.data?.message ||
+    response.data?.data?.api_response ||
+    `Relay returned HTTP ${response.status}`;
+
+  if (response.status === 401) {
+    throw new Error("MAITAMA_RELAY_UNAUTHORIZED");
   }
+
+  throw new Error(message);
+}
+
+const relayData = response.data?.data || response.data;
+
+// Maitama response is normally inside relayData.data
+const data = relayData?.data || relayData;
+
+const statusValue =
+  data?.Status ||
+  data?.status;
+
+const status = String(statusValue || "").toLowerCase();
+
+if (
+  status === "successful" ||
+  status === "success"
+) {
+  return data;
+}
+
+if (status === "pending") {
+  return {
+    ...data,
+    _pending: true
+  };
+}
+
+throw new Error(
+  data?.api_response ||
+  data?.message ||
+  "Maitama data purchase failed"
+);
+
+} catch (err) {
+console.error("MAITAMA DATA RELAY ERROR:", {
+company: companyKey,
+code: err.code,
+message: err.message,
+status: err.response?.status,
+response: err.response?.data
+});
+
+if (
+  err.code === "ECONNABORTED" ||
+  err.code === "ETIMEDOUT" ||
+  String(err.message).toLowerCase().includes("timeout")
+) {
+  throw new Error("TIMEOUT_FAILED");
+}
+
+throw err;
+
+}
 }
 
 // CHEAPDATAHUB DATA - KEPT
