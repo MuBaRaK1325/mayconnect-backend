@@ -3062,6 +3062,62 @@ app.get("/api/test-maitama-dns", async (req, res) => {
   }
 });
 
+app.get("/api/test-maitama-hostname", async (req, res) => {
+  const https = require("https");
+
+  const start = Date.now();
+
+  const request = https.request({
+    hostname: "app.maitamadatahub.com",
+    port: 443,
+    path: "/",
+    method: "GET",
+    servername: "app.maitamadatahub.com",
+    timeout: 15000,
+    headers: {
+      "User-Agent": "Mayconnect-Network-Test/1.0"
+    }
+  }, (response) => {
+    const elapsed = Date.now() - start;
+
+    res.json({
+      success: true,
+      stage: "HTTPS",
+      status: response.statusCode,
+      elapsed_ms: elapsed,
+      remote_address: response.socket.remoteAddress,
+      remote_port: response.socket.remotePort
+    });
+
+    response.resume();
+  });
+
+  request.on("timeout", () => {
+    request.destroy();
+    if (!res.headersSent) {
+      res.json({
+        success: false,
+        stage: "HTTPS",
+        code: "TIMEOUT",
+        message: "HTTPS connection to app.maitamadatahub.com:443 timed out"
+      });
+    }
+  });
+
+  request.on("error", (error) => {
+    if (!res.headersSent) {
+      res.json({
+        success: false,
+        stage: "HTTPS",
+        code: error.code || null,
+        message: error.message
+      });
+    }
+  });
+
+  request.end();
+});
+
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
