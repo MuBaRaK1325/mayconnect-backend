@@ -2804,87 +2804,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
     client.release();
   }
 });
-/* ================= BUY AIRTIME - Maitama: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL ================= */
-const MAITAMA_NETWORK_MAP = {
-  'mtn': 1,
-  'glo': 3, // FIXED: was airtel
-  '9mobile': 4,
-  '9m': 6,
-  'etisalat': 5,
-  'airtel': 2 // FIXED: was 2
-};
 
-function getMaitamaNetworkId(networkName) {
-  const net = String(networkName).toLowerCase().trim();
-  return MAITAMA_NETWORK_MAP[net] || null;
-}
-
-function formatPhoneForMaitama(phone) {
-  let p = String(phone).replace(/\D/g, '');
-  if (p.startsWith('234')) p = '0' + p.slice(3);
-  if (p.length === 10) p = '0' + p;
-  return p;
-}
-
-async function callMaitamaAirtime(phone, network, amount, company, uniqueRef = null) {
-  const { base_url, tokens } = VTU_PROVIDERS.maitama;
-  const api_token = tokens[company];
-  if (!api_token) throw new Error(`No Maitama token configured for ${company}`);
-
-  let networkId;
-  if (typeof network === 'string') {
-    networkId = getMaitamaNetworkId(network);
-    if (!networkId) throw new Error(`Invalid network: ${network}. Use: mtn, airtel, glo, 9mobile`);
-  } else {
-    networkId = Number(network);
-  }
-
-  if (![1, 2, 3, 4].includes(networkId)) {
-    throw new Error(`Invalid Maitama network_id: ${networkId}. Must be 1=MTN, 2=Glo, 3=9mobile, 4=Airtel`);
-  }
-
-  const amountNum = Number(amount);
-  if (amountNum < 50 || amountNum > 5000) {
-    throw new Error(`Amount must be between ₦50 and ₦5,000. Got: ₦${amountNum}`);
-  }
-
-  const formattedPhone = formatPhoneForMaitama(phone);
-  const payload = { network: networkId, amount: amountNum, mobile_number: formattedPhone };
-  let endpoint = uniqueRef? `${base_url}/api/topup/${uniqueRef}` : `${base_url}/api/topup`;
-
-  console.log(`MAITAMA AIRTIME REQUEST:`, { endpoint, payload, company });
-
-  try {
-    const res = await axios.post(endpoint, payload, {
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${api_token}`,
-        "User-Agent": "MUSTYKNK/1.0"
-      },
-      timeout: 180000, // 3 minutes
-    });
-
-    const data = res.data?.data || res.data;
-    const status = data?.Status;
-
-    if (status?.toLowerCase() === "successful" || status?.toLowerCase() === "success") {
-      return data;
-    }
-    if (status?.toLowerCase() === "pending") {
-      return {...data, _pending: true };
-    }
-    throw new Error(data?.api_response || data?.message || "Maitama airtime failed");
-  } catch (err) {
-    if (err.response?.status === 403) {
-      throw new Error(`IP_BLOCKED: ${err.response.data?.message}`);
-    }
-    if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
-      throw new Error('TIMEOUT_FAILED'); // REFUND
-    }
-    throw err;
-  }
-}
 
 app.get("/api/test-maitama", async (req, res) => {
   try {
@@ -3118,6 +3038,207 @@ app.get("/api/test-maitama-hostname", async (req, res) => {
   request.end();
 });
 
+/* ================= BUY AIRTIME - Maitama: 1=MTN, 2=GLO, 3=9MOBILE, 4=AIRTEL ================= */
+const MAITAMA_NETWORK_MAP = {
+  'mtn': 1,
+  'glo': 3, // FIXED: was airtel
+  '9mobile': 4,
+  '9m': 6,
+  'etisalat': 5,
+  'airtel': 2 // FIXED: was 2
+};
+
+function getMaitamaNetworkId(networkName) {
+  const net = String(networkName).toLowerCase().trim();
+  return MAITAMA_NETWORK_MAP[net] || null;
+}
+
+function formatPhoneForMaitama(phone) {
+  let p = String(phone).replace(/\D/g, '');
+  if (p.startsWith('234')) p = '0' + p.slice(3);
+  if (p.length === 10) p = '0' + p;
+  return p;
+}
+
+async function callMaitamaAirtime(
+phone,
+network,
+amount,
+company,
+uniqueRef = null
+) {
+const relayUrl =
+process.env.MAITAMA_RELAY_URL ||
+"https://mayconnect-maitama-test.vercel.app/api/maitama-relay";
+
+const relaySecret = process.env.MAITAMA_RELAY_SECRET;
+
+if (!relaySecret) {
+throw new Error("MAITAMA_RELAY_SECRET is not configured");
+}
+
+const companyKey = String(company || "").toLowerCase().trim();
+
+const allowedCompanies = [
+"mayconnect",
+"teeversh",
+"bnhabeeb",
+"sadeeq",
+"msdatasub"
+];
+
+if (!allowedCompanies.includes(companyKey)) {
+throw new Error("Invalid company: ${companyKey}");
+}
+
+const networkId = Number(network);
+
+if (![1, 2, 3, 4].includes(networkId)) {
+throw new Error("Invalid Maitama network ID: ${networkId}");
+}
+
+const amountNum = Number(amount);
+
+if (
+!Number.isFinite(amountNum) ||
+amountNum < 50 ||
+amountNum > 5000
+) {
+throw new Error(
+"Amount must be between ₦50 and ₦5,000. Got: ₦${amountNum}"
+);
+}
+
+let formattedPhone = String(phone).replace(/\D/g, "");
+
+if (formattedPhone.startsWith("234")) {
+formattedPhone = "0" + formattedPhone.slice(3);
+}
+
+if (formattedPhone.length === 10) {
+formattedPhone = "0" + formattedPhone;
+}
+
+if (!/^0\d{10}$/.test(formattedPhone)) {
+throw new Error("Invalid Nigerian phone number");
+}
+
+const payload = {
+company: companyKey,
+type: "airtime",
+phone: formattedPhone,
+network: networkId,
+amount: amountNum
+};
+
+if (uniqueRef) {
+payload.reference = uniqueRef;
+}
+
+console.log("MAITAMA AIRTIME RELAY REQUEST:", {
+relayUrl,
+company: companyKey,
+payload: {
+...payload
+}
+});
+
+try {
+const response = await axios.post(
+relayUrl,
+payload,
+{
+headers: {
+Accept: "application/json",
+"Content-Type": "application/json",
+"x-relay-secret": relaySecret,
+"User-Agent": "MAYCONNECT-BACKEND/1.0"
+},
+timeout: 180000,
+validateStatus: () => true
+}
+);
+
+console.log("MAITAMA AIRTIME RELAY RESPONSE:", {
+  status: response.status,
+  data: response.data
+});
+
+if (response.status < 200 || response.status >= 300) {
+  const message =
+    response.data?.message ||
+    response.data?.data?.message ||
+    response.data?.data?.api_response ||
+    `Relay returned HTTP ${response.status}`;
+
+  if (response.status === 401) {
+    throw new Error("MAITAMA_RELAY_UNAUTHORIZED");
+  }
+
+  if (response.status === 403) {
+    throw new Error(
+      response.data?.message ||
+      "Maitama rejected the request (403)"
+    );
+  }
+
+  throw new Error(message);
+}
+
+const data = response.data?.data || response.data;
+
+// Maitama response can be nested inside relay response
+const maitamaData = data?.data || data;
+
+const statusValue =
+  maitamaData?.Status ||
+  maitamaData?.status ||
+  maitamaData?.status_message;
+
+const status =
+  String(statusValue || "").toLowerCase();
+
+if (
+  status === "successful" ||
+  status === "success"
+) {
+  return maitamaData;
+}
+
+if (status === "pending") {
+  return {
+    ...maitamaData,
+    _pending: true
+  };
+}
+
+throw new Error(
+  maitamaData?.api_response ||
+  maitamaData?.message ||
+  "Maitama airtime request failed"
+);
+
+} catch (err) {
+console.error("MAITAMA AIRTIME RELAY ERROR:", {
+company: companyKey,
+code: err.code,
+message: err.message,
+status: err.response?.status,
+response: err.response?.data
+});
+
+if (
+  err.code === "ECONNABORTED" ||
+  err.code === "ETIMEDOUT" ||
+  String(err.message).toLowerCase().includes("timeout")
+) {
+  throw new Error("TIMEOUT_FAILED");
+}
+
+throw err;
+
+}
+}
 app.post("/api/buy-airtime", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
   try {
