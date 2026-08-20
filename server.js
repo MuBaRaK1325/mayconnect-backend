@@ -2828,19 +2828,169 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
       await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [finalBalance, user.id]);
     }
 
-    // ADMIN PROFIT ONLY ON SUCCESS
-    if (finalStatus === 'SUCCESS') {
-      const adminId = await getCompanyAdmin(user.company);
-      const profit = Number(priceNum) - Number(cost);
-      if (adminId && profit > 0) {
-        await client.query("UPDATE users SET admin_wallet = admin_wallet + $1::numeric, updated_at=NOW() WHERE id=$2", [profit, adminId]);
+// ================= ADMIN PROFIT + MAYCONNECT CASHBACK =================
+if (finalStatus === 'SUCCESS') {
+  const adminId = await getCompanyAdmin(user.company);
+
+  const grossProfit = Number(priceNum) - Number(cost);
+
+  let cashbackAmount = 0;
+  let cashbackEligible = false;
+  let cashbackCountToday = 0;
+
+  // ============================================================
+  // CASHBACK IS ONLY FOR MAYCONNECT
+  // ============================================================
+  const isMayconnect =
+    String(user.company || '').toLowerCase().trim() === 'mayconnect';
+
+  if (isMayconnect && grossProfit >= 50) {
+    // Lock the user row so wallet + cashback count are handled safely
+    const lockedUserRes = await client.query(
+      `SELECT wallet_balance
+       FROM users
+       WHERE id = $1
+       FOR UPDATE`,
+      [user.id]
+    );
+
+    if (lockedUserRes.rows.length) {
+      const currentWalletBalance =
+        Number(lockedUserRes.rows[0].wallet_balance);
+
+      // Count cashback credits already given TODAY
+      const cashbackCountRes = await client.query(
+        `SELECT COUNT(*)::integer AS count
+         FROM transactions
+         WHERE user_id = $1
+           AND LOWER(COALESCE(metadata->>'cashback_company', '')) = 'mayconnect'
+           AND COALESCE(metadata->>'cashback_credited', 'false') = 'true'
+           AND DATE(created_at AT TIME ZONE 'Africa/Lagos') =
+               DATE(NOW() AT TIME ZONE 'Africa/Lagos')`,
+        [user.id]
+      );
+
+      cashbackCountToday =
+        Number(cashbackCountRes.rows[0]?.count || 0);
+
+      // Maximum 5 cashback credits per day
+      if (cashbackCountToday < 5) {
+        cashbackAmount = 10;
+        cashbackEligible = true;
+
+        const cashbackBalanceAfter =
+          currentWalletBalance + cashbackAmount;
+
+        // Credit cashback directly to user's wallet
         await client.query(
-          `INSERT INTO profits(transaction_id,type,amount,reference,credited_to_user_id)
-           VALUES($1,'sale',$2::numeric,$3,$4)`,
-          [txId, profit, ref, adminId]
+          `UPDATE users
+           SET wallet_balance = $1::numeric,
+               updated_at = NOW()
+           WHERE id = $2`,
+          [cashbackBalanceAfter, user.id]
         );
+
+        // Update the balance returned to the frontend
+        finalBalance = cashbackBalanceAfter;
+
+        console.log('MAYCONNECT CASHBACK CREDITED:', {
+          user_id: user.id,
+          transaction_id: txId,
+          cashback: cashbackAmount,
+          cashback_count_today: cashbackCountToday + 1,
+          gross_profit: grossProfit,
+          net_profit: grossProfit - cashbackAmount
+        });
+      } else {
+        console.log('MAYCONNECT CASHBACK DAILY LIMIT REACHED:', {
+          user_id: user.id,
+          transaction_id: txId,
+          cashback_count_today: cashbackCountToday
+        });
       }
     }
+  }
+
+  // ============================================================
+  // ADMIN PROFIT
+  // Cashback is deducted from MAYCONNECT's profit.
+  // Other companies receive their normal full profit.
+  // ============================================================
+  const netProfit =
+    Math.max(0, grossProfit - cashbackAmount);
+
+  if (adminId && netProfit > 0) {
+    await client.query(
+      `UPDATE users
+       SET admin_wallet = admin_wallet + $1::numeric,
+           updated_at = NOW()
+       WHERE id = $2`,
+      [netProfit, adminId]
+    );
+
+    await client.query(
+      `INSERT INTO profits(
+        transaction_id,
+        type,
+        amount,
+        reference,
+        credited_to_user_id
+      )
+      VALUES($1, 'sale', $2::numeric, $3, $4)`,
+      [txId, netProfit, ref, adminId]
+    );
+  }
+
+  // ============================================================
+  // RECORD CASHBACK IN TRANSACTION METADATA
+  // ============================================================
+  if (cashbackEligible) {
+    await client.query(
+      `UPDATE transactions
+       SET metadata =
+         COALESCE(metadata, '{}'::jsonb)
+         ||
+         jsonb_build_object(
+           'cashback_credited', true,
+           'cashback_company', 'mayconnect',
+           'cashback_amount', $1::numeric,
+           'cashback_count_today', $2::integer,
+           'gross_profit', $3::numeric,
+           'net_profit', $4::numeric
+         )
+       WHERE id = $5`,
+      [
+        cashbackAmount,
+        cashbackCountToday + 1,
+        grossProfit,
+        netProfit,
+        txId
+      ]
+    );
+  } else {
+    // Explicitly record that this transaction did not receive cashback
+    await client.query(
+      `UPDATE transactions
+       SET metadata =
+         COALESCE(metadata, '{}'::jsonb)
+         ||
+         jsonb_build_object(
+           'cashback_credited', false,
+           'cashback_company', $1,
+           'cashback_amount', 0,
+           'gross_profit', $2::numeric,
+           'net_profit', $3::numeric
+         )
+       WHERE id = $4`,
+      [
+        String(user.company || '').toLowerCase().trim(),
+        grossProfit,
+        netProfit,
+        txId
+      ]
+    );
+  }
+}
 
     await client.query(`
       UPDATE transactions
