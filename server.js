@@ -2832,6 +2832,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
 if (finalStatus === 'SUCCESS') {
   const adminId = await getCompanyAdmin(user.company);
 
+  // Original transaction profit
   const grossProfit = Number(priceNum) - Number(cost);
 
   let cashbackAmount = 0;
@@ -2841,11 +2842,25 @@ if (finalStatus === 'SUCCESS') {
   // ============================================================
   // CASHBACK IS ONLY FOR MAYCONNECT
   // ============================================================
-  const isMayconnect =
-    String(user.company || '').toLowerCase().trim() === 'mayconnect';
+  const companyKey =
+    String(user.company || '').toLowerCase().trim();
 
+  const isMayconnect = companyKey === 'mayconnect';
+
+  // ============================================================
+  // MAYCONNECT CASHBACK
+  //
+  // Requirements:
+  // - Successful purchase only
+  // - MAYCONNECT only
+  // - Profit must be at least ₦50
+  // - ₦10 cashback
+  // - Maximum 5 cashback credits per day
+  // - Cashback goes into wallet
+  // ============================================================
   if (isMayconnect && grossProfit >= 50) {
-    // Lock the user row so wallet + cashback count are handled safely
+
+    // Lock the user row while calculating and crediting cashback.
     const lockedUserRes = await client.query(
       `SELECT wallet_balance
        FROM users
@@ -2854,11 +2869,12 @@ if (finalStatus === 'SUCCESS') {
       [user.id]
     );
 
-    if (lockedUserRes.rows.length) {
+    if (lockedUserRes.rows.length > 0) {
+
       const currentWalletBalance =
         Number(lockedUserRes.rows[0].wallet_balance);
 
-      // Count cashback credits already given TODAY
+      // Count ONLY successful MAYCONNECT cashback credits today.
       const cashbackCountRes = await client.query(
         `SELECT COUNT(*)::integer AS count
          FROM transactions
@@ -2873,59 +2889,81 @@ if (finalStatus === 'SUCCESS') {
       cashbackCountToday =
         Number(cashbackCountRes.rows[0]?.count || 0);
 
-      // Maximum 5 cashback credits per day
+      // ========================================================
+      // MAXIMUM 5 CASHBACKS PER DAY
+      // ========================================================
       if (cashbackCountToday < 5) {
+
         cashbackAmount = 10;
         cashbackEligible = true;
 
         const cashbackBalanceAfter =
           currentWalletBalance + cashbackAmount;
 
-        // Credit cashback directly to user's wallet
+        // Credit ₦10 cashback to the customer's wallet.
         await client.query(
           `UPDATE users
            SET wallet_balance = $1::numeric,
                updated_at = NOW()
            WHERE id = $2`,
-          [cashbackBalanceAfter, user.id]
+          [
+            cashbackBalanceAfter,
+            user.id
+          ]
         );
 
-        // Update the balance returned to the frontend
+        // The final balance must include cashback.
         finalBalance = cashbackBalanceAfter;
 
-        console.log('MAYCONNECT CASHBACK CREDITED:', {
-          user_id: user.id,
-          transaction_id: txId,
-          cashback: cashbackAmount,
-          cashback_count_today: cashbackCountToday + 1,
-          gross_profit: grossProfit,
-          net_profit: grossProfit - cashbackAmount
-        });
+        console.log(
+          'MAYCONNECT CASHBACK CREDITED:',
+          {
+            user_id: user.id,
+            transaction_id: txId,
+            cashback: cashbackAmount,
+            cashback_count_today: cashbackCountToday + 1,
+            gross_profit: grossProfit,
+            net_profit: grossProfit - cashbackAmount
+          }
+        );
+
       } else {
-        console.log('MAYCONNECT CASHBACK DAILY LIMIT REACHED:', {
-          user_id: user.id,
-          transaction_id: txId,
-          cashback_count_today: cashbackCountToday
-        });
+
+        console.log(
+          'MAYCONNECT CASHBACK DAILY LIMIT REACHED:',
+          {
+            user_id: user.id,
+            transaction_id: txId,
+            cashback_count_today: cashbackCountToday
+          }
+        );
       }
     }
   }
 
   // ============================================================
   // ADMIN PROFIT
-  // Cashback is deducted from MAYCONNECT's profit.
-  // Other companies receive their normal full profit.
+  //
+  // MAYCONNECT:
+  //   profit - cashback
+  //
+  // OTHER COMPANIES:
+  //   normal full profit
   // ============================================================
   const netProfit =
     Math.max(0, grossProfit - cashbackAmount);
 
   if (adminId && netProfit > 0) {
+
     await client.query(
       `UPDATE users
        SET admin_wallet = admin_wallet + $1::numeric,
            updated_at = NOW()
        WHERE id = $2`,
-      [netProfit, adminId]
+      [
+        netProfit,
+        adminId
+      ]
     );
 
     await client.query(
@@ -2936,15 +2974,27 @@ if (finalStatus === 'SUCCESS') {
         reference,
         credited_to_user_id
       )
-      VALUES($1, 'sale', $2::numeric, $3, $4)`,
-      [txId, netProfit, ref, adminId]
+      VALUES(
+        $1,
+        'sale',
+        $2::numeric,
+        $3,
+        $4
+      )`,
+      [
+        txId,
+        netProfit,
+        ref,
+        adminId
+      ]
     );
   }
 
   // ============================================================
-  // RECORD CASHBACK IN TRANSACTION METADATA
+  // RECORD CASHBACK INFORMATION IN TRANSACTION METADATA
   // ============================================================
   if (cashbackEligible) {
+
     await client.query(
       `UPDATE transactions
        SET metadata =
@@ -2967,8 +3017,10 @@ if (finalStatus === 'SUCCESS') {
         txId
       ]
     );
+
   } else {
-    // Explicitly record that this transaction did not receive cashback
+
+    // Record that this transaction did not receive cashback.
     await client.query(
       `UPDATE transactions
        SET metadata =
@@ -2983,7 +3035,7 @@ if (finalStatus === 'SUCCESS') {
          )
        WHERE id = $4`,
       [
-        String(user.company || '').toLowerCase().trim(),
+        companyKey,
         grossProfit,
         netProfit,
         txId
@@ -2992,16 +3044,32 @@ if (finalStatus === 'SUCCESS') {
   }
 }
 
-    await client.query(`
-      UPDATE transactions
-      SET status = $1, response_msg = $2, api_response = $3, updated_at = NOW(),
-          balance_after = $5::numeric
-      WHERE id = $4
-    `, [finalStatus, responseMsg, JSON.stringify(apiResponse), txId, Number(finalBalance)]);
+// ============================================================
+// FINAL TRANSACTION UPDATE
+// ============================================================
+await client.query(
+  `
+  UPDATE transactions
+  SET
+    status = $1,
+    response_msg = $2,
+    api_response = $3,
+    updated_at = NOW(),
+    balance_after = $5::numeric
+  WHERE id = $4
+  `,
+  [
+    finalStatus,
+    responseMsg,
+    JSON.stringify(apiResponse),
+    txId,
+    Number(finalBalance)
+  ]
+);
 
-    await client.query("COMMIT");
+await client.query("COMMIT");
 
-    sendWalletUpdate(user.id, finalBalance);
+sendWalletUpdate(user.id, finalBalance);
 
     // 4. RETURN RESPONSE
     if (finalStatus === 'FAILED') {
