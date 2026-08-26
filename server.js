@@ -3391,6 +3391,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
           ]
         );
 
+      }
       } else {
 
         await client.query(
@@ -3405,7 +3406,7 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
                'cashback_credited',
                false,
                'cashback_company',
-               $1,
+               $1::text,
                'cashback_amount',
                0,
                'gross_profit',
@@ -3422,7 +3423,6 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
           ]
         );
       }
-    }
 
     // ============================================================
     // FINAL TRANSACTION UPDATE
