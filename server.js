@@ -2667,452 +2667,868 @@ app.get("/api/plans", auth, async (req, res) => {
 /* ================= BUY DATA - Multi-provider + BIOMETRIC + DANMALAMA + JJDATASUB ================= */
 app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
   const client = await pool.connect();
+
   try {
     const { plan_id, phone, pin } = req.body;
 
-    if (!plan_id ||!phone) {
-      return res.status(400).json({ message: "plan_id and phone are required" });
+    if (!plan_id || !phone) {
+      return res.status(400).json({
+        message: "plan_id and phone are required"
+      });
     }
+
     if (!/^\d{10,15}$/.test(String(phone))) {
-      return res.status(400).json({ message: "Invalid phone number. Use 11 digits like 08101234567" });
+      return res.status(400).json({
+        message: "Invalid phone number. Use 11 digits like 08101234567"
+      });
     }
 
     await client.query("BEGIN");
-    const userRes = await client.query("SELECT * FROM users WHERE id=$1 FOR UPDATE", [req.user.id]);
+
+    const userRes = await client.query(
+      "SELECT * FROM users WHERE id=$1 FOR UPDATE",
+      [req.user.id]
+    );
+
     const user = userRes.rows[0];
+
     if (!user) {
       await client.query("ROLLBACK");
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({
+        message: "User not found"
+      });
     }
 
-    if (pin!== 'biometric_verified') {
+    // ================= BIOMETRIC / PIN =================
+
+    if (pin !== "biometric_verified") {
       if (!user.pin) {
         await client.query("ROLLBACK");
+
         return res.status(400).json({
           message: "Transaction PIN not set. Please set your PIN in Profile first.",
           needPin: true
         });
       }
-      const validPin = await bcrypt.compare(String(pin), String(user.pin));
+
+      const validPin = await bcrypt.compare(
+        String(pin),
+        String(user.pin)
+      );
+
       if (!validPin) {
         await client.query("ROLLBACK");
-        return res.status(400).json({ message: "Invalid PIN" });
-      }
-    }
 
-    const planRes = await client.query("SELECT * FROM plans WHERE id=$1 AND is_active=TRUE", [plan_id]);
-    if (!planRes.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Plan not found or inactive" });
-    }
-    const plan = planRes.rows[0];
-
-    if (plan.restricted && plan.company!== user.company) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ message: "Plan restricted to company users" });
-    }
-
-    if (!plan.provider) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "Plan not configured with provider. Contact admin." });
-    }
-
-    // Provider-specific validation
-    if (plan.provider === "subpadi") {
-      if (!plan.api_plan_id) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ message: "Plan not configured with product_id. Contact admin." });
-      }
-    } else {
-      if (!plan.api_plan_id || plan.network_id === null || plan.network_id === undefined) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ message: "Plan not configured with provider plan ID or network_id. Contact admin." });
-      }
-
-      const netId = Number(plan.network_id);
-      if (isNaN(netId) || netId < 1 || netId > 4) {
-        await client.query("ROLLBACK");
         return res.status(400).json({
-          message: `Invalid network_id: ${plan.network_id}. Must be numeric 1-4`
+          message: "Invalid PIN"
         });
       }
     }
 
-    const tierRes = await client.query("SELECT 1 FROM top_users WHERE id=$1", [user.id]);
+    // ================= LOAD PLAN =================
+
+    const planRes = await client.query(
+      "SELECT * FROM plans WHERE id=$1 AND is_active=TRUE",
+      [plan_id]
+    );
+
+    if (!planRes.rows.length) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        message: "Plan not found or inactive"
+      });
+    }
+
+    const plan = planRes.rows[0];
+
+    if (plan.restricted && plan.company !== user.company) {
+      await client.query("ROLLBACK");
+
+      return res.status(403).json({
+        message: "Plan restricted to company users"
+      });
+    }
+
+    if (!plan.provider) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        message: "Plan not configured with provider. Contact admin."
+      });
+    }
+
+    // ================= PROVIDER VALIDATION =================
+
+    if (plan.provider === "subpadi") {
+      if (!plan.api_plan_id) {
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+          message: "Plan not configured with product_id. Contact admin."
+        });
+      }
+    } else {
+      if (
+        !plan.api_plan_id ||
+        plan.network_id === null ||
+        plan.network_id === undefined
+      ) {
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+          message:
+            "Plan not configured with provider plan ID or network_id. Contact admin."
+        });
+      }
+
+      const netId = Number(plan.network_id);
+
+      if (isNaN(netId) || netId < 1 || netId > 4) {
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+          message:
+            `Invalid network_id: ${plan.network_id}. Must be numeric 1-4`
+        });
+      }
+    }
+
+    // ================= PRICE =================
+
+    const tierRes = await client.query(
+      "SELECT 1 FROM top_users WHERE id=$1",
+      [user.id]
+    );
+
     const isTopUser = tierRes.rows.length > 0;
-    const price = isTopUser? (plan.top_price || plan.price) : plan.price;
+
+    const price = isTopUser
+      ? (plan.top_price || plan.price)
+      : plan.price;
+
     const balanceNum = Number(user.wallet_balance);
     const priceNum = Number(price);
     const cost = Number(plan.cost);
 
     if (balanceNum < priceNum) {
       await client.query("ROLLBACK");
+
       return res.status(400).json({
-        message: `Insufficient balance. You have ₦${balanceNum.toFixed(2)}, this plan costs ₦${priceNum.toFixed(2)}`
+        message:
+          `Insufficient balance. You have ₦${balanceNum.toFixed(2)}, this plan costs ₦${priceNum.toFixed(2)}`
       });
     }
 
     const balanceBefore = Number(balanceNum);
-    const balanceAfterDeduct = Number(balanceBefore) - Number(priceNum); // DEDUCT FIRST
+
+    const balanceAfterDeduct =
+      Number(balanceBefore) - Number(priceNum);
+
     const ref = "DATA-" + uuidv4();
 
-    // 1. DEBIT WALLET FIRST + INSERT PENDING TRANSACTION
-    await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [balanceAfterDeduct, user.id]);
-
-    const txRes = await client.query(
-      `INSERT INTO transactions(user_id,plan_id,type,amount,cost,phone,network,reference,status,plan_name,provider,balance_before,balance_after)
-       VALUES($1,$2,'DATA',$3::numeric,$4::numeric,$5,$6,$7,'PENDING',$8,$9,$10::numeric,$11::numeric) RETURNING *`,
-      [user.id, plan.id, priceNum, cost, phone, plan.network, ref, plan.name, plan.provider, balanceBefore, balanceAfterDeduct]
-    );
-    const txId = txRes.rows[0].id;
-    await client.query("COMMIT");
-
-    // 2. CALL PROVIDER API - WAJEN TRANSACTION
-    let apiResponse = null;
-    let finalStatus = 'FAILED';
-    let responseMsg = 'Unknown error';
-
-    try {
-      if (plan.provider === "maitama") {
-        apiResponse = await callMaitamaData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else if (plan.provider === "cheapdatahub") {
-        apiResponse = await callCheapDataHubData(phone, plan.network_id, plan.api_plan_id);
-      } else if (plan.provider === "subpadi") {
-        apiResponse = await callSubPadiData(phone, plan.api_plan_id, user.company);
-      } else if (plan.provider === "arrahuz") {
-        apiResponse = await callArrahuzData(phone, plan.network_id, plan.api_plan_id, user.company);
-    } else if (plan.provider === "jjdatasub") {
-        apiResponse = await callJJDataSubData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else if (plan.provider === "alihsandatasub") {
-        apiResponse = await callAlihsanData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else {
-        throw new Error("Unknown provider");
-      }
-
-      // Check success
-      if (apiResponse.status === 'success' || apiResponse.code === 200 || apiResponse.Status?.toLowerCase() === 'successful') {
-        finalStatus = 'SUCCESS';
-        responseMsg = 'Transaction successful';
-      } else if (apiResponse.status === 'pending' || apiResponse.Status?.toLowerCase() === 'pending') {
-        finalStatus = 'PENDING';
-        responseMsg = 'Transaction pending. Will be delivered shortly.';
-      } else {
-        finalStatus = 'FAILED';
-        responseMsg = apiResponse.message || apiResponse.api_response || 'Provider rejected transaction';
-      }
-    } catch (vtuErr) {
-      finalStatus = 'FAILED';
-      responseMsg = vtuErr.response?.data?.message || vtuErr.response?.data?.api_response || vtuErr.message || 'API timeout';
-      apiResponse = vtuErr.response?.data || { error: vtuErr.message };
-
-      if (vtuErr.response?.data?.errors) {
-        const errs = vtuErr.response.data.errors;
-        if (errs.network) responseMsg = `Network error: ${errs.network[0]}`;
-        else if (errs.plan) responseMsg = `Plan error: ${errs.plan[0]}`;
-        else if (errs.mobile_number) responseMsg = `Phone error: ${errs.mobile_number[0]}`;
-      }
-
-      if (vtuErr.message === 'TIMEOUT_POSSIBLE_SUCCESS' || vtuErr.code === 'ECONNABORTED') {
-        finalStatus = 'PENDING';
-        responseMsg = 'Request submitted. Delivery pending.';
-      }
-    }
-
-    // 3. UPDATE TRANSACTION + HANDLE REFUND IF FAILED
-    await client.query("BEGIN");
-    let finalBalance = balanceAfterDeduct;
-
-    if (finalStatus === 'FAILED') {
-      // REFUND WALLET
-      finalBalance = Number(balanceBefore);
-      await client.query("UPDATE users SET wallet_balance=$1::numeric, updated_at=NOW() WHERE id=$2", [finalBalance, user.id]);
-    }
-
-// ================= ADMIN PROFIT + MAYCONNECT CASHBACK =================
-if (finalStatus === 'SUCCESS') {
-  const adminId = await getCompanyAdmin(user.company);
-
-  // Original transaction profit
-  const grossProfit = Number(priceNum) - Number(cost);
-
-  let cashbackAmount = 0;
-  let cashbackEligible = false;
-  let cashbackCountToday = 0;
-
-  // ============================================================
-  // CASHBACK IS ONLY FOR MAYCONNECT
-  // ============================================================
-  const companyKey =
-    String(user.company || '').toLowerCase().trim();
-
-  const isMayconnect = companyKey === 'mayconnect';
-
-  // ============================================================
-  // MAYCONNECT CASHBACK
-  //
-  // Requirements:
-  // - Successful purchase only
-  // - MAYCONNECT only
-  // - Profit must be at least ₦50
-  // - ₦10 cashback
-  // - Maximum 5 cashback credits per day
-  // - Cashback goes into wallet
-  // ============================================================
-  if (isMayconnect && grossProfit >= 50) {
-
-    // Lock the user row while calculating and crediting cashback.
-    const lockedUserRes = await client.query(
-      `SELECT wallet_balance
-       FROM users
-       WHERE id = $1
-       FOR UPDATE`,
-      [user.id]
-    );
-
-    if (lockedUserRes.rows.length > 0) {
-
-      const currentWalletBalance =
-        Number(lockedUserRes.rows[0].wallet_balance);
-
-      // Count ONLY successful MAYCONNECT cashback credits today.
-      const cashbackCountRes = await client.query(
-        `SELECT COUNT(*)::integer AS count
-         FROM transactions
-         WHERE user_id = $1
-           AND LOWER(COALESCE(metadata->>'cashback_company', '')) = 'mayconnect'
-           AND COALESCE(metadata->>'cashback_credited', 'false') = 'true'
-           AND DATE(created_at AT TIME ZONE 'Africa/Lagos') =
-               DATE(NOW() AT TIME ZONE 'Africa/Lagos')`,
-        [user.id]
-      );
-
-      cashbackCountToday =
-        Number(cashbackCountRes.rows[0]?.count || 0);
-
-      // ========================================================
-      // MAXIMUM 5 CASHBACKS PER DAY
-      // ========================================================
-      if (cashbackCountToday < 5) {
-
-        cashbackAmount = 10;
-        cashbackEligible = true;
-
-        const cashbackBalanceAfter =
-          currentWalletBalance + cashbackAmount;
-
-        // Credit ₦10 cashback to the customer's wallet.
-        await client.query(
-          `UPDATE users
-           SET wallet_balance = $1::numeric,
-               updated_at = NOW()
-           WHERE id = $2`,
-          [
-            cashbackBalanceAfter,
-            user.id
-          ]
-        );
-
-        // The final balance must include cashback.
-        finalBalance = cashbackBalanceAfter;
-
-        console.log(
-          'MAYCONNECT CASHBACK CREDITED:',
-          {
-            user_id: user.id,
-            transaction_id: txId,
-            cashback: cashbackAmount,
-            cashback_count_today: cashbackCountToday + 1,
-            gross_profit: grossProfit,
-            net_profit: grossProfit - cashbackAmount
-          }
-        );
-
-      } else {
-
-        console.log(
-          'MAYCONNECT CASHBACK DAILY LIMIT REACHED:',
-          {
-            user_id: user.id,
-            transaction_id: txId,
-            cashback_count_today: cashbackCountToday
-          }
-        );
-      }
-    }
-  }
-
-  // ============================================================
-  // ADMIN PROFIT
-  //
-  // MAYCONNECT:
-  //   profit - cashback
-  //
-  // OTHER COMPANIES:
-  //   normal full profit
-  // ============================================================
-  const netProfit =
-    Math.max(0, grossProfit - cashbackAmount);
-
-  if (adminId && netProfit > 0) {
+    // ============================================================
+    // 1. DEBIT WALLET + INSERT PENDING TRANSACTION
+    // ============================================================
 
     await client.query(
       `UPDATE users
-       SET admin_wallet = admin_wallet + $1::numeric,
-           updated_at = NOW()
-       WHERE id = $2`,
+       SET wallet_balance=$1::numeric,
+           updated_at=NOW()
+       WHERE id=$2`,
       [
-        netProfit,
-        adminId
+        balanceAfterDeduct,
+        user.id
       ]
     );
 
-    await client.query(
-      `INSERT INTO profits(
-        transaction_id,
+    const txRes = await client.query(
+      `INSERT INTO transactions(
+        user_id,
+        plan_id,
         type,
         amount,
+        cost,
+        phone,
+        network,
         reference,
-        credited_to_user_id
+        status,
+        plan_name,
+        provider,
+        balance_before,
+        balance_after
       )
       VALUES(
         $1,
-        'sale',
-        $2::numeric,
-        $3,
-        $4
-      )`,
+        $2,
+        'DATA',
+        $3::numeric,
+        $4::numeric,
+        $5,
+        $6,
+        $7,
+        'PENDING',
+        $8,
+        $9,
+        $10::numeric,
+        $11::numeric
+      )
+      RETURNING *`,
       [
-        txId,
-        netProfit,
+        user.id,
+        plan.id,
+        priceNum,
+        cost,
+        phone,
+        plan.network,
         ref,
-        adminId
+        plan.name,
+        plan.provider,
+        balanceBefore,
+        balanceAfterDeduct
       ]
     );
-  }
 
-  // ============================================================
-  // RECORD CASHBACK INFORMATION IN TRANSACTION METADATA
-  // ============================================================
-  if (cashbackEligible) {
+    const txId = txRes.rows[0].id;
+
+    await client.query("COMMIT");
+
+    // ============================================================
+    // 2. CALL PROVIDER API
+    // ============================================================
+
+    let apiResponse = null;
+    let finalStatus = "FAILED";
+    let responseMsg = "Unknown error";
+
+    try {
+
+      if (plan.provider === "maitama") {
+
+        apiResponse = await callMaitamaData(
+          phone,
+          plan.network_id,
+          plan.api_plan_id,
+          user.company
+        );
+
+      } else if (plan.provider === "cheapdatahub") {
+
+        apiResponse = await callCheapDataHubData(
+          phone,
+          plan.network_id,
+          plan.api_plan_id
+        );
+
+      } else if (plan.provider === "subpadi") {
+
+        apiResponse = await callSubPadiData(
+          phone,
+          plan.api_plan_id,
+          user.company
+        );
+
+      } else if (plan.provider === "arrahuz") {
+
+        apiResponse = await callArrahuzData(
+          phone,
+          plan.network_id,
+          plan.api_plan_id,
+          user.company
+        );
+
+      } else if (plan.provider === "jjdatasub") {
+
+        apiResponse = await callJJDataSubData(
+          phone,
+          plan.network_id,
+          plan.api_plan_id,
+          user.company
+        );
+
+      } else if (plan.provider === "alihsandatasub") {
+
+        apiResponse = await callAlihsanData(
+          phone,
+          plan.network_id,
+          plan.api_plan_id,
+          user.company
+        );
+
+      } else {
+
+        throw new Error("Unknown provider");
+      }
+
+      // ==========================================================
+      // NORMALIZE PROVIDER RESPONSE
+      // ==========================================================
+
+      const rawStatus =
+        apiResponse?.status ??
+        apiResponse?.Status ??
+        apiResponse?.data?.status ??
+        apiResponse?.data?.Status ??
+        apiResponse?.data?.data?.status ??
+        apiResponse?.data?.data?.Status ??
+        null;
+
+      const normalizedStatus =
+        String(rawStatus ?? "")
+          .trim()
+          .toLowerCase();
+
+      const providerCode =
+        apiResponse?.code ??
+        apiResponse?.status_code ??
+        apiResponse?.statusCode ??
+        apiResponse?.data?.code ??
+        apiResponse?.data?.status_code ??
+        apiResponse?.data?.statusCode ??
+        null;
+
+      const successFlag =
+        apiResponse?.success === true ||
+        apiResponse?.data?.success === true ||
+        apiResponse?.data?.data?.success === true;
+
+      const providerMessage =
+        apiResponse?.message ??
+        apiResponse?.msg ??
+        apiResponse?.response_msg ??
+        apiResponse?.data?.message ??
+        apiResponse?.data?.msg ??
+        apiResponse?.data?.response_msg ??
+        apiResponse?.api_response ??
+        "";
+
+      const normalizedMessage =
+        String(providerMessage)
+          .trim()
+          .toLowerCase();
+
+      // ==========================================================
+      // DEBUG INFORMATION
+      // ==========================================================
+
+      console.log("========== DATA PROVIDER STATUS ==========");
+      console.log({
+        company: user.company,
+        provider: plan.provider,
+        reference: ref,
+        rawStatus,
+        normalizedStatus,
+        providerCode,
+        successFlag,
+        providerMessage
+      });
+      console.log("RAW PROVIDER RESPONSE:", apiResponse);
+      console.log("==========================================");
+
+      // ==========================================================
+      // SUCCESS
+      // ==========================================================
+
+      const isSuccessful =
+        normalizedStatus === "success" ||
+        normalizedStatus === "successful" ||
+        normalizedStatus === "completed" ||
+        normalizedStatus === "complete" ||
+        normalizedStatus === "delivered" ||
+        providerCode === 200 ||
+        successFlag === true ||
+        (
+          normalizedStatus === "true" &&
+          (
+            normalizedMessage.includes("success") ||
+            normalizedMessage.includes("successful") ||
+            normalizedMessage.includes("delivered") ||
+            normalizedMessage.includes("completed")
+          )
+        );
+
+      // ==========================================================
+      // PENDING
+      // ==========================================================
+
+      const isPending =
+        normalizedStatus === "pending" ||
+        normalizedStatus === "processing" ||
+        normalizedStatus === "queued" ||
+        normalizedStatus === "initiated" ||
+        normalizedStatus === "in_progress";
+
+      if (isSuccessful) {
+
+        finalStatus = "SUCCESS";
+        responseMsg = "Transaction successful";
+
+      } else if (isPending) {
+
+        finalStatus = "PENDING";
+        responseMsg =
+          "Transaction pending. Will be delivered shortly.";
+
+      } else {
+
+        finalStatus = "FAILED";
+
+        responseMsg =
+          apiResponse?.message ||
+          apiResponse?.msg ||
+          apiResponse?.response_msg ||
+          apiResponse?.data?.message ||
+          apiResponse?.data?.msg ||
+          apiResponse?.data?.response_msg ||
+          apiResponse?.api_response ||
+          "Provider rejected transaction";
+      }
+
+    } catch (vtuErr) {
+
+      finalStatus = "FAILED";
+
+      responseMsg =
+        vtuErr.response?.data?.message ||
+        vtuErr.response?.data?.api_response ||
+        vtuErr.message ||
+        "API timeout";
+
+      apiResponse =
+        vtuErr.response?.data ||
+        {
+          error: vtuErr.message
+        };
+
+      if (vtuErr.response?.data?.errors) {
+
+        const errs = vtuErr.response.data.errors;
+
+        if (errs.network) {
+          responseMsg =
+            `Network error: ${errs.network[0]}`;
+
+        } else if (errs.plan) {
+          responseMsg =
+            `Plan error: ${errs.plan[0]}`;
+
+        } else if (errs.mobile_number) {
+          responseMsg =
+            `Phone error: ${errs.mobile_number[0]}`;
+        }
+      }
+
+      // Timeout may mean provider received the request.
+      if (
+        vtuErr.message === "TIMEOUT_POSSIBLE_SUCCESS" ||
+        vtuErr.code === "ECONNABORTED"
+      ) {
+
+        finalStatus = "PENDING";
+
+        responseMsg =
+          "Request submitted. Delivery pending.";
+      }
+    }
+
+    // ============================================================
+    // 3. UPDATE TRANSACTION + HANDLE REFUND
+    // ============================================================
+
+    await client.query("BEGIN");
+
+    let finalBalance =
+      balanceAfterDeduct;
+
+    // ============================================================
+    // REFUND ONLY IF ACTUALLY FAILED
+    // ============================================================
+
+    if (finalStatus === "FAILED") {
+
+      finalBalance =
+        Number(balanceBefore);
+
+      await client.query(
+        `UPDATE users
+         SET wallet_balance=$1::numeric,
+             updated_at=NOW()
+         WHERE id=$2`,
+        [
+          finalBalance,
+          user.id
+        ]
+      );
+    }
+
+    // ============================================================
+    // ADMIN PROFIT + MAYCONNECT CASHBACK
+    // ============================================================
+
+    if (finalStatus === "SUCCESS") {
+
+      const adminId =
+        await getCompanyAdmin(user.company);
+
+      // Original transaction profit
+      const grossProfit =
+        Number(priceNum) - Number(cost);
+
+      let cashbackAmount = 0;
+      let cashbackEligible = false;
+      let cashbackCountToday = 0;
+
+      // ==========================================================
+      // CASHBACK ONLY FOR MAYCONNECT
+      // ==========================================================
+
+      const companyKey =
+        String(user.company || "")
+          .toLowerCase()
+          .trim();
+
+      const isMayconnect =
+        companyKey === "mayconnect";
+
+      // ==========================================================
+      // MAYCONNECT CASHBACK
+      // ==========================================================
+
+      if (
+        isMayconnect &&
+        grossProfit >= 50
+      ) {
+
+        const lockedUserRes =
+          await client.query(
+            `SELECT wallet_balance
+             FROM users
+             WHERE id=$1
+             FOR UPDATE`,
+            [user.id]
+          );
+
+        if (lockedUserRes.rows.length > 0) {
+
+          const currentWalletBalance =
+            Number(
+              lockedUserRes.rows[0].wallet_balance
+            );
+
+          // Count cashback credits today
+          const cashbackCountRes =
+            await client.query(
+              `SELECT COUNT(*)::integer AS count
+               FROM transactions
+               WHERE user_id=$1
+                 AND LOWER(
+                   COALESCE(
+                     metadata->>'cashback_company',
+                     ''
+                   )
+                 )='mayconnect'
+                 AND COALESCE(
+                   metadata->>'cashback_credited',
+                   'false'
+                 )='true'
+                 AND DATE(
+                   created_at AT TIME ZONE 'Africa/Lagos'
+                 ) =
+                 DATE(
+                   NOW() AT TIME ZONE 'Africa/Lagos'
+                 )`,
+              [user.id]
+            );
+
+          cashbackCountToday =
+            Number(
+              cashbackCountRes.rows[0]?.count || 0
+            );
+
+          // Maximum 5 cashback credits per day
+          if (cashbackCountToday < 5) {
+
+            cashbackAmount = 10;
+            cashbackEligible = true;
+
+            const cashbackBalanceAfter =
+              currentWalletBalance +
+              cashbackAmount;
+
+            await client.query(
+              `UPDATE users
+               SET wallet_balance=$1::numeric,
+                   updated_at=NOW()
+               WHERE id=$2`,
+              [
+                cashbackBalanceAfter,
+                user.id
+              ]
+            );
+
+            finalBalance =
+              cashbackBalanceAfter;
+
+            console.log(
+              "MAYCONNECT CASHBACK CREDITED:",
+              {
+                user_id: user.id,
+                transaction_id: txId,
+                cashback: cashbackAmount,
+                cashback_count_today:
+                  cashbackCountToday + 1,
+                gross_profit: grossProfit,
+                net_profit:
+                  grossProfit - cashbackAmount
+              }
+            );
+
+          } else {
+
+            console.log(
+              "MAYCONNECT CASHBACK DAILY LIMIT REACHED:",
+              {
+                user_id: user.id,
+                transaction_id: txId,
+                cashback_count_today:
+                  cashbackCountToday
+              }
+            );
+          }
+        }
+      }
+
+      // ==========================================================
+      // ADMIN PROFIT
+      //
+      // Mayconnect = profit - cashback
+      // Others = full profit
+      // ==========================================================
+
+      const netProfit =
+        Math.max(
+          0,
+          grossProfit - cashbackAmount
+        );
+
+      if (
+        adminId &&
+        netProfit > 0
+      ) {
+
+        await client.query(
+          `UPDATE users
+           SET admin_wallet =
+                 admin_wallet +
+                 $1::numeric,
+               updated_at=NOW()
+           WHERE id=$2`,
+          [
+            netProfit,
+            adminId
+          ]
+        );
+
+        await client.query(
+          `INSERT INTO profits(
+            transaction_id,
+            type,
+            amount,
+            reference,
+            credited_to_user_id
+          )
+          VALUES(
+            $1,
+            'sale',
+            $2::numeric,
+            $3,
+            $4
+          )`,
+          [
+            txId,
+            netProfit,
+            ref,
+            adminId
+          ]
+        );
+      }
+
+      // ==========================================================
+      // RECORD CASHBACK METADATA
+      // ==========================================================
+
+      if (cashbackEligible) {
+
+        await client.query(
+          `UPDATE transactions
+           SET metadata =
+             COALESCE(
+               metadata,
+               '{}'::jsonb
+             )
+             ||
+             jsonb_build_object(
+               'cashback_credited',
+               true,
+               'cashback_company',
+               'mayconnect',
+               'cashback_amount',
+               $1::numeric,
+               'cashback_count_today',
+               $2::integer,
+               'gross_profit',
+               $3::numeric,
+               'net_profit',
+               $4::numeric
+             )
+           WHERE id=$5`,
+          [
+            cashbackAmount,
+            cashbackCountToday + 1,
+            grossProfit,
+            netProfit,
+            txId
+          ]
+        );
+
+      } else {
+
+        await client.query(
+          `UPDATE transactions
+           SET metadata =
+             COALESCE(
+               metadata,
+               '{}'::jsonb
+             )
+             ||
+             jsonb_build_object(
+               'cashback_credited',
+               false,
+               'cashback_company',
+               $1,
+               'cashback_amount',
+               0,
+               'gross_profit',
+               $2::numeric,
+               'net_profit',
+               $3::numeric
+             )
+           WHERE id=$4`,
+          [
+            companyKey,
+            grossProfit,
+            netProfit,
+            txId
+          ]
+        );
+      }
+    }
+
+    // ============================================================
+    // FINAL TRANSACTION UPDATE
+    // ============================================================
 
     await client.query(
-      `UPDATE transactions
-       SET metadata =
-         COALESCE(metadata, '{}'::jsonb)
-         ||
-         jsonb_build_object(
-           'cashback_credited', true,
-           'cashback_company', 'mayconnect',
-           'cashback_amount', $1::numeric,
-           'cashback_count_today', $2::integer,
-           'gross_profit', $3::numeric,
-           'net_profit', $4::numeric
-         )
-       WHERE id = $5`,
+      `
+      UPDATE transactions
+      SET
+        status=$1,
+        response_msg=$2,
+        api_response=$3,
+        updated_at=NOW(),
+        balance_after=$5::numeric
+      WHERE id=$4
+      `,
       [
-        cashbackAmount,
-        cashbackCountToday + 1,
-        grossProfit,
-        netProfit,
-        txId
+        finalStatus,
+        responseMsg,
+        JSON.stringify(apiResponse),
+        txId,
+        Number(finalBalance)
       ]
     );
 
-  } else {
+    await client.query("COMMIT");
 
-    // Record that this transaction did not receive cashback.
-    await client.query(
-      `UPDATE transactions
-       SET metadata =
-         COALESCE(metadata, '{}'::jsonb)
-         ||
-         jsonb_build_object(
-           'cashback_credited', false,
-           'cashback_company', $1,
-           'cashback_amount', 0,
-           'gross_profit', $2::numeric,
-           'net_profit', $3::numeric
-         )
-       WHERE id = $4`,
-      [
-        companyKey,
-        grossProfit,
-        netProfit,
-        txId
-      ]
+    sendWalletUpdate(
+      user.id,
+      finalBalance
     );
-  }
-}
 
-// ============================================================
-// FINAL TRANSACTION UPDATE
-// ============================================================
-await client.query(
-  `
-  UPDATE transactions
-  SET
-    status = $1,
-    response_msg = $2,
-    api_response = $3,
-    updated_at = NOW(),
-    balance_after = $5::numeric
-  WHERE id = $4
-  `,
-  [
-    finalStatus,
-    responseMsg,
-    JSON.stringify(apiResponse),
-    txId,
-    Number(finalBalance)
-  ]
-);
-
-await client.query("COMMIT");
-
-sendWalletUpdate(user.id, finalBalance);
-
+    // ============================================================
     // 4. RETURN RESPONSE
-    if (finalStatus === 'FAILED') {
+    // ============================================================
+
+    if (finalStatus === "FAILED") {
+
       return res.status(400).json({
         success: false,
         message: responseMsg,
         reference: ref,
-        status: 'FAILED',
-        balance_before: Number(balanceBefore),
-        balance_after: Number(finalBalance),
+        status: "FAILED",
+        balance_before:
+          Number(balanceBefore),
+        balance_after:
+          Number(finalBalance),
         phone: phone,
         network: plan.network,
         plan_name: plan.name,
         amount: Number(priceNum),
-        created_at: new Date().toISOString()
+        created_at:
+          new Date().toISOString()
       });
     }
 
-    await sendPushNotification(user.company, user.id, {
-      title: `${user.company.toUpperCase()} - Data Purchase`,
-      body: `Your ${plan.name} purchase for ${phone} was ${finalStatus.toLowerCase()}`,
-      url: '/dashboard.html'
-    });
+    await sendPushNotification(
+      user.company,
+      user.id,
+      {
+        title:
+          `${user.company.toUpperCase()} - Data Purchase`,
+        body:
+          `Your ${plan.name} purchase for ${phone} was ${finalStatus.toLowerCase()}`,
+        url: "/dashboard.html"
+      }
+    );
 
     res.json({
       success: true,
       reference: ref,
       status: finalStatus,
-      balance: Number(finalBalance),
-      balance_before: Number(balanceBefore),
-      balance_after: Number(finalBalance),
-      tier: isTopUser? 'top' : 'default',
+      balance:
+        Number(finalBalance),
+      balance_before:
+        Number(balanceBefore),
+      balance_after:
+        Number(finalBalance),
+      tier:
+        isTopUser ? "top" : "default",
       phone: phone,
       network: plan.network,
       plan_name: plan.name,
       amount: Number(priceNum),
-      created_at: new Date().toISOString()
+      created_at:
+        new Date().toISOString()
     });
+
   } catch (e) {
-    await client.query("ROLLBACK");
-    console.error("BUY DATA ERROR:", e);
-    res.status(500).json({ message: "Purchase failed. Try again later." });
+
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {}
+
+    console.error(
+      "BUY DATA ERROR:",
+      e
+    );
+
+    res.status(500).json({
+      message:
+        "Purchase failed. Try again later."
+    });
+
   } finally {
+
     client.release();
   }
 });
