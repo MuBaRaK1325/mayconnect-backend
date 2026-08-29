@@ -14,7 +14,10 @@ const rateLimit = require("express-rate-limit");
 const webpush = require("web-push");
 const session = require('express-session');
 const pgSession = require('connect-pg-simple')(session);
-
+const {
+  router: mayconnectBuyDataRouter,
+  configureMayconnectBuyData
+} = require("./mayconnectBuyData");
 const {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -4187,6 +4190,25 @@ app.delete("/admin/plans/:id", auth, adminOnly, async (req, res) => {
 app.get("/", (req, res) => {
   res.send("MAYCONNECT API Live");
 });
+
+configureMayconnectBuyData({
+  pool,
+  auth,
+  buyDataLimiter,
+
+  callMaitamaData,
+  callCheapDataHubData,
+  callSubPadiData,
+  callArrahuzData,
+  callJJDataSubData,
+  callAlihsanData,
+
+  getCompanyAdmin,
+  sendWalletUpdate,
+  sendPushNotification
+});
+
+app.use(mayconnectBuyDataRouter);
 
 /* ================= START ================= */
 server.listen(PORT, () => console.log(`Server running on ${PORT}`));
