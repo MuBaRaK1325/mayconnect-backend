@@ -15,7 +15,6 @@ const webpush = require("web-push");
 const session = require('express-session');
 const pgSession = require('connect-pg-simple')(session);
 const {
-  router: mayconnectBuyDataRouter,
   configureMayconnectBuyData
 } = require("./mayconnectBuyData");
 const {
@@ -4191,7 +4190,7 @@ app.get("/", (req, res) => {
   res.send("MAYCONNECT API Live");
 });
 
-configureMayconnectBuyData({
+const mayconnectBuyDataRouter = configureMayconnectBuyData({
   pool,
   auth,
   buyDataLimiter,
