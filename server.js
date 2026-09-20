@@ -4052,6 +4052,210 @@ app.put("/admin/users/:id", auth, adminOnly, async (req, res) => {
   }
 });
 
+/* ================= ADMIN: WALLET MANAGER ================= */
+
+app.post("/admin/wallet/adjust", auth, adminOnly, async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { user_id, action, amount, reason } = req.body;
+
+    // Validate action
+    if (!["credit", "debit"].includes(action)) {
+      return res.status(400).json({
+        message: "Action must be either credit or debit"
+      });
+    }
+
+    // Validate amount
+    const adjustmentAmount = Number(amount);
+
+    if (!Number.isFinite(adjustmentAmount) || adjustmentAmount <= 0) {
+      return res.status(400).json({
+        message: "Amount must be greater than ₦0"
+      });
+    }
+
+    if (adjustmentAmount > 100000000) {
+      return res.status(400).json({
+        message: "Amount is too large"
+      });
+    }
+
+    // Validate reason
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({
+        message: "Reason is required"
+      });
+    }
+
+    await client.query("BEGIN");
+
+    /*
+     * IMPORTANT:
+     * Company comes from the authenticated admin.
+     * We NEVER trust company from req.body.
+     */
+    const company = req.user.company;
+
+    // Find and lock the user belonging to this admin's company
+    const userResult = await client.query(
+      `SELECT id, username, email, wallet_balance, company
+       FROM users
+       WHERE id = $1
+         AND company = $2
+       FOR UPDATE`,
+      [user_id, company]
+    );
+
+    if (!userResult.rows.length) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        message: "User not found in your company"
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    const balanceBefore = Number(user.wallet_balance || 0);
+
+    let balanceAfter;
+
+    if (action === "credit") {
+      balanceAfter = balanceBefore + adjustmentAmount;
+    } else {
+      // Debit
+      if (balanceBefore < adjustmentAmount) {
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+          message: `Insufficient wallet balance. Current balance is ₦${balanceBefore.toFixed(2)}`
+        });
+      }
+
+      balanceAfter = balanceBefore - adjustmentAmount;
+    }
+
+    /*
+     * Update wallet balance
+     */
+    await client.query(
+      `UPDATE users
+       SET wallet_balance = $1,
+           updated_at = NOW()
+       WHERE id = $2
+         AND company = $3`,
+      [balanceAfter, user.id, company]
+    );
+
+    /*
+     * Generate unique admin adjustment reference
+     */
+    const reference =
+      `ADMIN-WALLET-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
+    /*
+     * Record audit transaction
+     *
+     * Uses the existing wallet_transactions table
+     * already used by your force-deduct/reversal routes.
+     */
+    await client.query(
+      `INSERT INTO wallet_transactions
+       (
+         company,
+         type,
+         amount,
+         balance_after,
+         reason,
+         admin_email,
+         reference,
+         metadata
+       )
+       VALUES
+       (
+         $1,
+         $2,
+         $3,
+         $4,
+         $5,
+         $6,
+         $7,
+         $8
+       )`,
+      [
+        company,
+        action,
+        adjustmentAmount,
+        balanceAfter,
+        String(reason).trim(),
+        req.user.email,
+        reference,
+        JSON.stringify({
+          wallet_adjustment: true,
+          action,
+          user_id: user.id,
+          username: user.username,
+          balance_before: balanceBefore,
+          balance_after: balanceAfter,
+          adjusted_by: req.user.email,
+          adjusted_at: new Date().toISOString()
+        })
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    /*
+     * Update connected user immediately
+     */
+    try {
+      sendWalletUpdate(user.id, balanceAfter);
+    } catch (walletUpdateError) {
+      console.error(
+        "Wallet WebSocket update error:",
+        walletUpdateError.message
+      );
+    }
+
+    return res.json({
+      success: true,
+      message:
+        action === "credit"
+          ? `Successfully topped up ₦${adjustmentAmount.toFixed(2)} for ${user.username}`
+          : `Successfully deducted ₦${adjustmentAmount.toFixed(2)} from ${user.username}`,
+
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        company: user.company
+      },
+
+      action,
+      amount: adjustmentAmount,
+      balance_before: balanceBefore,
+      balance_after: balanceAfter,
+      reference
+    });
+
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
+
+    console.error("Admin wallet adjustment error:", err);
+
+    return res.status(500).json({
+      message: "Failed to adjust wallet",
+      error: err.message
+    });
+
+  } finally {
+    client.release();
+  }
+});
 /* ================= ADMIN: PLANS MANAGER - 3 Tier Pricing ================= */
 app.get("/admin/plans", auth, adminOnly, async (req, res) => {
   try {
