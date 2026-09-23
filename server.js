@@ -363,6 +363,16 @@ const VTU_PROVIDERS = {
     }
   },
 
+  ayax: {
+  base_url: "https://api.ayaxapis.com/api/v1",
+  tokens: {
+    mayconnect: process.env.AYAX_TOKEN_MAYCONNECT,
+    teeversh: process.env.AYAX_TOKEN_TEEVERSH,
+    sadeeq: process.env.AYAX_TOKEN_SADEEQ,
+    bnhabeeb: process.env.AYAX_TOKEN_BNHABEEB,
+    MSDATASUB: process.env.AYAX_TOKEN_MSDATASUB
+  }
+},
  
 jjdatasub: {
     base_url: "https://jjdatasub.com/api",
@@ -1018,6 +1028,262 @@ async function callArrahuzData(phone, network_id, api_plan_id, company) {
   }
 
   return res.data || { status: "success", message: "Request sent to Arrahuz" };
+}
+
+/* ================= AYAX DATA PURCHASE ================= */
+
+async function callAyaxData(
+  phone,
+  networkName,
+  api_plan_id,
+  company
+) {
+  const {
+    base_url,
+    tokens
+  } = VTU_PROVIDERS.ayax;
+
+  if (!base_url) {
+    throw new Error("AYAX_BASE_URL is not configured");
+  }
+
+  const companyKey = String(company || "").toLowerCase().trim();
+
+  const token = tokens?.[companyKey];
+
+  if (!token) {
+    throw new Error(
+      `No Ayax token configured for ${companyKey}`
+    );
+  }
+
+  /* ================= AYAX NETWORK MAPPING ================= */
+
+  const networkId = getAyaxNetworkId(networkName);
+
+  if (!networkId) {
+    throw new Error(
+      `Invalid Ayax network: ${networkName}`
+    );
+  }
+
+  const planId = Number(api_plan_id);
+
+  if (!Number.isInteger(planId) || planId <= 0) {
+    throw new Error(
+      `Invalid Ayax plan_id: ${api_plan_id}`
+    );
+  }
+
+  /* ================= PHONE VALIDATION ================= */
+
+  const formattedPhone =
+    String(phone)
+      .replace(/\D/g, "")
+      .trim();
+
+  if (!/^0\d{10}$/.test(formattedPhone)) {
+    throw new Error(
+      "Invalid Nigerian phone number"
+    );
+  }
+
+  /* ================= UNIQUE AYAX REFERENCE ================= */
+
+  const reference =
+    "AYAX-DATA-" +
+    Date.now() +
+    "-" +
+    Math.random()
+      .toString(36)
+      .substring(2, 8)
+      .toUpperCase();
+
+  /* ================= AYAX REQUEST ================= */
+
+  const payload = {
+    network_id: String(networkId),
+    plan_id: String(planId),
+    phone: formattedPhone,
+    reference
+  };
+
+  console.log("AYAX DATA REQUEST:", {
+    company: companyKey,
+    network: networkName,
+    network_id: networkId,
+    plan_id: planId,
+    phone: formattedPhone,
+    reference
+  });
+
+  try {
+
+    const response = await axios.post(
+      `${base_url}/data/buy`,
+      payload,
+      {
+        headers: {
+          "x-api-key": token,
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+
+        timeout: 60000,
+
+        validateStatus: () => true
+      }
+    );
+
+    console.log("AYAX DATA RESPONSE:", {
+      company: companyKey,
+      http_status: response.status,
+      data: response.data
+    });
+
+    /* ================= HTTP ERROR ================= */
+
+    if (
+      response.status < 200 ||
+      response.status >= 300
+    ) {
+
+      const message =
+        response.data?.message ||
+        response.data?.error?.message ||
+        `Ayax returned HTTP ${response.status}`;
+
+      const error = new Error(message);
+
+      error.response = response;
+
+      throw error;
+    }
+
+    const data = response.data;
+
+    if (!data) {
+      throw new Error(
+        "Empty response from Ayax"
+      );
+    }
+
+    /* ================= AYAX STATUS ================= */
+
+    const status = String(
+      data.status ||
+      data.data?.status ||
+      ""
+    ).toLowerCase();
+
+    /* ================= SUCCESS ================= */
+
+    if (
+      status === "success" ||
+      status === "successful"
+    ) {
+
+      return {
+        ...data,
+
+        _ayax_reference: reference,
+
+        _status: "success"
+      };
+    }
+
+    /* ================= PENDING / PROCESSING ================= */
+
+    if (
+      status === "pending" ||
+      status === "processing"
+    ) {
+
+      return {
+        ...data,
+
+        _ayax_reference: reference,
+
+        _status: "pending"
+      };
+    }
+
+    /* ================= FAILED ================= */
+
+    throw new Error(
+      data.message ||
+      data.error?.message ||
+      data.data?.message ||
+      "Ayax data purchase failed"
+    );
+
+  } catch (err) {
+
+    console.error(
+      "AYAX DATA ERROR:",
+      {
+        company: companyKey,
+        code: err.code,
+        message: err.message,
+        status: err.response?.status,
+        response: err.response?.data
+      }
+    );
+
+    /* ================= TIMEOUT ================= */
+
+    if (
+      err.code === "ECONNABORTED" ||
+      err.code === "ETIMEDOUT" ||
+      String(err.message)
+        .toLowerCase()
+        .includes("timeout")
+    ) {
+
+      const timeoutError =
+        new Error(
+          "TIMEOUT_POSSIBLE_SUCCESS"
+        );
+
+      timeoutError.code =
+        "ECONNABORTED";
+
+      throw timeoutError;
+    }
+
+    throw err;
+  }
+}
+
+/* ================= AYAX NETWORK MAP ================= */
+/* Ayax: 1=MTN, 2=AIRTEL, 3=9MOBILE, 4=GLO */
+
+const AYAX_NETWORK_MAP_NAME_TO_ID = {
+  mtn: 1,
+  airtel: 2,
+  "9mobile": 3,
+  glo: 4
+};
+
+const AYAX_NETWORK_MAP_ID_TO_NAME = {
+  1: "mtn",
+  2: "airtel",
+  3: "9mobile",
+  4: "glo"
+};
+
+function getAyaxNetworkId(networkName) {
+  return (
+    AYAX_NETWORK_MAP_NAME_TO_ID[
+      String(networkName || "").toLowerCase().trim()
+    ] || null
+  );
+}
+
+function getAyaxNetworkName(networkId) {
+  const id = Number(networkId);
+
+  return AYAX_NETWORK_MAP_ID_TO_NAME[id] || null;
 }
 
 // ARRAHUZ AIRTIME
@@ -2787,7 +3053,15 @@ app.post("/api/buy-data", auth, buyDataLimiter, async (req, res) => {
         apiResponse = await callJJDataSubData(phone, plan.network_id, plan.api_plan_id, user.company);
       } else if (plan.provider === "alihsandatasub") {
         apiResponse = await callAlihsanData(phone, plan.network_id, plan.api_plan_id, user.company);
-      } else {
+       } else if (plan.provider === "ayax") {
+  apiResponse = await callAyaxData(
+    phone,
+    plan.network,
+    plan.api_plan_id,
+    user.company
+  );
+}
+       else {
         throw new Error("Unknown provider");
       }
 
